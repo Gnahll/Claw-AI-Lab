@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from researchclaw.llm.stream import stream_chat_completion
 from researchclaw.pipeline.claw_engine.tools.definitions import TOOL_SPECS
 from researchclaw.pipeline.claw_engine.tools.executor import ToolExecutor
 from researchclaw.pipeline.claw_engine.tools.permissions import SandboxPermissionPolicy
@@ -447,19 +448,14 @@ class AgentTurnLoop:
         if any(model.startswith(p) for p in ("o3", "o4", "gpt-5")):
             body[_tok_key] = 16384
 
-        payload = json.dumps(body).encode("utf-8")
         headers = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {cfg.api_key}",
         }
-
-        req = urllib.request.Request(url, data=payload, headers=headers)
         timeout = getattr(cfg, "timeout_sec", 600)
 
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-
-        return data
+        # Stream so long generations don't hit proxy idle timeouts (HTTP 524)
+        return stream_chat_completion(url, body, headers, timeout)
 
     def _parse_response(
         self, data: dict[str, Any],
