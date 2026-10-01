@@ -356,7 +356,7 @@ class IterativeRefineRuntime:
                 return float(final_val) < float(base_val)
             else:
                 return float(final_val) > float(base_val)
-        except (json.JSONDecodeError, TypeError, ValueError):
+        except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             return False
 
     @staticmethod
