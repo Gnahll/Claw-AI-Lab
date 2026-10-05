@@ -201,6 +201,17 @@ def _uid() -> str:
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
+def _open_append_log(log_path: Path, cmd: list[str]):
+    """Open a subprocess log in append mode so reruns keep earlier output.
+
+    Writes a timestamped separator first so each launch is easy to find.
+    """
+    log_file = open(log_path, "a", encoding="utf-8")
+    stamp = time.strftime("%Y-%m-%d %H:%M:%S %z")
+    log_file.write(f"\n===== [{stamp}] launch: {' '.join(map(str, cmd))} =====\n")
+    log_file.flush()
+    return log_file
+
 def _read_json(path: Path) -> dict | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -1214,7 +1225,7 @@ def launch_agent_for_task(state: BridgeState, agent: LobsterAgent, task: Task) -
         proc_env.pop("CUDA_VISIBLE_DEVICES", None)
 
         log_path = Path(task.run_dir) / f"agent_{agent.id}.log"
-        log_file = open(log_path, "w", encoding="utf-8")
+        log_file = _open_append_log(log_path, cmd)
         proc = subprocess.Popen(
             cmd, cwd=state.agent_package_dir,
             stdout=log_file, stderr=subprocess.STDOUT,
@@ -2153,7 +2164,7 @@ def _launch_idea_factory_run(state: BridgeState, agent: LobsterAgent, s7_only: b
 
     try:
         log_path = Path(run_dir) / f"agent_{agent.id}.log"
-        log_file = open(log_path, "w", encoding="utf-8")
+        log_file = _open_append_log(log_path, cmd)
         proc = subprocess.Popen(
             cmd, cwd=state.agent_package_dir,
             stdout=log_file, stderr=subprocess.STDOUT,
@@ -2322,7 +2333,7 @@ def _trigger_discussion(state: BridgeState, group: DiscussionGroup) -> list[dict
 
     try:
         log_path = Path(disc_dir) / "discussion.log"
-        log_file = open(log_path, "w", encoding="utf-8")
+        log_file = _open_append_log(log_path, cmd)
         proc = subprocess.Popen(
             cmd, cwd=state.agent_package_dir,
             stdout=log_file, stderr=subprocess.STDOUT,
@@ -2395,7 +2406,7 @@ def _trigger_cross_project_discussion(
 
     try:
         log_path = Path(disc_dir) / "discussion.log"
-        log_file = open(log_path, "w", encoding="utf-8")
+        log_file = _open_append_log(log_path, cmd)
         proc = subprocess.Popen(
             cmd, cwd=state.agent_package_dir,
             stdout=log_file, stderr=subprocess.STDOUT,
@@ -2451,7 +2462,7 @@ def _skip_discussion_proceed_s8(state: BridgeState, agent: LobsterAgent) -> list
 
     try:
         log_path = Path(agent.run_dir) / f"agent_{agent.id}_s8.log"
-        log_file = open(log_path, "w", encoding="utf-8")
+        log_file = _open_append_log(log_path, cmd)
         proc = subprocess.Popen(
             cmd, cwd=state.agent_package_dir,
             stdout=log_file, stderr=subprocess.STDOUT,
@@ -2622,7 +2633,7 @@ def _launch_s8_for_agent(state: BridgeState, agent: LobsterAgent, group: Discuss
 
     try:
         log_path = Path(agent.run_dir) / f"agent_{agent.id}_s8.log"
-        log_file = open(log_path, "w", encoding="utf-8")
+        log_file = _open_append_log(log_path, cmd)
         proc = subprocess.Popen(
             cmd, cwd=state.agent_package_dir,
             stdout=log_file, stderr=subprocess.STDOUT,

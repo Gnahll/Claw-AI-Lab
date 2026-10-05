@@ -82,6 +82,11 @@ IDEA_COUNT=0
 IDEA_TOPIC=""
 IDEA_CONFIG=""
 
+# 追加写日志，重启不清空旧日志；每次启动前写一行分隔头
+log_banner() {
+    echo -e "\n===== [$(date '+%Y-%m-%d %H:%M:%S %z')] start $1 =====" >> "$LOG/$1.log"
+}
+
 is_port_listening() {
     local port="$1"
     if command -v ss >/dev/null 2>&1; then
@@ -107,8 +112,9 @@ do_start() {
     if is_port_listening "$RESOURCE_MONITOR_PORT"; then
         echo -e "  ${Y}⏭ resource_monitor 已在运行 (port ${RESOURCE_MONITOR_PORT})${N}"
     else
+        log_banner resource_monitor
         nohup $PY -u "$BASE/backend/services/resource_monitor.py" --host 127.0.0.1 --port "$RESOURCE_MONITOR_PORT" \
-            > "$LOG/resource_monitor.log" 2>&1 &
+            >> "$LOG/resource_monitor.log" 2>&1 &
         echo $! > "$PIDF/resource_monitor.pid"
         sleep 1
         echo -e "  ${G}✅ resource_monitor (PID=$!)${N}"
@@ -118,6 +124,7 @@ do_start() {
     if is_port_listening "$AGENT_BRIDGE_PORT"; then
         echo -e "  ${Y}⏭ agent_bridge 已在运行 (port ${AGENT_BRIDGE_PORT})${N}"
     else
+        log_banner agent_bridge
         nohup $PY -u "$BASE/backend/services/agent_bridge.py" \
             --host 127.0.0.1 --port "$AGENT_BRIDGE_PORT" --python "$PY" \
             --agent-dir "$BASE/backend/agent" \
@@ -130,7 +137,7 @@ do_start() {
             ${IDEA_COUNT:+--idea-count $IDEA_COUNT} \
             ${IDEA_TOPIC:+--idea-topic "$IDEA_TOPIC"} \
             ${IDEA_CONFIG:+--idea-config "$IDEA_CONFIG"} \
-            > "$LOG/agent_bridge.log" 2>&1 &
+            >> "$LOG/agent_bridge.log" 2>&1 &
         echo $! > "$PIDF/agent_bridge.pid"
         sleep 1
         echo -e "  ${G}✅ agent_bridge (PID=$!)${N}"
@@ -140,10 +147,11 @@ do_start() {
     if is_port_listening "$FRONTEND_PORT"; then
         echo -e "  ${Y}⏭ frontend 已在运行 (port ${FRONTEND_PORT})${N}"
     else
+        log_banner frontend
         cd "$FE"
         nohup env RESOURCE_MONITOR_PORT="$RESOURCE_MONITOR_PORT" AGENT_BRIDGE_PORT="$AGENT_BRIDGE_PORT" \
             "$FE/node_modules/.bin/vite" --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort \
-            > "$LOG/frontend.log" 2>&1 &
+            >> "$LOG/frontend.log" 2>&1 &
         echo $! > "$PIDF/frontend.pid"
         sleep 2
         echo -e "  ${G}✅ frontend (PID=$!)${N}"
