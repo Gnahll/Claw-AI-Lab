@@ -191,6 +191,12 @@ def check_llm_connectivity(base_url: str) -> CheckResult:
                         detail=f"Reachable: {url}",
                     )
             except urllib.error.HTTPError as get_exc:
+                if get_exc.code == 401:
+                    return CheckResult(
+                        name="llm_connectivity",
+                        status="pass",
+                        detail=f"Reachable (authentication required): {url}",
+                    )
                 return CheckResult(
                     name="llm_connectivity",
                     status="fail",
@@ -219,6 +225,12 @@ def check_llm_connectivity(base_url: str) -> CheckResult:
                     fix="Verify endpoint URL and network connectivity",
                 )
 
+        if exc.code == 401:
+            return CheckResult(
+                name="llm_connectivity",
+                status="pass",
+                detail=f"Reachable (authentication required): {url}",
+            )
         return CheckResult(
             name="llm_connectivity",
             status="fail",

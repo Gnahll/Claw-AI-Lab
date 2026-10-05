@@ -261,12 +261,15 @@ def _init_intent_llm(state: "BridgeState") -> None:
             return
 
         from researchclaw.llm import resolve_provider_base_url
-        base_url = resolve_provider_base_url("openai-compatible", "")
+        base_url = resolve_provider_base_url(
+            "openai-compatible", os.environ.get("RESEARCHCLAW_BASE_URL", "")
+        )
+        model = os.environ.get("RESEARCHCLAW_MODEL", "gpt-4o")
         _intent_llm_client = LLMClient(LLMConfig(
             base_url=base_url,
             api_key=api_key,
-            primary_model="claude-opus-4-1-20250805",
-            fallback_models=["gpt-4o-mini"],
+            primary_model=model,
+            fallback_models=[],
             max_retries=1,
             timeout_sec=10,
         ))
@@ -3290,7 +3293,7 @@ async def main(args: argparse.Namespace):
 
     queued_tasks = sum(q.pending_count() for q in state.queues.values())
 
-    print(f"🦞 Agent Bridge v2 starting on ws://0.0.0.0:{args.port}")
+    print(f"🦞 Agent Bridge v2 starting on ws://{args.host}:{args.port}")
     print(f"   Agent package: {args.agent_dir}")
     print(f"   Runs base:     {args.runs_dir}")
     print(f"   Python:        {args.python}")
@@ -3366,7 +3369,7 @@ async def main(args: argparse.Namespace):
 
     handler = lambda ws: ws_handler(state, ws)
     async with websockets.serve(
-        handler, "0.0.0.0", args.port,
+        handler, args.host, args.port,
         process_request=_make_process_request(state),
         max_size=64 * 1024 * 1024,
     ):
@@ -3375,6 +3378,7 @@ async def main(args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Agent Bridge v2")
+    parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--interval", type=float, default=2.0)
     parser.add_argument("--python", default=sys.executable)

@@ -2,6 +2,9 @@
 logs/
 .pids/
 .runtime_ports
+.runtime/
+.venv/
+deploy/run.sh
 .vite/
 backend/runs/
 backup/

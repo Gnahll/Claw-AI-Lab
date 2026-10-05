@@ -138,6 +138,18 @@ def test_check_llm_connectivity_http_error() -> None:
     assert "503" in result.detail
 
 
+def test_check_llm_connectivity_auth_required() -> None:
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=urllib.error.HTTPError(
+            "https://api.example.com/v1/models", 401, "unauthorized", {}, None
+        ),
+    ):
+        result = health.check_llm_connectivity("https://api.example.com/v1")
+    assert result.status == "pass"
+    assert "authentication required" in result.detail
+
+
 def test_check_api_key_valid() -> None:
     with patch(
         "urllib.request.urlopen",

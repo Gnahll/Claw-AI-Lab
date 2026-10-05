@@ -3219,6 +3219,12 @@ def _execute_experiment_design(
     )
     plan: dict[str, Any] | None = None
 
+    # These paths are also needed by the no-LLM fallback below.
+    import os as _os_s9
+    _datasets_dir_s9 = getattr(config.experiment, "datasets_dir", "") or ""
+    _codebases_dir_s9 = getattr(config.experiment, "codebases_dir", "") or ""
+    _checkpoints_dir_s9 = getattr(config.experiment, "checkpoints_dir", "") or ""
+
     # ── Load reference paper full text (produced by S4) ───────────────────
     _reference_paper_text = _read_prior_artifact(run_dir, "reference_paper_text.md") or ""
     if _reference_paper_text:
@@ -3266,10 +3272,6 @@ def _execute_experiment_design(
         except (KeyError, Exception):  # noqa: BLE001
             _dg_block = ""
         # ── Inject project-specific local data paths into experiment design ──
-        import os as _os_s9
-        _datasets_dir_s9 = getattr(config.experiment, "datasets_dir", "") or ""
-        _codebases_dir_s9 = getattr(config.experiment, "codebases_dir", "") or ""
-        _checkpoints_dir_s9 = getattr(config.experiment, "checkpoints_dir", "") or ""
         _local_data_parts: list[str] = []
         if _datasets_dir_s9 and _os_s9.path.isdir(_datasets_dir_s9):
             _ds_items = [d for d in sorted(_os_s9.listdir(_datasets_dir_s9)) if not d.startswith(".")]

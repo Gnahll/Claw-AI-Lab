@@ -9,7 +9,7 @@ dependencies = [
     "arxiv>=2.1",
     "numpy>=1.24",
 ]
-readme = "../../README.md"
+readme = {text = "ResearchClaw autonomous research pipeline.", content-type = "text/plain"}
 license = {text = "MIT"}
 
 [project.optional-dependencies]

@@ -12,6 +12,16 @@ LOG="$BASE/logs"
 PIDF="$BASE/.pids"
 RUNTIME_PORTS="$BASE/.runtime_ports"
 
+# Load the server-local secrets and model settings for non-interactive starts.
+# Without this, retries after a restart lose RESEARCHCLAW_API_KEY and the
+# pipeline silently enters its no-LLM fallback path.
+if [ -f "$BASE/.env" ]; then
+    set -a
+    # shellcheck disable=SC1091
+    . "$BASE/.env"
+    set +a
+fi
+
 # Resolve python path: env PYTHON_PATH > config sandbox.python_path > system python3
 _cfg_py=""
 for _cfg in "$BASE/examples/config_template.yaml" "$BASE"/backend/runs/project_configs/*.yaml; do
@@ -41,6 +51,7 @@ fi
 RESOURCE_MONITOR_PORT="${RESOURCE_MONITOR_PORT:-8905}"
 AGENT_BRIDGE_PORT="${AGENT_BRIDGE_PORT:-8906}"
 FRONTEND_PORT="${FRONTEND_PORT:-5903}"
+DISCUSSION_MODELS="${DISCUSSION_MODELS:-${RESEARCHCLAW_MODEL:-gpt-4o}}"
 export RESOURCE_MONITOR_PORT AGENT_BRIDGE_PORT
 
 # API key is read from config yaml (llm.api_key) by agent_bridge at runtime.
@@ -50,6 +61,15 @@ export RESEARCHCLAW_API_KEY="${RESEARCHCLAW_API_KEY:-}"
 FNM_DIR="${FNM_DIR:-$HOME/.local/share/fnm}"
 export PATH="$FNM_DIR:$PATH"
 eval "$($FNM_DIR/fnm env 2>/dev/null)" 2>/dev/null
+
+# Keep the bundled Node runtime available in non-interactive shells too.
+# Without this, the Vite launcher shebang cannot resolve `node` after restart.
+for NODE_RUNTIME_DIR in "$BASE"/.runtime/node-v*/bin; do
+    if [ -x "$NODE_RUNTIME_DIR/node" ]; then
+        export PATH="$NODE_RUNTIME_DIR:$PATH"
+        break
+    fi
+done
 
 mkdir -p "$LOG" "$PIDF"
 
@@ -87,7 +107,7 @@ do_start() {
     if is_port_listening "$RESOURCE_MONITOR_PORT"; then
         echo -e "  ${Y}⏭ resource_monitor 已在运行 (port ${RESOURCE_MONITOR_PORT})${N}"
     else
-        nohup $PY -u "$BASE/backend/services/resource_monitor.py" --port "$RESOURCE_MONITOR_PORT" \
+        nohup $PY -u "$BASE/backend/services/resource_monitor.py" --host 127.0.0.1 --port "$RESOURCE_MONITOR_PORT" \
             > "$LOG/resource_monitor.log" 2>&1 &
         echo $! > "$PIDF/resource_monitor.pid"
         sleep 1
@@ -99,13 +119,13 @@ do_start() {
         echo -e "  ${Y}⏭ agent_bridge 已在运行 (port ${AGENT_BRIDGE_PORT})${N}"
     else
         nohup $PY -u "$BASE/backend/services/agent_bridge.py" \
-            --port "$AGENT_BRIDGE_PORT" --python "$PY" \
+            --host 127.0.0.1 --port "$AGENT_BRIDGE_PORT" --python "$PY" \
             --agent-dir "$BASE/backend/agent" \
             --runs-dir "$BASE/backend/runs" \
             --pool-idea 3 --pool-exp 2 --pool-code 3 --pool-exec 4 --pool-write 2 \
-            --total-gpus 8 --gpus-per-project 1 \
+            --total-gpus "${TOTAL_GPUS:-8}" --gpus-per-project 1 \
             --discussion-mode --discussion-rounds 2 \
-            --discussion-models "claude-sonnet-4-6,qwen3.5-plus" \
+            --discussion-models "$DISCUSSION_MODELS" \
             ${AUTO_LOOP:+--auto-loop} \
             ${IDEA_COUNT:+--idea-count $IDEA_COUNT} \
             ${IDEA_TOPIC:+--idea-topic "$IDEA_TOPIC"} \
@@ -122,7 +142,7 @@ do_start() {
     else
         cd "$FE"
         nohup env RESOURCE_MONITOR_PORT="$RESOURCE_MONITOR_PORT" AGENT_BRIDGE_PORT="$AGENT_BRIDGE_PORT" \
-            npx vite --host 0.0.0.0 --port "$FRONTEND_PORT" \
+            "$FE/node_modules/.bin/vite" --host 127.0.0.1 --port "$FRONTEND_PORT" --strictPort \
             > "$LOG/frontend.log" 2>&1 &
         echo $! > "$PIDF/frontend.pid"
         sleep 2
@@ -151,10 +171,6 @@ do_stop() {
             rm -f "$f"
             echo -e "  ${G}⏹ $svc (PID=$pid)${N}"
         fi
-    done
-    # Also kill by port in case PID file was stale
-    for port in "$FRONTEND_PORT" "$RESOURCE_MONITOR_PORT" "$AGENT_BRIDGE_PORT"; do
-        lsof -ti:$port 2>/dev/null | xargs -r kill -9 2>/dev/null
     done
     echo ""
 }

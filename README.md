@@ -171,6 +171,25 @@ sandbox:
   python_path: "/absolute/path/to/clawailab/bin/python"  # Get this path by running: conda activate clawailab && which python
 ```
 
+### SSH server one-command setup
+
+On a Linux SSH server, the following command installs the required user-level
+Python and Node runtimes, backend, frontend, ML dependencies, and runtime
+configuration. The only required inputs are the model name and API key. The
+script prompts for the key without echoing it or placing it in process arguments:
+
+```bash
+./deploy/install_server.sh MODEL
+```
+
+The script uses the standard endpoint for OpenAI, DeepSeek, and Anthropic model
+names. For another OpenAI-compatible provider, set `CLAW_LLM_BASE_URL` before
+running it (for example, `https://timicc.com/v1`). The key is stored in `.env`
+with mode `600`; it is read through `RESEARCHCLAW_API_KEY` and is not written
+into the YAML config. Use `./deploy/run.sh status` after installation.
+On a shared server, the UI and APIs bind to localhost. Use the port printed by
+the installer for SSH forwarding, then open the printed localhost URL.
+
 ### 3. Run
 
 ```bash
