@@ -281,9 +281,10 @@ class SelectorAgent(BaseAgent):
         # answer.  If it did answer, candidates it left out were judged
         # irrelevant to the topic (e.g. LLM fine-tuning benchmarks offered
         # for an image-forensics topic) and must not be added back.
-        llm_answered = any(
-            key in selection
-            for key in ("primary_benchmark", "secondary_benchmarks", "selected_baselines")
+        llm_answered = bool(
+            selection.get("primary_benchmark")
+            or selection.get("secondary_benchmarks")
+            or selection.get("selected_baselines")
         )
         if not llm_answered:
             if len(selected_bench) < self._min_bench and ranked_bench:
