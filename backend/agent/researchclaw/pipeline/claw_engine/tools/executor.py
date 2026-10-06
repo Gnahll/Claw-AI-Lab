@@ -14,7 +14,9 @@ import json
 import logging
 import os
 import re
+import signal
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 MAX_RESULT_CHARS = 16000
 MAX_BASH_RESULT_CHARS = 24000
+
+_HAS_PROCESS_GROUPS = hasattr(os, "killpg")
 
 
 class ToolExecutor:
@@ -46,6 +50,7 @@ class ToolExecutor:
         self.python_path = python_path
         self.call_count = 0
         self._snapshot_count = 0
+        self._process_groups: set[int] = set()
 
     def execute(self, name: str, input_data: dict[str, Any]) -> tuple[str, bool]:
         """Execute a tool call. Returns (result_string, is_error)."""
@@ -103,28 +108,75 @@ class ToolExecutor:
             env["CONDA_PREFIX"] = env_prefix
             env["VIRTUAL_ENV"] = env_prefix
 
+        # Use bash -c (not -lc) to avoid login shell resetting PATH.
+        # Each command gets its own process group so that anything it leaves
+        # running in the background can be terminated by cleanup_processes().
+        proc = subprocess.Popen(
+            ["bash", "-c", command],
+            cwd=str(self.workspace),
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=_HAS_PROCESS_GROUPS,
+        )
+        if _HAS_PROCESS_GROUPS:
+            self._process_groups.add(proc.pid)
         try:
-            # Use bash -c (not -lc) to avoid login shell resetting PATH
-            result = subprocess.run(
-                ["bash", "-c", command],
-                cwd=str(self.workspace),
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-            )
+            stdout, stderr = proc.communicate(timeout=timeout)
             output_parts = []
-            if result.stdout:
-                output_parts.append(result.stdout)
-            if result.stderr:
-                output_parts.append(f"[stderr]\n{result.stderr}")
-            if result.returncode != 0:
-                output_parts.append(f"[exit_code: {result.returncode}]")
+            if stdout:
+                output_parts.append(stdout)
+            if stderr:
+                output_parts.append(f"[stderr]\n{stderr}")
+            if proc.returncode != 0:
+                output_parts.append(f"[exit_code: {proc.returncode}]")
             output = "\n".join(output_parts) or "(no output)"
         except subprocess.TimeoutExpired:
+            self._signal_group(proc.pid, signal.SIGKILL)
+            proc.kill()
+            proc.communicate()
             output = f"Command timed out after {timeout}s: {command[:100]}"
 
         return self._truncate_bash(output)
+
+    def cleanup_processes(self, grace_sec: float = 5.0) -> int:
+        """Terminate processes still running from earlier bash calls.
+
+        Agents often start experiments in the background (``nohup ... &``)
+        and poll them; when the turn loop ends, those processes would
+        otherwise keep running and holding the GPU.  Returns the number of
+        process groups that were still alive.
+        """
+        alive = [pgid for pgid in self._process_groups if self._group_alive(pgid)]
+        self._process_groups.clear()
+        for pgid in alive:
+            self._signal_group(pgid, signal.SIGTERM)
+        deadline = time.monotonic() + grace_sec
+        remaining = alive
+        while remaining and time.monotonic() < deadline:
+            time.sleep(0.1)
+            remaining = [pgid for pgid in remaining if self._group_alive(pgid)]
+        for pgid in remaining:
+            self._signal_group(pgid, signal.SIGKILL)
+        return len(alive)
+
+    @staticmethod
+    def _group_alive(pgid: int) -> bool:
+        try:
+            os.killpg(pgid, 0)
+        except (ProcessLookupError, PermissionError):
+            return False
+        return True
+
+    @staticmethod
+    def _signal_group(pgid: int, sig: int) -> None:
+        if not _HAS_PROCESS_GROUPS:
+            return
+        try:
+            os.killpg(pgid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
 
     # ------------------------------------------------------------------
     # read_file — ported from claw-code runtime/src/file_ops.rs

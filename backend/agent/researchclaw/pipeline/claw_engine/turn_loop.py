@@ -221,6 +221,20 @@ class AgentTurnLoop:
         return self._workspace
 
     def run_turn(self, user_message: str) -> TurnResult:
+        try:
+            return self._run_turn(user_message)
+        finally:
+            # The stage is over once the loop returns; don't leave background
+            # jobs (e.g. a nohup'd experiment) running and holding the GPU.
+            stopped = self._executor.cleanup_processes()
+            if stopped:
+                self._session.log(
+                    "CLEANUP",
+                    f"Terminated {stopped} background process group(s) "
+                    "still running after the turn loop",
+                )
+
+    def _run_turn(self, user_message: str) -> TurnResult:
         t0 = time.monotonic()
         self._session.log("EXECUTE", "Turn loop started")
         self._messages.append({"role": "user", "content": user_message})
