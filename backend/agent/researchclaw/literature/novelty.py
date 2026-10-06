@@ -335,15 +335,21 @@ def check_novelty(
     }
 
 
+_MAX_QUERY_CHARS = 200
+
+
 def _build_novelty_queries(topic: str, hypotheses_text: str) -> list[str]:
     """Build targeted search queries from topic and hypotheses."""
-    queries = [topic]
+    # Topics can be multi-paragraph task briefs; arXiv rejects such long
+    # queries with HTTP 400, so search with the first line only.
+    topic_line = next((line.strip() for line in topic.splitlines() if line.strip()), "")
+    queries = [topic_line[:_MAX_QUERY_CHARS]] if topic_line else []
 
     # Extract hypothesis titles (## H1, ## H2, etc.)
     for match in re.finditer(r"^##\s+H\d+[:\s]*(.+)", hypotheses_text, re.MULTILINE):
         hyp_title = match.group(1).strip()
         if hyp_title and len(hyp_title) > 10:
-            queries.append(hyp_title[:200])
+            queries.append(hyp_title[:_MAX_QUERY_CHARS])
 
     # Extract key phrases from the hypotheses
     keywords = _extract_keywords(hypotheses_text)[:10]
