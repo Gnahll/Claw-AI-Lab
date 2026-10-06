@@ -13,7 +13,11 @@ from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.evolution import EvolutionStore, extract_lessons
 from researchclaw.knowledge.base import write_stage_to_kb
-from researchclaw.pipeline.executor import StageResult, execute_stage
+from researchclaw.pipeline.executor import (
+    StageResult,
+    _experiment_summary_path,
+    execute_stage,
+)
 from researchclaw.pipeline.stages import (
     DECISION_ROLLBACK,
     MAX_DECISION_PIVOTS,
@@ -719,9 +723,9 @@ def _version_rollback_stages(
 
 def _consecutive_empty_metrics(run_dir: Path, pivot_count: int) -> bool:
     """R6-4: Check if the current and previous REFINE cycles both produced empty metrics."""
-    # Check the most recent experiment_summary.json (stage-14) and its versioned predecessor
-    current = run_dir / "stage-14" / "experiment_summary.json"
-    prev = run_dir / f"stage-14_v{pivot_count}" / "experiment_summary.json"
+    # Check the most recent experiment_summary.json and its versioned predecessor
+    current = _experiment_summary_path(run_dir)
+    prev = _experiment_summary_path(run_dir, pivot_count)
     for path in (current, prev):
         if not path.exists():
             return False
@@ -751,10 +755,10 @@ def _check_experiment_quality(
     quality issues and the forced-PROCEED paper will likely be poor.
     """
     # Find most recent experiment summary
-    summary_path = run_dir / "stage-14" / "experiment_summary.json"
+    summary_path = _experiment_summary_path(run_dir)
     if not summary_path.exists():
         for v in range(pivot_count, 0, -1):
-            alt = run_dir / f"stage-14_v{v}" / "experiment_summary.json"
+            alt = _experiment_summary_path(run_dir, v)
             if alt.exists():
                 summary_path = alt
                 break
@@ -781,6 +785,14 @@ def _check_experiment_quality(
     # Look for ablation_warnings or condition comparison data
     ablation_warnings = data.get("ablation_warnings", [])
     conditions = data.get("conditions", data.get("condition_metrics", {}))
+    condition_summaries = data.get("condition_summaries")
+    if not conditions and isinstance(condition_summaries, dict):
+        # RESULT_ANALYSIS format: {condition: {"metrics": {...}, ...}}
+        conditions = {
+            name: summary.get("metrics", {})
+            for name, summary in condition_summaries.items()
+            if isinstance(summary, dict)
+        }
     if isinstance(conditions, dict) and len(conditions) >= 2:
         primary_values = []
         for cond_name, cond_data in conditions.items():

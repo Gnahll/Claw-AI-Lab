@@ -375,6 +375,24 @@ def _find_prior_file(run_dir: Path, filename: str) -> Path | None:
     return None
 
 
+def _experiment_summary_path(run_dir: Path, version: int | None = None) -> Path:
+    """Locate experiment_summary.json written by RESULT_ANALYSIS (stage 16).
+
+    ``version`` selects a rolled-back copy (``stage-16_v{version}``).  Older
+    run layouts kept the summary under stage-14, so that location is checked
+    as a fallback.  Returns the stage-16 path when nothing exists.
+    """
+    suffix = f"_v{version}" if version else ""
+    candidates = [
+        run_dir / f"stage-{int(Stage.RESULT_ANALYSIS):02d}{suffix}" / "experiment_summary.json",
+        run_dir / f"stage-{int(Stage.EXPERIMENT_RUN):02d}{suffix}" / "experiment_summary.json",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return candidates[0]
+
+
 def _load_hardware_profile(run_dir: Path) -> dict[str, Any] | None:
     """Load hardware_profile.json from a prior stage (usually stage-01)."""
     raw = _read_prior_artifact(run_dir, "hardware_profile.json")

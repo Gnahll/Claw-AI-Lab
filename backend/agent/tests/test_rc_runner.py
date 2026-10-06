@@ -832,3 +832,70 @@ def test_package_deliverables_called_after_pipeline(
     captured = capsys.readouterr()
     assert "Deliverables packaged" in captured.out
     assert (run_dir / "deliverables" / "manifest.json").exists()
+
+
+def _write_summary(run_dir: Path, stage_dir: str, data: dict[str, Any]) -> None:
+    path = run_dir / stage_dir
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "experiment_summary.json").write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_quality_gate_reads_summary_from_result_analysis_stage(run_dir: Path) -> None:
+    _write_summary(run_dir, "stage-16", {
+        "metrics_summary": {"macro_iou": {"mean": 0.59}},
+        "conditions": {"a": {"primary_metric": 0.1}, "b": {"primary_metric": 0.2}},
+    })
+
+    ok, message = rc_runner._check_experiment_quality(run_dir, pivot_count=0)
+
+    assert ok is True, message
+
+
+def test_quality_gate_runs_checks_on_stage16_summary(run_dir: Path) -> None:
+    _write_summary(run_dir, "stage-16", {
+        "conditions": {"a": {"primary_metric": 0.0}, "b": {"primary_metric": 0.0}},
+    })
+
+    ok, message = rc_runner._check_experiment_quality(run_dir, pivot_count=0)
+
+    assert ok is False
+    assert "identical primary_metric" in message
+
+
+def test_quality_gate_falls_back_to_legacy_stage14_summary(run_dir: Path) -> None:
+    _write_summary(run_dir, "stage-14", {"metrics_summary": {"accuracy": 0.9}})
+
+    ok, message = rc_runner._check_experiment_quality(run_dir, pivot_count=0)
+
+    assert ok is True, message
+
+
+def test_quality_gate_reports_missing_summary(run_dir: Path) -> None:
+    ok, message = rc_runner._check_experiment_quality(run_dir, pivot_count=0)
+
+    assert ok is False
+    assert "No experiment_summary.json found" in message
+
+
+def test_consecutive_empty_metrics_reads_stage16_versions(run_dir: Path) -> None:
+    empty = {"metrics_summary": {}, "best_run": {"metrics": {}}}
+    _write_summary(run_dir, "stage-16", empty)
+    _write_summary(run_dir, "stage-16_v1", empty)
+
+    assert rc_runner._consecutive_empty_metrics(run_dir, pivot_count=1) is True
+
+
+def test_quality_gate_checks_condition_summaries_format(run_dir: Path) -> None:
+    """RESULT_ANALYSIS stores per-condition metrics under condition_summaries."""
+    _write_summary(run_dir, "stage-16", {
+        "metrics_summary": {"macro_iou": {"mean": 0.59}},
+        "condition_summaries": {
+            "official": {"metrics": {"primary_metric": 0.0, "macro_iou": 0.61}},
+            "flip": {"metrics": {"primary_metric": 0.0, "macro_iou": 0.64}},
+        },
+    })
+
+    ok, message = rc_runner._check_experiment_quality(run_dir, pivot_count=0)
+
+    assert ok is False
+    assert "identical primary_metric" in message
