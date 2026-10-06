@@ -7,11 +7,17 @@ priorities to select the optimal combination of datasets and baselines.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from researchclaw.agents.base import AgentStepResult, BaseAgent
 
 logger = logging.getLogger(__name__)
+
+
+def _name_key(name: Any) -> str:
+    """Normalize a benchmark/baseline name for matching LLM output."""
+    return re.sub(r"[\W_]", "", str(name).lower()) or str(name)
 
 # Maximum dataset size (MB) by tier and network policy
 _SIZE_LIMITS: dict[str, int] = {
@@ -186,28 +192,41 @@ class SelectorAgent(BaseAgent):
         baselines: list[dict[str, Any]],
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
         """Resolve LLM-selected names back to full benchmark/baseline dicts."""
-        # Build name lookup
-        bench_map = {b["name"]: b for b in benchmarks}
-        base_map = {bl["name"]: bl for bl in baselines}
+        # Build name lookup (tolerant of case/punctuation, e.g. "CIFAR10")
+        bench_map = {_name_key(b["name"]): b for b in benchmarks}
+        base_map = {_name_key(bl["name"]): bl for bl in baselines}
+        unresolved: list[str] = []
 
         selected_bench: list[dict[str, Any]] = []
         primary = selection.get("primary_benchmark", "")
-        if primary and primary in bench_map:
-            entry = bench_map[primary]
+        if primary and _name_key(primary) in bench_map:
+            entry = bench_map[_name_key(primary)]
             entry["role"] = "primary"
             selected_bench.append(entry)
+        elif primary:
+            unresolved.append(primary)
 
         for name in selection.get("secondary_benchmarks", []):
-            if name in bench_map and name != primary:
-                entry = bench_map[name]
+            entry = bench_map.get(_name_key(name))
+            if entry is None:
+                unresolved.append(name)
+            elif entry not in selected_bench:
                 entry["role"] = "secondary"
                 selected_bench.append(entry)
 
         selected_base: list[dict[str, Any]] = []
         for name in selection.get("selected_baselines", []):
-            if name in base_map:
-                selected_base.append(base_map[name])
+            entry = base_map.get(_name_key(name))
+            if entry is None:
+                unresolved.append(name)
+            elif entry not in selected_base:
+                selected_base.append(entry)
 
+        if unresolved:
+            self.logger.warning(
+                "LLM selected names not among the candidates (dropped): %s",
+                unresolved,
+            )
         return selected_bench, selected_base
 
     # -- Main entry point --------------------------------------------------
@@ -258,21 +277,29 @@ class SelectorAgent(BaseAgent):
             selected_base = ranked_base[:self._min_base]
             selection = {}
 
-        # 4. Fallback: ensure minimums
-        if len(selected_bench) < self._min_bench and ranked_bench:
-            for b in ranked_bench:
-                if b not in selected_bench:
-                    b["role"] = "secondary"
-                    selected_bench.append(b)
-                if len(selected_bench) >= self._min_bench:
-                    break
+        # 4. Fallback: ensure minimums — only when the LLM gave no usable
+        # answer.  If it did answer, candidates it left out were judged
+        # irrelevant to the topic (e.g. LLM fine-tuning benchmarks offered
+        # for an image-forensics topic) and must not be added back.
+        llm_answered = any(
+            key in selection
+            for key in ("primary_benchmark", "secondary_benchmarks", "selected_baselines")
+        )
+        if not llm_answered:
+            if len(selected_bench) < self._min_bench and ranked_bench:
+                for b in ranked_bench:
+                    if b not in selected_bench:
+                        b["role"] = "secondary"
+                        selected_bench.append(b)
+                    if len(selected_bench) >= self._min_bench:
+                        break
 
-        if len(selected_base) < self._min_base and ranked_base:
-            for bl in ranked_base:
-                if bl not in selected_base:
-                    selected_base.append(bl)
-                if len(selected_base) >= self._min_base:
-                    break
+            if len(selected_base) < self._min_base and ranked_base:
+                for bl in ranked_base:
+                    if bl not in selected_base:
+                        selected_base.append(bl)
+                    if len(selected_base) >= self._min_base:
+                        break
 
         # 5. Collect required pip packages
         required_pip: list[str] = []

@@ -273,6 +273,64 @@ class TestSelector:
         assert len(result.data["selected_benchmarks"]) >= 1
         assert len(result.data["selected_baselines"]) >= 2
 
+    def test_llm_rejection_of_all_candidates_is_respected(self) -> None:
+        """Candidates the LLM declined must not be padded back in."""
+        from researchclaw.agents.benchmark_agent.selector import SelectorAgent
+        survey = {
+            "benchmarks": [
+                {"name": "Alpaca", "tier": 2, "size_mb": 25, "origin": "knowledge_base"},
+                {"name": "MMLU", "tier": 2, "size_mb": 200, "origin": "knowledge_base"},
+            ],
+            "baselines": [
+                {"name": "Full Fine-Tuning", "origin": "knowledge_base", "pip": []},
+                {"name": "LoRA", "origin": "knowledge_base", "pip": ["peft"]},
+            ],
+        }
+        llm = FakeLLM([json.dumps({
+            "primary_benchmark": "COVERAGE",
+            "secondary_benchmarks": [],
+            "selected_baselines": ["ManTra-Net", "CAT-Net"],
+            "rationale": "Alpaca/MMLU and LoRA do not fit image forgery localization",
+        })])
+        agent = SelectorAgent(llm, min_benchmarks=1, min_baselines=2)
+        result = agent.execute({"topic": "Image forgery localization", "survey": survey})
+
+        assert result.success
+        assert result.data["selected_benchmarks"] == []
+        assert result.data["selected_baselines"] == []
+        assert result.data["required_pip"] == []
+
+    def test_pads_to_minimum_when_llm_gives_no_selection(
+        self, benchmarks: list[dict], baselines: list[dict],
+    ) -> None:
+        from researchclaw.agents.benchmark_agent.selector import SelectorAgent
+        agent = SelectorAgent(FakeLLM(["not json"]), min_benchmarks=1, min_baselines=2)
+        result = agent.execute({
+            "topic": "Image Classification",
+            "survey": {"benchmarks": benchmarks, "baselines": baselines},
+        })
+
+        assert len(result.data["selected_benchmarks"]) >= 1
+        assert len(result.data["selected_baselines"]) >= 2
+
+    def test_resolves_names_ignoring_case_and_punctuation(
+        self, benchmarks: list[dict], baselines: list[dict],
+    ) -> None:
+        from researchclaw.agents.benchmark_agent.selector import SelectorAgent
+        llm = FakeLLM([json.dumps({
+            "primary_benchmark": "cifar10",
+            "secondary_benchmarks": [],
+            "selected_baselines": ["resnet18"],
+        })])
+        agent = SelectorAgent(llm, min_benchmarks=1, min_baselines=1)
+        result = agent.execute({
+            "topic": "Image Classification",
+            "survey": {"benchmarks": benchmarks, "baselines": baselines},
+        })
+
+        assert [b["name"] for b in result.data["selected_benchmarks"]] == ["CIFAR-10"]
+        assert [b["name"] for b in result.data["selected_baselines"]] == ["ResNet-18"]
+
 
 # ---------------------------------------------------------------------------
 # Acquirer tests
