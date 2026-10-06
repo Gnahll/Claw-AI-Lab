@@ -159,6 +159,19 @@ class TestBuildNoveltyQueries:
         assert len(queries) >= 1
         assert queries[0] == "Topic"
 
+    def test_multiline_topic_uses_first_line(self) -> None:
+        topic = (
+            "Co-Transformers 复现验证：生成可运行的图像篡改定位复现工程。\n\n"
+            "首先读取 /home/user/research-resources/codebases/CLAW_TASK.md。\n"
+            + "执行要求：保留原模型结构与算法。\n" * 40
+        )
+        queries = _build_novelty_queries(topic, "")
+        assert queries[0] == "Co-Transformers 复现验证：生成可运行的图像篡改定位复现工程。"
+
+    def test_long_topic_is_capped(self) -> None:
+        queries = _build_novelty_queries("x" * 800, "")
+        assert len(queries[0]) == 200
+
 
 # ---------------------------------------------------------------------------
 # _assess_novelty
