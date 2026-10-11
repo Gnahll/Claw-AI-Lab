@@ -114,6 +114,14 @@ class TestExtractLessons:
         assert lessons[0].severity == "error"
         assert "rate limited" in lessons[0].description
 
+    def test_lesson_uses_current_stage_name(self) -> None:
+        from researchclaw.pipeline.stages import Stage
+
+        results = [self._make_result(int(Stage.EXPERIMENT_RUN), "failed", error="no results")]
+        lessons = extract_lessons(results, run_id="test-run")
+        assert lessons[0].stage_name == "experiment_run"
+        assert lessons[0].description.startswith("Stage experiment_run failed")
+
     def test_extracts_lesson_from_blocked_stage(self) -> None:
         results = [self._make_result(5, "blocked_approval")]
         lessons = extract_lessons(results, run_id="test-run")
