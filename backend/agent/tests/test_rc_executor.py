@@ -1665,6 +1665,30 @@ class TestCollectRawExperimentMetrics:
         # "loss: 0.5" should appear only once (deduplicated)
         assert result.count("loss: 0.5") == 1
 
+    def test_reads_agentic_run_report_and_refine_results(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run"
+        runs_dir = run_dir / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_report.json").write_text(json.dumps({
+            "success": True,
+            "results": {"conditions": {"baseline": {"accuracy": 0.61}}},
+        }))
+        refine_dir = run_dir / "stage-15"
+        refine_dir.mkdir(parents=True)
+        (refine_dir / "refinement_log.json").write_text(json.dumps({"iterations": 3}))
+        (refine_dir / "results.json").write_text(json.dumps({
+            "primary_metric": 0.74,
+            "conditions": {"baseline": {"accuracy": 0.62}, "ours": {"accuracy": 0.74}},
+        }))
+        summary_dir = run_dir / "stage-16"
+        summary_dir.mkdir(parents=True)
+        (summary_dir / "experiment_summary.json").write_text(json.dumps({"total_runs": 8}))
+        result, has_parsed = rc_executor._collect_raw_experiment_metrics(run_dir)
+        assert has_parsed
+        assert "ours/accuracy: 0.74" in result
+        assert "baseline/accuracy: 0.62" in result
+        assert "8 run(s)" in result
+
 
 class TestCollectExperimentEvidence:
     """Tests for _collect_experiment_evidence() helper."""

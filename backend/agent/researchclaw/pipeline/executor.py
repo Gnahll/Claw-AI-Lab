@@ -5293,9 +5293,10 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
 
             run_count += 1
 
-            # Extract from parsed metrics (check both 'metrics' and 'key_metrics')
-            metrics = payload.get("metrics", {}) or payload.get("key_metrics", {})
-            if isinstance(metrics, dict) and metrics:
+            # Extract from parsed metrics ('metrics', 'key_metrics', or the
+            # agentic run_report.json 'results')
+            metrics = _run_payload_metrics(payload)
+            if metrics:
                 has_parsed_metrics = True
                 for k, v in metrics.items():
                     metric_lines.append(f"  {k}: {v}")
@@ -5323,15 +5324,26 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
                         except (ValueError, TypeError, IndexError):
                             pass
 
-    # R19-4 + R23-1: Collect metrics from refinement_log.json (Stage 13).
-    # If refinement has richer data than Stage 12 runs/, REPLACE Stage 12 data
-    # to avoid confusing the paper writer with conflicting sources.
+    # R19-4 + R23-1: Collect metrics from the ITERATIVE_REFINE stage.
+    # If refinement has richer data than EXPERIMENT_RUN runs/, REPLACE that
+    # data to avoid confusing the paper writer with conflicting sources.
     _refine_lines: list[str] = []
     _refine_run_count = 0
     # Scan ALL refinement logs across versions, pick the richest
     _best_refine_metrics: dict[str, Any] = {}
     _best_refine_stdout = ""
-    for _rl_path in sorted(run_dir.glob("stage-13*/refinement_log.json")):
+    _refine_glob = f"stage-{int(Stage.ITERATIVE_REFINE):02d}*"
+    # Agentic refinement copies the final harness output to results.json
+    for _res_path in sorted(run_dir.glob(f"{_refine_glob}/results.json")):
+        _res = _safe_json_loads(_res_path.read_text(encoding="utf-8"), None)
+        if isinstance(_res, dict):
+            _res_metrics = _run_payload_metrics(_res)
+            if _res_metrics:
+                has_parsed_metrics = True
+            if len(_res_metrics) > len(_best_refine_metrics):
+                _best_refine_metrics = _res_metrics
+                _best_refine_stdout = ""
+    for _rl_path in sorted(run_dir.glob(f"{_refine_glob}/refinement_log.json")):
         try:
             _rlog = json.loads(_rl_path.read_text(encoding="utf-8"))
             _best_ver = _rlog.get("best_version", "")
@@ -5382,6 +5394,13 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
 
     if not metric_lines:
         return "", has_parsed_metrics
+
+    # Agentic runs write one run_report.json for all conditions/seeds; the
+    # RESULT_ANALYSIS summary records the actual number of runs.
+    _exp_summary = _load_experiment_summary(run_dir)
+    _total_runs = _exp_summary.get("total_runs") if _exp_summary else None
+    if isinstance(_total_runs, int) and not isinstance(_total_runs, bool) and _total_runs > 0:
+        run_count = _total_runs
 
     # Deduplicate while preserving order
     seen: set[str] = set()
