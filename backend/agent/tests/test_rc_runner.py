@@ -599,23 +599,23 @@ def test_record_decision_history_appends(run_dir: Path) -> None:
 
 
 def _setup_stage_artifacts(run_dir: Path) -> None:
-    """Create typical stage-22 and stage-23 output files for testing."""
-    s22 = run_dir / "stage-22"
-    s22.mkdir(parents=True, exist_ok=True)
-    (s22 / "paper_final.md").write_text("# My Paper\nContent here.", encoding="utf-8")
-    (s22 / "paper.tex").write_text("\\documentclass{article}\n\\begin{document}\nHello\n\\end{document}", encoding="utf-8")
-    (s22 / "references.bib").write_text("@article{smith2024,\n  title={Test}\n}", encoding="utf-8")
-    code_dir = s22 / "code"
+    """Create typical EXPORT_PUBLISH and CITATION_VERIFY output files for testing."""
+    export_dir = run_dir / "stage-25"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    (export_dir / "paper_final.md").write_text("# My Paper\nContent here.", encoding="utf-8")
+    (export_dir / "paper.tex").write_text("\\documentclass{article}\n\\begin{document}\nHello\n\\end{document}", encoding="utf-8")
+    (export_dir / "references.bib").write_text("@article{smith2024,\n  title={Test}\n}", encoding="utf-8")
+    code_dir = export_dir / "code"
     code_dir.mkdir()
     (code_dir / "main.py").write_text("print('hello')", encoding="utf-8")
     (code_dir / "requirements.txt").write_text("numpy\n", encoding="utf-8")
     (code_dir / "README.md").write_text("# Code\n", encoding="utf-8")
 
-    s23 = run_dir / "stage-23"
-    s23.mkdir(parents=True, exist_ok=True)
-    (s23 / "paper_final_verified.md").write_text("# My Paper (verified)\nContent.", encoding="utf-8")
-    (s23 / "references_verified.bib").write_text("@article{smith2024,\n  title={Test}\n}", encoding="utf-8")
-    (s23 / "verification_report.json").write_text(
+    verify_dir = run_dir / "stage-26"
+    verify_dir.mkdir(parents=True, exist_ok=True)
+    (verify_dir / "paper_final_verified.md").write_text("# My Paper (verified)\nContent.", encoding="utf-8")
+    (verify_dir / "references_verified.bib").write_text("@article{smith2024,\n  title={Test}\n}", encoding="utf-8")
+    (verify_dir / "verification_report.json").write_text(
         json.dumps({"summary": {"total": 5, "verified": 4}}), encoding="utf-8"
     )
 
@@ -644,21 +644,21 @@ def test_package_deliverables_prefers_verified_versions(
     _setup_stage_artifacts(run_dir)
     rc_runner._package_deliverables(run_dir, "run-verified", rc_config)
     dest = run_dir / "deliverables"
-    # Should contain verified content (from stage 23), not base (from stage 22)
+    # Should contain verified content (CITATION_VERIFY), not base (EXPORT_PUBLISH)
     paper = (dest / "paper_final.md").read_text(encoding="utf-8")
     assert "verified" in paper
     bib = (dest / "references.bib").read_text(encoding="utf-8")
     assert "smith2024" in bib
 
 
-def test_package_deliverables_falls_back_to_stage22(
+def test_package_deliverables_falls_back_to_export_stage(
     run_dir: Path, rc_config: RCConfig
 ) -> None:
-    """When stage 23 outputs are missing, falls back to stage 22 versions."""
-    s22 = run_dir / "stage-22"
-    s22.mkdir(parents=True, exist_ok=True)
-    (s22 / "paper_final.md").write_text("# Base Paper", encoding="utf-8")
-    (s22 / "references.bib").write_text("@article{a,title={A}}", encoding="utf-8")
+    """When CITATION_VERIFY outputs are missing, falls back to EXPORT_PUBLISH versions."""
+    export_dir = run_dir / "stage-25"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    (export_dir / "paper_final.md").write_text("# Base Paper", encoding="utf-8")
+    (export_dir / "references.bib").write_text("@article{a,title={A}}", encoding="utf-8")
 
     dest = rc_runner._package_deliverables(run_dir, "run-fallback", rc_config)
     assert dest is not None
