@@ -1712,6 +1712,28 @@ class TestRunPayloadMetrics:
         assert rc_executor._run_payload_metrics(payload) == {}
 
 
+class TestCollectExperimentResults:
+    """Tests for _collect_experiment_results() with agentic outputs."""
+
+    def test_reads_run_report_and_refined_results(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run"
+        runs_dir = run_dir / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_report.json").write_text(json.dumps({
+            "success": True,
+            "results": {"conditions": {"gd": {"acc": 0.90}, "momentum": {"acc": 0.91}}},
+        }))
+        refine_dir = run_dir / "stage-15"
+        refine_dir.mkdir(parents=True)
+        (refine_dir / "results.json").write_text(json.dumps({
+            "conditions": {"gd": {"acc": 0.92}, "momentum": {"acc": 0.93}},
+        }))
+        result = rc_executor._collect_experiment_results(run_dir, metric_key="momentum/acc")
+        assert len(result["runs"]) == 2
+        assert result["metrics_summary"]["momentum/acc"]["max"] == 0.93
+        assert result["best_run"]["metrics"]["gd/acc"] == 0.92
+
+
 class TestCollectExperimentEvidence:
     """Tests for _collect_experiment_evidence() helper."""
 

@@ -922,6 +922,19 @@ def _collect_experiment_results(
                 # Simulated mode uses key_metrics
                 parsed["metrics"] = parsed.pop("key_metrics")
                 runs_data.append(parsed)
+            elif isinstance(parsed, dict):
+                # Agentic EXPERIMENT_RUN report (run_report.json)
+                _agentic_metrics = _run_payload_metrics(parsed)
+                if _agentic_metrics:
+                    runs_data.append({"metrics": _agentic_metrics, "source": run_file.name})
+
+    # Agentic ITERATIVE_REFINE copies the refined harness output to results.json
+    for _refined in sorted(run_dir.glob(f"stage-{int(Stage.ITERATIVE_REFINE):02d}*/results.json")):
+        _refined_payload = _safe_json_loads(_refined.read_text(encoding="utf-8"), {})
+        if isinstance(_refined_payload, dict):
+            _refined_metrics = _run_payload_metrics(_refined_payload)
+            if _refined_metrics:
+                runs_data.append({"metrics": _refined_metrics, "source": "refined_results.json"})
 
     # Fallback: synthesise runs_data from structured_results if it has summaries
     if not runs_data and isinstance(structured_results, dict):
