@@ -5229,39 +5229,60 @@ def _load_experiment_summary(run_dir: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+_MAX_PAYLOAD_METRICS = 200
+# Bookkeeping fields that appear next to metrics in results payloads
+_NON_METRIC_KEYS = frozenset({
+    "elapsed_sec", "elapsed_seconds", "training_steps", "seed", "seeds",
+    "images_per_condition", "iterations", "tool_calls", "gpu_id", "smoke_test",
+})
+
+
 def _run_payload_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     """Extract flat numeric metrics from a run JSON payload.
 
     Supports the legacy sandbox record (``metrics`` / ``key_metrics``), the
     agentic EXPERIMENT_RUN ``run_report.json`` (metrics nested under
-    ``results``) and a raw harness ``results.json`` (``primary_metric`` plus
-    per-condition dicts under ``conditions``).
+    ``results``) and a raw harness ``results.json``. Agent-written results
+    use free-form layouts (``conditions``, ``condition_scores``, per-seed
+    nesting, ...), so numeric leaves are flattened generically: top-level
+    scalars keep their name, and entries inside a top-level container drop
+    the container name, e.g. ``{"conditions": {"ours": {"acc": 0.7}}}``
+    becomes ``{"ours/acc": 0.7}``.
     """
     for key in ("metrics", "key_metrics"):
         value = payload.get(key)
         if isinstance(value, dict) and value:
             return value
 
-    results = payload.get("results")
-    if not isinstance(results, dict):
+    if "results" in payload or "has_results" in payload:
+        # run_report.json: only the nested results hold metrics
+        results = payload.get("results")
+        if not isinstance(results, dict):
+            return {}
+    else:
         results = payload
 
     def _is_num(v: Any) -> bool:
         return isinstance(v, (int, float)) and not isinstance(v, bool)
 
     flat: dict[str, Any] = {}
-    nested = results.get("metrics")
-    if isinstance(nested, dict):
-        flat.update({k: v for k, v in nested.items() if _is_num(v)})
-    if _is_num(results.get("primary_metric")):
-        flat["primary_metric"] = results["primary_metric"]
-    conditions = results.get("conditions")
-    if isinstance(conditions, dict):
-        for cond, cond_metrics in conditions.items():
-            if isinstance(cond_metrics, dict):
-                for k, v in cond_metrics.items():
-                    if _is_num(v):
-                        flat[f"{cond}/{k}"] = v
+
+    def _walk(node: dict[str, Any], prefix: str, depth: int) -> None:
+        for k, v in node.items():
+            if len(flat) >= _MAX_PAYLOAD_METRICS or k in _NON_METRIC_KEYS:
+                continue
+            path = f"{prefix}/{k}" if prefix else str(k)
+            if _is_num(v):
+                flat.setdefault(path, v)
+            elif isinstance(v, dict) and depth < 4:
+                _walk(v, path, depth + 1)
+
+    for k, v in results.items():
+        if _is_num(v) and k not in _NON_METRIC_KEYS:
+            flat[str(k)] = v
+    for v in results.values():
+        if isinstance(v, dict):
+            _walk(v, "", 1)
     return flat
 
 

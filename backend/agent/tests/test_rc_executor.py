@@ -1690,6 +1690,28 @@ class TestCollectRawExperimentMetrics:
         assert "8 run(s)" in result
 
 
+class TestRunPayloadMetrics:
+    """Tests for _run_payload_metrics() schema handling."""
+
+    def test_flattens_free_form_result_layouts(self) -> None:
+        payload = {
+            "primary_metric": 0.2,
+            "elapsed_seconds": 12.5,
+            "condition_scores": {"gd": 0.1, "momentum": 0.2},
+            "conditions": {"gd": {"seed_1": {"acc": 0.8}}},
+        }
+        assert rc_executor._run_payload_metrics(payload) == {
+            "primary_metric": 0.2,
+            "gd": 0.1,
+            "momentum": 0.2,
+            "gd/seed_1/acc": 0.8,
+        }
+
+    def test_failed_run_report_has_no_metrics(self) -> None:
+        payload = {"success": False, "has_results": False, "results": None, "elapsed_sec": 3.0}
+        assert rc_executor._run_payload_metrics(payload) == {}
+
+
 class TestCollectExperimentEvidence:
     """Tests for _collect_experiment_evidence() helper."""
 
