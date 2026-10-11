@@ -5222,6 +5222,49 @@ def _execute_paper_outline(
     )
 
 
+def _load_experiment_summary(run_dir: Path) -> dict[str, Any] | None:
+    """Load the latest experiment_summary.json written by RESULT_ANALYSIS."""
+    text = _read_prior_artifact(run_dir, "experiment_summary.json")
+    data = _safe_json_loads(text, None) if text else None
+    return data if isinstance(data, dict) else None
+
+
+def _run_payload_metrics(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract flat numeric metrics from a run JSON payload.
+
+    Supports the legacy sandbox record (``metrics`` / ``key_metrics``), the
+    agentic EXPERIMENT_RUN ``run_report.json`` (metrics nested under
+    ``results``) and a raw harness ``results.json`` (``primary_metric`` plus
+    per-condition dicts under ``conditions``).
+    """
+    for key in ("metrics", "key_metrics"):
+        value = payload.get(key)
+        if isinstance(value, dict) and value:
+            return value
+
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        results = payload
+
+    def _is_num(v: Any) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    flat: dict[str, Any] = {}
+    nested = results.get("metrics")
+    if isinstance(nested, dict):
+        flat.update({k: v for k, v in nested.items() if _is_num(v)})
+    if _is_num(results.get("primary_metric")):
+        flat["primary_metric"] = results["primary_metric"]
+    conditions = results.get("conditions")
+    if isinstance(conditions, dict):
+        for cond, cond_metrics in conditions.items():
+            if isinstance(cond_metrics, dict):
+                for k, v in cond_metrics.items():
+                    if _is_num(v):
+                        flat[f"{cond}/{k}"] = v
+    return flat
+
+
 def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
     """Collect raw experiment metric lines from stdout for paper writing.
 
@@ -7432,13 +7475,16 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
     """Collect actual experiment parameters and results for peer review."""
     evidence_parts: list[str] = []
 
-    # 1. Read experiment code to find actual trial count, methods used
-    exp_dir = _read_prior_artifact(run_dir, "experiment/")
-    if exp_dir and Path(exp_dir).is_dir():
-        main_py = Path(exp_dir) / "main.py"
-        if main_py.exists():
-            code = main_py.read_text(encoding="utf-8")
-            evidence_parts.append(f"### Actual Experiment Code (main.py)\n```python\n{code[:3000]}\n```")
+    # 1. Read experiment code to find actual trial count, methods used.
+    # Prefer the refined final code (ITERATIVE_REFINE) over the initial draft.
+    for _code_dir_name in ("experiment_final/", "experiment/"):
+        exp_dir = _read_prior_artifact(run_dir, _code_dir_name)
+        if exp_dir and Path(exp_dir).is_dir():
+            main_py = Path(exp_dir) / "main.py"
+            if main_py.exists():
+                code = main_py.read_text(encoding="utf-8")
+                evidence_parts.append(f"### Actual Experiment Code (main.py)\n```python\n{code[:3000]}\n```")
+                break
 
     # 2. Read sandbox run results (actual metrics, runtime, stderr)
     runs_text = _read_prior_artifact(run_dir, "runs/")
@@ -7446,11 +7492,16 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
         for run_file in sorted(Path(runs_text).glob("*.json"))[:5]:
             payload = _safe_json_loads(run_file.read_text(encoding="utf-8"), {})
             if isinstance(payload, dict):
+                metrics = _run_payload_metrics(payload)
                 summary = {
-                    "metrics": payload.get("metrics"),
+                    "metrics": dict(list(metrics.items())[:40]) or None,
                     "elapsed_sec": payload.get("elapsed_sec"),
                     "timed_out": payload.get("timed_out"),
                 }
+                # Agentic EXPERIMENT_RUN report (run_report.json)
+                for _key in ("success", "has_results"):
+                    if _key in payload:
+                        summary[_key] = payload[_key]
                 stderr = payload.get("stderr", "")
                 if stderr:
                     summary["stderr_excerpt"] = stderr[:500]
@@ -7463,28 +7514,61 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
     if refine_log_text:
         try:
             rlog = json.loads(refine_log_text)
+            _iters = rlog.get("iterations")
             summary = {
-                "iterations_executed": len(rlog.get("iterations", []) if isinstance(rlog.get("iterations"), list) else []),
+                # Legacy logs store a list of iterations; agentic logs store a count.
+                "iterations_executed": len(_iters) if isinstance(_iters, list) else _iters,
                 "converged": rlog.get("converged"),
                 "stop_reason": rlog.get("stop_reason"),
-                "best_metric": rlog.get("best_metric"),
+                "best_metric": rlog.get("best_metric", rlog.get("final_metric")),
             }
+            if "improved" in rlog:
+                summary["improved"] = rlog.get("improved")
+                summary["baseline_metric"] = rlog.get("baseline_metric")
             evidence_parts.append(
                 f"### Refinement Summary\n```json\n{json.dumps(summary, indent=2)}\n```"
             )
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # 4. Count actual number of experiment runs
+    # 4. Final aggregated results from RESULT_ANALYSIS — authoritative record
+    exp_summary = _load_experiment_summary(run_dir)
+    if exp_summary:
+        _summary_view: dict[str, Any] = {
+            k: exp_summary[k]
+            for k in ("total_runs", "primary_metric_definition", "direction", "metrics_summary", "best_run")
+            if k in exp_summary
+        }
+        _conds = exp_summary.get("condition_summaries")
+        if isinstance(_conds, dict):
+            _summary_view["conditions"] = {
+                c: v.get("metrics") for c, v in _conds.items() if isinstance(v, dict)
+            }
+        evidence_parts.append(
+            "### Result Analysis Summary (experiment_summary.json)\n"
+            f"```json\n{json.dumps(_summary_view, indent=2, ensure_ascii=False)[:4000]}\n```"
+        )
+
+    # 5. Count actual number of experiment runs
     actual_run_count = 0
-    for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
-        for rf in stage_subdir.glob("*.json"):
-            if rf.name != "results.json":
-                actual_run_count += 1
+    _total_runs = exp_summary.get("total_runs") if exp_summary else None
+    if isinstance(_total_runs, int) and not isinstance(_total_runs, bool) and _total_runs > 0:
+        actual_run_count = _total_runs
+    else:
+        for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
+            for rf in stage_subdir.glob("*.json"):
+                if rf.name != "results.json":
+                    actual_run_count += 1
     if actual_run_count > 0:
         evidence_parts.append(
             f"### Actual Trial Count\n"
-            f"**The experiment was executed {actual_run_count} time(s).** "
+            + (
+                f"**The analysed experiment comprises {actual_run_count} run(s) "
+                f"(per experiment_summary.json total_runs).** "
+                if actual_run_count == _total_runs
+                else f"**The experiment was executed {actual_run_count} time(s).** "
+            )
+            +
             f"If the paper claims a different number of trials, this is a CRITICAL discrepancy."
         )
 

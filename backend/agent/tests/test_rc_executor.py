@@ -1732,6 +1732,37 @@ class TestCollectExperimentEvidence:
         assert "1 time(s)" in result
         assert "CRITICAL" in result
 
+    def test_reads_agentic_run_report_and_summary(self, run_dir: Path) -> None:
+        results = {
+            "primary_metric": 0.1,
+            "conditions": {"baseline": {"accuracy": 0.61}, "ours": {"accuracy": 0.74}},
+        }
+        runs_dir = run_dir / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(json.dumps(results), encoding="utf-8")
+        (runs_dir / "run_report.json").write_text(
+            json.dumps({"success": True, "has_results": True, "results": results, "elapsed_sec": 12.0}),
+            encoding="utf-8",
+        )
+        refine_dir = run_dir / "stage-15"
+        refine_dir.mkdir(parents=True, exist_ok=True)
+        (refine_dir / "refinement_log.json").write_text(
+            json.dumps({"iterations": 4, "improved": True, "baseline_metric": 0.2, "final_metric": 0.1}),
+            encoding="utf-8",
+        )
+        analysis_dir = run_dir / "stage-16"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        (analysis_dir / "experiment_summary.json").write_text(
+            json.dumps({"total_runs": 6, "condition_summaries": {"ours": {"metrics": {"accuracy": 0.74}}}}),
+            encoding="utf-8",
+        )
+        result = rc_executor._collect_experiment_evidence(run_dir)
+        assert '"metrics": null' not in result
+        assert '"ours/accuracy": 0.74' in result
+        assert '"iterations_executed": 4' in result
+        assert "experiment_summary.json" in result
+        assert "comprises 6 run(s)" in result
+
 
 class TestWritePaperSections:
     """Tests for _write_paper_sections() multi-call writing."""
