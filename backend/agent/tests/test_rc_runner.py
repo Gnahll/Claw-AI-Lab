@@ -899,3 +899,13 @@ def test_quality_gate_checks_condition_summaries_format(run_dir: Path) -> None:
 
     assert ok is False
     assert "identical primary_metric" in message
+
+
+def test_read_quality_score_reads_quality_gate_stage(run_dir: Path) -> None:
+    gate_dir = run_dir / f"stage-{int(Stage.QUALITY_GATE):02d}"
+    gate_dir.mkdir(parents=True, exist_ok=True)
+    (gate_dir / "quality_report.json").write_text(
+        json.dumps({"score_1_to_10": 7.5}), encoding="utf-8"
+    )
+
+    assert rc_runner._read_quality_score(run_dir) == 7.5

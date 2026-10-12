@@ -871,7 +871,7 @@ logger = logging.getLogger(__name__)
 
 def _read_quality_score(run_dir: Path) -> float | None:
     """Extract quality score from the most recent quality_report.json."""
-    report_path = run_dir / "stage-20" / "quality_report.json"
+    report_path = _stage_dir(run_dir, Stage.QUALITY_GATE) / "quality_report.json"
     if not report_path.exists():
         return None
     try:
@@ -968,7 +968,7 @@ def execute_iterative_pipeline(
 
         # Write iteration context with feedback from reviews
         reviews_text = ""
-        reviews_path = run_dir / "stage-18" / "reviews.md"
+        reviews_path = _stage_dir(run_dir, Stage.PEER_REVIEW) / "reviews.md"
         if reviews_path.exists():
             reviews_text = reviews_path.read_text(encoding="utf-8")
         _write_iteration_context(run_dir, iteration, reviews_text, score)
