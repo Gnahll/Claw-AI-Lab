@@ -143,6 +143,10 @@ def resume_from_checkpoint(
     return next_stage if next_stage is not None else default_stage
 
 
+def _stage_dir(run_dir: Path, stage: Stage) -> Path:
+    return run_dir / f"stage-{int(stage):02d}"
+
+
 def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
     """Collect content authenticity metrics from stage outputs."""
     metrics: dict[str, object] = {
@@ -155,7 +159,7 @@ def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
     if run_dir is None:
         return metrics
 
-    draft_path = run_dir / "stage-17" / "paper_draft.md"
+    draft_path = _stage_dir(run_dir, Stage.PAPER_DRAFT) / "paper_draft.md"
     if draft_path.exists():
         try:
             quality_module = importlib.import_module("researchclaw.quality")
@@ -172,7 +176,7 @@ def _collect_content_metrics(run_dir: Path | None) -> dict[str, object]:
         ):
             pass
 
-    verify_path = run_dir / "stage-23" / "verification_report.json"
+    verify_path = _stage_dir(run_dir, Stage.CITATION_VERIFY) / "verification_report.json"
     if verify_path.exists():
         try:
             vdata = json.loads(verify_path.read_text(encoding="utf-8"))
@@ -428,15 +432,17 @@ def _package_deliverables(
     """
     dest = run_dir / "deliverables"
     dest.mkdir(parents=True, exist_ok=True)
+    export_dir = _stage_dir(run_dir, Stage.EXPORT_PUBLISH)
+    verify_dir = _stage_dir(run_dir, Stage.CITATION_VERIFY)
 
     packaged: list[str] = []
 
     # --- 1. Final paper (Markdown) ---
-    # Prefer verified version (stage 23) over base version (stage 22)
+    # Prefer verified version (CITATION_VERIFY) over base version (EXPORT_PUBLISH)
     paper_md = None
     for candidate in [
-        run_dir / "stage-23" / "paper_final_verified.md",
-        run_dir / "stage-22" / "paper_final.md",
+        verify_dir / "paper_final_verified.md",
+        export_dir / "paper_final.md",
     ]:
         if candidate.exists() and candidate.stat().st_size > 0:
             paper_md = candidate
@@ -446,11 +452,11 @@ def _package_deliverables(
         packaged.append("paper_final.md")
 
     # --- 2. LaTeX paper ---
-    # IMP-13: If Stage 23 produced verified markdown, regenerate paper.tex
-    # from it so that hallucinated citations removed in Stage 23 are also
-    # absent from the LaTeX.  Fall back to the Stage 22 .tex otherwise.
+    # IMP-13: If CITATION_VERIFY produced verified markdown, regenerate
+    # paper.tex from it so that hallucinated citations removed there are also
+    # absent from the LaTeX.  Fall back to the EXPORT_PUBLISH .tex otherwise.
     tex_regenerated = False
-    verified_md = run_dir / "stage-23" / "paper_final_verified.md"
+    verified_md = verify_dir / "paper_final_verified.md"
     if (
         paper_md is not None
         and paper_md == verified_md
@@ -489,7 +495,7 @@ def _package_deliverables(
             else:
                 logger.warning(
                     "Regenerated paper.tex has poor structure "
-                    "(abstract=%s, sections=%d) — using Stage 22 version",
+                    "(abstract=%s, sections=%d) — using EXPORT_PUBLISH version",
                     bool(_has_abstract),
                     _section_count,
                 )
@@ -497,17 +503,17 @@ def _package_deliverables(
             logger.debug("paper.tex regeneration from verified md failed")
 
     if not tex_regenerated:
-        tex_src = run_dir / "stage-22" / "paper.tex"
+        tex_src = export_dir / "paper.tex"
         if tex_src.exists() and tex_src.stat().st_size > 0:
             shutil.copy2(tex_src, dest / "paper.tex")
             packaged.append("paper.tex")
 
     # --- 3. References (BibTeX) ---
-    # Prefer verified bib (stage 23) over base bib (stage 22)
+    # Prefer verified bib (CITATION_VERIFY) over base bib (EXPORT_PUBLISH)
     bib_src = None
     for candidate in [
-        run_dir / "stage-23" / "references_verified.bib",
-        run_dir / "stage-22" / "references.bib",
+        verify_dir / "references_verified.bib",
+        export_dir / "references.bib",
     ]:
         if candidate.exists() and candidate.stat().st_size > 0:
             bib_src = candidate
@@ -517,7 +523,7 @@ def _package_deliverables(
         packaged.append("references.bib")
 
     # --- 4. Experiment code package ---
-    code_src = run_dir / "stage-22" / "code"
+    code_src = export_dir / "code"
     if code_src.is_dir():
         code_dest = dest / "code"
         if code_dest.exists():
@@ -526,19 +532,19 @@ def _package_deliverables(
         packaged.append("code/")
 
     # --- 5. Verification report (optional) ---
-    verify_src = run_dir / "stage-23" / "verification_report.json"
+    verify_src = verify_dir / "verification_report.json"
     if verify_src.exists() and verify_src.stat().st_size > 0:
         shutil.copy2(verify_src, dest / "verification_report.json")
         packaged.append("verification_report.json")
 
     # --- 5b. Sanitization report (degraded mode) ---
-    san_src = run_dir / "stage-22" / "sanitization_report.json"
+    san_src = export_dir / "sanitization_report.json"
     if san_src.exists() and san_src.stat().st_size > 0:
         shutil.copy2(san_src, dest / "sanitization_report.json")
         packaged.append("sanitization_report.json")
 
     # --- 6. Charts (optional) ---
-    charts_src = run_dir / "stage-22" / "charts"
+    charts_src = export_dir / "charts"
     if charts_src.is_dir() and any(charts_src.iterdir()):
         charts_dest = dest / "charts"
         if charts_dest.exists():
@@ -865,7 +871,7 @@ logger = logging.getLogger(__name__)
 
 def _read_quality_score(run_dir: Path) -> float | None:
     """Extract quality score from the most recent quality_report.json."""
-    report_path = run_dir / "stage-20" / "quality_report.json"
+    report_path = _stage_dir(run_dir, Stage.QUALITY_GATE) / "quality_report.json"
     if not report_path.exists():
         return None
     try:
@@ -962,7 +968,7 @@ def execute_iterative_pipeline(
 
         # Write iteration context with feedback from reviews
         reviews_text = ""
-        reviews_path = run_dir / "stage-18" / "reviews.md"
+        reviews_path = _stage_dir(run_dir, Stage.PEER_REVIEW) / "reviews.md"
         if reviews_path.exists():
             reviews_text = reviews_path.read_text(encoding="utf-8")
         _write_iteration_context(run_dir, iteration, reviews_text, score)
