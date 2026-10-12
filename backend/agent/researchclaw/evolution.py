@@ -34,6 +34,8 @@ from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 
+from researchclaw.pipeline.stages import Stage
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,17 +122,9 @@ def _classify_error(stage_name: str, error_text: str) -> str:
 # Lesson extraction from pipeline results
 # ---------------------------------------------------------------------------
 
-# Stage name mapping (import-free to avoid circular deps)
-_STAGE_NAMES: dict[int, str] = {
-    1: "topic_init", 2: "problem_decompose", 3: "search_strategy",
-    4: "literature_collect", 5: "literature_screen", 6: "knowledge_extract",
-    7: "synthesis", 8: "hypothesis_gen", 9: "experiment_design",
-    10: "code_generation", 11: "resource_planning", 12: "experiment_run",
-    13: "iterative_refine", 14: "result_analysis", 15: "research_decision",
-    16: "paper_outline", 17: "paper_draft", 18: "peer_review",
-    19: "paper_revision", 20: "quality_gate", 21: "knowledge_archive",
-    22: "export_publish", 23: "citation_verify",
-}
+# Stage name mapping derived from the Stage enum so it follows renumbering.
+# stages.py has no researchclaw imports, so this cannot create a cycle.
+_STAGE_NAMES: dict[int, str] = {int(s): s.name.lower() for s in Stage}
 
 
 def extract_lessons(
