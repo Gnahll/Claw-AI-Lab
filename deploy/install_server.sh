@@ -161,8 +161,9 @@ from pathlib import Path
 import yaml
 
 root = Path(os.environ["CLAW_ROOT"])
-template = root / "examples" / "config_template.yaml"
-with template.open(encoding="utf-8") as handle:
+template = root / "examples" / "config_template.local.yaml"
+source = template if template.exists() else root / "examples" / "config_template.yaml"
+with source.open(encoding="utf-8") as handle:
     config = yaml.safe_load(handle) or {}
 
 llm = config.setdefault("llm", {})
@@ -182,6 +183,7 @@ config.setdefault("experiment", {})["mode"] = "sandbox"
 
 with template.open("w", encoding="utf-8") as handle:
     yaml.safe_dump(config, handle, allow_unicode=False, sort_keys=False)
+template.chmod(0o600)
 PY
 
 API_KEY_ESCAPED="$(printf '%q' "$API_KEY")"

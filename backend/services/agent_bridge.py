@@ -1816,7 +1816,12 @@ def _generate_config_from_template(
     pipeline agent operates from that specialist perspective.
     """
     repo_root = Path(__file__).resolve().parent.parent.parent
-    template_path = repo_root / "examples" / "config_template.yaml"
+    template_override = os.environ.get("CLAW_CONFIG_TEMPLATE", "")
+    template_path = Path(template_override).expanduser() if template_override else repo_root / "examples" / "config_template.local.yaml"
+    if template_override and not template_path.is_file():
+        raise FileNotFoundError(f"Configured local template not found: {template_path}")
+    if not template_path.exists():
+        template_path = repo_root / "examples" / "config_template.yaml"
     if not template_path.exists():
         template_path = Path(state.agent_package_dir).parent / "config_template.yaml"
     if not template_path.exists():
@@ -2851,7 +2856,7 @@ async def broadcast(state: BridgeState, messages: list[dict]):
     dead = set()
     for msg in messages:
         data = json.dumps(msg, ensure_ascii=False)
-        for ws in state.clients:
+        for ws in tuple(state.clients):
             try:
                 await ws.send(data)
             except websockets.ConnectionClosed:

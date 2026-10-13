@@ -311,6 +311,7 @@ class ExperimentConfig:
     metric_key: str = "primary_metric"
     metric_direction: str = "minimize"
     keep_threshold: float = 0.0
+    existing_project_dir: str = ""
     datasets_dir: str = ""
     checkpoints_dir: str = ""
     codebases_dir: str = ""
@@ -643,6 +644,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         metric_key=data.get("metric_key", "primary_metric"),
         metric_direction=data.get("metric_direction", "minimize"),
         keep_threshold=float(data.get("keep_threshold", 0.0)),
+        existing_project_dir=data.get("existing_project_dir", ""),
         datasets_dir=data.get("datasets_dir", ""),
         checkpoints_dir=data.get("checkpoints_dir", ""),
         codebases_dir=data.get("codebases_dir", ""),

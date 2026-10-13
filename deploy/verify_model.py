@@ -10,7 +10,10 @@ import yaml
 
 
 root = Path(__file__).resolve().parent.parent
-with (root / "examples/config_template.yaml").open(encoding="utf-8") as handle:
+template = Path(os.environ.get("CLAW_CONFIG_TEMPLATE", root / "examples/config_template.local.yaml"))
+if not template.exists():
+    template = root / "examples/config_template.yaml"
+with template.open(encoding="utf-8") as handle:
     llm = yaml.safe_load(handle)["llm"]
 
 base_url = llm["base_url"].rstrip("/")

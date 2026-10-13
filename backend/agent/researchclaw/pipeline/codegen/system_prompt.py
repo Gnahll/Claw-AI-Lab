@@ -327,9 +327,9 @@ def _project_instructions_section(ctx: CodegenContext) -> str:
     """
     return (
         "# Project instructions\n"
-        "Your workspace contains `CODEGEN.md` with project-specific instructions: "
-        "model loading code, dataset format, evaluation protocol, and technical guidance.\n"
-        "Read it with `read_file` BEFORE writing any code."
+        "Your workspace contains `CODEGEN.md`, `DATA_CONTRACT.md`, and `PROJECT_CONTEXT.json`. "
+        "Read all three with `read_file` BEFORE writing any code. "
+        "Reuse the selected project's loaders, model, evaluation, and configuration; do not replace it with a toy implementation."
     )
 
 

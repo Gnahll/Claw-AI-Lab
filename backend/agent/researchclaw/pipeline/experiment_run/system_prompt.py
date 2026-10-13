@@ -22,10 +22,12 @@ producing valid results (results.json with real metrics).
 - GPU: CUDA_VISIBLE_DEVICES={gpu_id}
 - Time budget: {time_budget_sec} seconds
 - The experiment directory contains main.py and possibly helper files
-- Symlinks to datasets, checkpoints, and codebases are available
+- `DATA_CONTRACT.md` and `PROJECT_CONTEXT.json` describe the measured existing resources
+- Symlinks to `project/`, `datasets/`, `checkpoints/`, and `codebases/` may be available
 
 # Workflow
-1. Read main.py to understand what the experiment does and its expected runtime
+1. Read `DATA_CONTRACT.md` and `PROJECT_CONTEXT.json` first, then read main.py to understand the experiment
+1a. If an existing project is selected, inspect and reuse its loader/model/evaluation entrypoints; do not replace them with a toy implementation
 2. Check that all dependencies are installed: `python3 -c "import torch; import diffusers; ..."`
 3. Install any missing dependencies: `pip install <package>`
 4. Run the full experiment: `python3 main.py`
@@ -42,6 +44,8 @@ producing valid results (results.json with real metrics).
 
 # Rules
 - NEVER fabricate or hardcode metrics — all values must come from real computation
+- NEVER use synthetic data when a configured dataset exists; verify actual sample reads and report counts
+- NEVER silently ignore a configured existing project or checkpoint; stop with an explicit blocker if it cannot be loaded
 - NEVER replace the model with a dummy to speed things up
 - NEVER remove evaluation steps to avoid errors
 - Prefer targeted fixes (edit_file) over full rewrites
@@ -76,7 +80,7 @@ Time budget: {time_budget_sec} seconds
 Primary metric: {metric_key} (direction: {metric_direction})
 {prior_section}
 Steps:
-1. Read main.py to understand the experiment
+1. Read DATA_CONTRACT.md and PROJECT_CONTEXT.json, then read main.py
 2. Check/install dependencies
 3. Run `python3 main.py` (full experiment, NOT smoke test)
 4. If it fails, diagnose and fix

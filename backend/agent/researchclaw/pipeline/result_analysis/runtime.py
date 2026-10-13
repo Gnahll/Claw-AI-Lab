@@ -294,7 +294,7 @@ class ResultAnalysisRuntime:
     @staticmethod
     def _build_allowed_reads(config: RCConfig, run_dir: Path) -> list[Path]:
         dirs: list[Path] = [run_dir]
-        for attr in ("datasets_dir", "checkpoints_dir", "codebases_dir"):
+        for attr in ("existing_project_dir", "datasets_dir", "checkpoints_dir", "codebases_dir"):
             d = getattr(config.experiment, attr, "") or ""
             if d and Path(d).is_dir():
                 dirs.append(Path(d))

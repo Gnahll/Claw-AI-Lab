@@ -47,6 +47,7 @@ experiment:
   max_iterations: 3
   metric_key: "primary_metric"
   metric_direction: "minimize"
+  existing_project_dir: ""
   datasets_dir: ""
   checkpoints_dir: ""
   codebases_dir: ""

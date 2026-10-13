@@ -220,6 +220,15 @@ class SanityCheckRuntime:
             dirs_exist_ok=True,
         )
 
+        existing_project_dir = getattr(config.experiment, "existing_project_dir", "") or ""
+        if existing_project_dir and Path(existing_project_dir).is_dir():
+            link = ws / "project"
+            if not link.exists():
+                try:
+                    link.symlink_to(Path(existing_project_dir).resolve())
+                except OSError:
+                    pass
+
         # Symlink datasets
         datasets_dir = getattr(config.experiment, "datasets_dir", "") or ""
         if datasets_dir and Path(datasets_dir).is_dir():
@@ -284,7 +293,7 @@ class SanityCheckRuntime:
     @staticmethod
     def _build_allowed_reads(config: RCConfig) -> list[Path]:
         dirs: list[Path] = []
-        for attr in ("datasets_dir", "checkpoints_dir", "codebases_dir"):
+        for attr in ("existing_project_dir", "datasets_dir", "checkpoints_dir", "codebases_dir"):
             d = getattr(config.experiment, attr, "") or ""
             if d and Path(d).is_dir():
                 dirs.append(Path(d))

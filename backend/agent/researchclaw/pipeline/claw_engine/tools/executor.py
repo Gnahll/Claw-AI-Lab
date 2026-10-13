@@ -277,7 +277,10 @@ class ToolExecutor:
         timed_out = False
         scanned = 0
 
-        for p in base.glob(pattern):
+        paths = list(base.glob(pattern))
+        if base == self.workspace and is_recursive:
+            paths.extend(self._workspace_symlink_glob(pattern))
+        for p in paths:
             scanned += 1
             if _time.monotonic() > deadline or scanned > 50000:
                 timed_out = True
@@ -315,6 +318,31 @@ class ToolExecutor:
         if timed_out:
             header += " [TIMEOUT: directory too large — use a more specific pattern or path]"
         return header + "\n" + "\n".join(lines) if lines else "No files matched."
+
+    def _workspace_symlink_glob(self, pattern: str) -> list[Path]:
+        """Search authorized directory symlinks from the workspace root."""
+        matches: list[Path] = []
+        for link in self.workspace.iterdir():
+            if not link.is_symlink() or not link.is_dir():
+                continue
+            try:
+                target = link.resolve()
+            except OSError:
+                continue
+            if not any(target == allowed or allowed in target.parents for allowed in self.allowed_read_dirs):
+                continue
+            prefix = link.name + "/"
+            if pattern.startswith(prefix):
+                subpattern = pattern[len(prefix):]
+            elif pattern in {"**", "**/*", "*"}:
+                subpattern = pattern
+            else:
+                continue
+            try:
+                matches.extend(p for p in target.glob(subpattern) if p.is_file())
+            except OSError:
+                continue
+        return matches
 
     # ------------------------------------------------------------------
     # grep_search — ported from claw-code runtime/src/file_ops.rs

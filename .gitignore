@@ -5,6 +5,12 @@ logs/
 .runtime/
 .venv/
 deploy/run.sh
+.deploy-backups/
+*.local.yaml
+*.local.yml
+.test-venv/
+.pytest_cache/
+*.bak-*
 .vite/
 backend/runs/
 backup/

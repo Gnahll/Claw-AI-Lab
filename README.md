@@ -276,6 +276,7 @@ experiment:
   max_iterations: 3               # Number of iterative refinement cycles in S15 (Edit-Run-Eval loop)
   metric_key: "primary_metric"    # Name of the primary evaluation metric
   metric_direction: "minimize"    # Optimization direction: "minimize" | "maximize"
+  existing_project_dir: ""      # Optional: one concrete existing project root to reuse
   datasets_dir: ""                # ⚠️ **IMPORTANT** Absolute path to datasets directory
   checkpoints_dir: ""             # ⚠️ **IMPORTANT** Absolute path to model weights directory
   codebases_dir: ""               # Absolute path to reference codebases directory
