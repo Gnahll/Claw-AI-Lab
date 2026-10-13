@@ -101,7 +101,7 @@ def start_bridge(root: Path, record: dict):
     return child
 
 
-def health(root: Path, *, timeout: int = 35) -> None:
+def health(root: Path, *, timeout: int = 120) -> None:
     environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     for name in list(environment):
         if name.lower() in {"http_proxy", "https_proxy", "all_proxy", "no_proxy"}:
@@ -113,7 +113,7 @@ def health(root: Path, *, timeout: int = 35) -> None:
     deadline = time.monotonic() + timeout
     while True:
         result = subprocess.run([str(root / ".venv/bin/python"), str(root / "deploy/verify_services.py")],
-                                cwd=root, env=environment, capture_output=True, text=True, timeout=20)
+                                cwd=root, env=environment, capture_output=True, text=True, timeout=90)
         if result.returncode == 0:
             print(result.stdout, end="", flush=True)
             return
