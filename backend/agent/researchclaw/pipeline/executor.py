@@ -892,9 +892,15 @@ def _collect_experiment_results(
     """Aggregate experiment metrics from runs/ directory across prior stages.
 
     Returns a dict with ``runs``, ``metrics_summary``, ``best_run``,
-    ``latex_table``, and optionally ``structured_results``.
+    ``latex_table``, and optionally ``structured_results``. When final
+    refinement results exist, only that version enters the statistics;
+    ``result_versions`` retains earlier evidence without counting it as
+    repeat trials. Agentic report counts are marked as result records.
     """
     runs_data: list[dict[str, Any]] = []
+    result_versions: list[dict[str, Any]] = []
+    selected_version = ""
+    has_agentic_report = False
     structured_results: Any = None
 
     # Scan all stage dirs for runs/ subdirectory
@@ -926,7 +932,14 @@ def _collect_experiment_results(
                 # Agentic EXPERIMENT_RUN report (run_report.json)
                 _agentic_metrics = _run_payload_metrics(parsed)
                 if _agentic_metrics:
-                    runs_data.append({"metrics": _agentic_metrics, "source": run_file.name})
+                    has_agentic_report = True
+                    runs_data.append({
+                        "metrics": _agentic_metrics,
+                        "source": run_file.name,
+                        "version": stage_subdir.parent.name,
+                    })
+
+    result_versions.extend(runs_data)
 
     # Agentic ITERATIVE_REFINE copies the refined harness output to results.json
     for _refined in sorted(run_dir.glob(f"stage-{int(Stage.ITERATIVE_REFINE):02d}*/results.json")):
@@ -934,7 +947,15 @@ def _collect_experiment_results(
         if isinstance(_refined_payload, dict):
             _refined_metrics = _run_payload_metrics(_refined_payload)
             if _refined_metrics:
-                runs_data.append({"metrics": _refined_metrics, "source": "refined_results.json"})
+                selected_version = _refined.parent.name
+                refined_record = {
+                    "metrics": _refined_metrics,
+                    "source": str(_refined.relative_to(run_dir)),
+                    "version": selected_version,
+                }
+                result_versions.append(refined_record)
+                runs_data = [refined_record]
+                structured_results = _refined_payload
 
     # Fallback: synthesise runs_data from structured_results if it has summaries
     if not runs_data and isinstance(structured_results, dict):
@@ -1053,6 +1074,10 @@ def _collect_experiment_results(
         "best_run": best_run,
         "latex_table": "\n".join(latex_lines),
     }
+    if selected_version or has_agentic_report:
+        collected["result_versions"] = result_versions
+        collected["selected_version"] = selected_version or runs_data[-1].get("version", "")
+        collected["run_count_basis"] = "result_records"
     if paired_comparisons:
         collected["paired_comparisons"] = paired_comparisons
     if structured_results is not None:
@@ -4220,17 +4245,29 @@ def _execute_result_analysis(
     logger.info("S16: Agentic analysis insufficient, falling back to legacy path")
 
     # --- Legacy: Collect experiment data ---
-    exp_data = _collect_experiment_results(run_dir)
+    exp_data = _collect_experiment_results(
+        run_dir,
+        metric_key=config.experiment.metric_key,
+        metric_direction=config.experiment.metric_direction,
+    )
     runs_dir = _read_prior_artifact(run_dir, "runs/") or ""
     context = ""
     if runs_dir:
         context = _collect_json_context(Path(runs_dir), max_files=30)
+    if exp_data.get("run_count_basis") == "result_records":
+        context = json.dumps({
+            "selected_version": exp_data.get("selected_version"),
+            "final_results": exp_data["runs"],
+            "run_count_basis": "result_records",
+        }, indent=2, default=str)
 
     # --- R13-1: Merge Stage 13 (ITERATIVE_REFINE) results if available ---
     # Stage 13 stores richer per-condition metrics in refinement_log.json
     # that _collect_experiment_results() misses (it only scans runs/ dirs).
     _refine_log_text = _read_prior_artifact(run_dir, "refinement_log.json")
-    if _refine_log_text:
+    if _refine_log_text and not str(exp_data.get("selected_version", "")).startswith(
+        f"stage-{int(Stage.ITERATIVE_REFINE):02d}"
+    ):
         try:
             _refine_data = json.loads(_refine_log_text)
             _best_iter = None
@@ -4591,6 +4628,9 @@ def _execute_result_analysis(
         "latex_table": exp_data["latex_table"],
         "generated": _utcnow_iso(),
     }
+    for version_key in ("result_versions", "selected_version", "run_count_basis"):
+        if version_key in exp_data:
+            summary_payload[version_key] = exp_data[version_key]
     # R13-1: Detect zero-variance across conditions (all conditions identical primary metric)
     if _condition_summaries and len(_condition_summaries) >= 2:
         _primary_vals = []
@@ -5247,6 +5287,10 @@ _MAX_PAYLOAD_METRICS = 200
 _NON_METRIC_KEYS = frozenset({
     "elapsed_sec", "elapsed_seconds", "training_steps", "seed", "seeds",
     "images_per_condition", "iterations", "tool_calls", "gpu_id", "smoke_test",
+    "metadata", "config",
+})
+_METRIC_CONTAINER_KEYS = frozenset({
+    "conditions", "condition_scores", "metrics", "key_metrics",
 })
 
 
@@ -5257,10 +5301,9 @@ def _run_payload_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     agentic EXPERIMENT_RUN ``run_report.json`` (metrics nested under
     ``results``) and a raw harness ``results.json``. Agent-written results
     use free-form layouts (``conditions``, ``condition_scores``, per-seed
-    nesting, ...), so numeric leaves are flattened generically: top-level
-    scalars keep their name, and entries inside a top-level container drop
-    the container name, e.g. ``{"conditions": {"ours": {"acc": 0.7}}}``
-    becomes ``{"ours/acc": 0.7}``.
+    nesting, ...). Only known top-level wrappers are removed; condition
+    names and other namespaces are preserved. Both ``{"ours": {"acc": 0.7}}``
+    and ``{"conditions": {"ours": {"acc": 0.7}}}`` become ``{"ours/acc": 0.7}``.
     """
     for key in ("metrics", "key_metrics"):
         value = payload.get(key)
@@ -5275,27 +5318,25 @@ def _run_payload_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     else:
         results = payload
 
-    def _is_num(v: Any) -> bool:
-        return isinstance(v, (int, float)) and not isinstance(v, bool)
+    def _is_num(value: Any) -> bool:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
 
     flat: dict[str, Any] = {}
 
     def _walk(node: dict[str, Any], prefix: str, depth: int) -> None:
-        for k, v in node.items():
-            if len(flat) >= _MAX_PAYLOAD_METRICS or k in _NON_METRIC_KEYS:
+        for metric_name, metric_value in node.items():
+            if len(flat) >= _MAX_PAYLOAD_METRICS or metric_name in _NON_METRIC_KEYS:
                 continue
-            path = f"{prefix}/{k}" if prefix else str(k)
-            if _is_num(v):
-                flat.setdefault(path, v)
-            elif isinstance(v, dict) and depth < 4:
-                _walk(v, path, depth + 1)
+            path = f"{prefix}/{metric_name}" if prefix else str(metric_name)
+            if _is_num(metric_value):
+                flat.setdefault(path, metric_value)
+            elif isinstance(metric_value, dict) and depth < 4:
+                container_path = (
+                    "" if depth == 0 and metric_name in _METRIC_CONTAINER_KEYS else path
+                )
+                _walk(metric_value, container_path, depth + 1)
 
-    for k, v in results.items():
-        if _is_num(v) and k not in _NON_METRIC_KEYS:
-            flat[str(k)] = v
-    for v in results.values():
-        if isinstance(v, dict):
-            _walk(v, "", 1)
+    _walk(results, "", 0)
     return flat
 
 
@@ -5309,6 +5350,45 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
     metric_lines: list[str] = []
     run_count = 0
     has_parsed_metrics = False
+
+    experiment_summary = _load_experiment_summary(run_dir)
+    if experiment_summary and experiment_summary.get("metrics_summary"):
+        summary_metrics = experiment_summary["metrics_summary"]
+        if isinstance(summary_metrics, dict):
+            for metric_name, metric_stats in summary_metrics.items():
+                metric_value = (
+                    metric_stats.get("mean") if isinstance(metric_stats, dict) else metric_stats
+                )
+                if isinstance(metric_value, (int, float)) and not isinstance(metric_value, bool):
+                    metric_lines.append(f"  {metric_name}: {metric_value}")
+            if metric_lines:
+                summary_run_count = experiment_summary.get("total_runs")
+                if not isinstance(summary_run_count, int) or isinstance(summary_run_count, bool):
+                    summary_run_count = 0
+                return _format_experiment_metrics(
+                    metric_lines, summary_run_count, True,
+                    run_count_basis=experiment_summary.get("run_count_basis", ""),
+                )
+
+    version_data = _collect_experiment_results(run_dir)
+    if version_data.get("run_count_basis") == "result_records":
+        final_metrics = (version_data.get("best_run") or {}).get("metrics", {})
+        if final_metrics:
+            record_count = len(version_data["runs"])
+            count_basis = "result_records"
+            if experiment_summary:
+                summary_run_count = experiment_summary.get("total_runs")
+                if (
+                    isinstance(summary_run_count, int)
+                    and not isinstance(summary_run_count, bool)
+                    and summary_run_count > 0
+                ):
+                    record_count = summary_run_count
+                    count_basis = experiment_summary.get("run_count_basis", "")
+            return _format_experiment_metrics(
+                [f"  {metric_name}: {metric_value}" for metric_name, metric_value in final_metrics.items()],
+                record_count, True, run_count_basis=count_basis,
+            )
 
     for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
         for run_file in sorted(stage_subdir.glob("*.json")):
@@ -5436,6 +5516,16 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
     if isinstance(_total_runs, int) and not isinstance(_total_runs, bool) and _total_runs > 0:
         run_count = _total_runs
 
+    return _format_experiment_metrics(metric_lines, run_count, has_parsed_metrics)
+
+
+def _format_experiment_metrics(
+    metric_lines: list[str],
+    run_count: int,
+    has_parsed_metrics: bool,
+    *,
+    run_count_basis: str = "",
+) -> tuple[str, bool]:
     # Deduplicate while preserving order
     seen: set[str] = set()
     unique: list[str] = []
@@ -5467,15 +5557,24 @@ def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:
     if _ungrouped:
         formatted_lines.extend(_ungrouped)
 
+    count_description = f"{run_count} run(s)"
+    count_instruction = f"The experiment ran {run_count} time(s) — state this accurately in the methodology.\n"
+    if run_count_basis == "result_records":
+        count_description = f"{run_count} result record(s) for the selected version"
+        count_instruction = (
+            "Result records and code versions are NOT independent repeat trials. "
+            "Only claim a repeat count supported by explicit condition and seed records.\n"
+        )
+
     return (
-        f"\n\nACTUAL EXPERIMENT DATA (from {run_count} run(s) — use ONLY these numbers):\n"
+        f"\n\nACTUAL EXPERIMENT DATA (from {count_description} — use ONLY these numbers):\n"
         "```\n"
         + "\n".join(formatted_lines[:200])
         + "\n```\n"
         "CRITICAL: Every number in the Results table MUST come from the data above. "
         "Do NOT round excessively, do NOT invent numbers, do NOT change values. "
-        f"The experiment ran {run_count} time(s) — state this accurately in the methodology.\n"
-        "NEVER paste raw metric paths (like 'condition/env/step/metric: value') "
+        + count_instruction
+        + "NEVER paste raw metric paths (like 'condition/env/step/metric: value') "
         "into the paper. Always convert to formatted LaTeX tables or inline prose.\n"
     ), has_parsed_metrics
 
@@ -7527,6 +7626,9 @@ Generated: {_utcnow_iso()}
 def _collect_experiment_evidence(run_dir: Path) -> str:
     """Collect actual experiment parameters and results for peer review."""
     evidence_parts: list[str] = []
+    exp_summary = _load_experiment_summary(run_dir)
+    selected_version = str((exp_summary or {}).get("selected_version", ""))
+    has_final_version = selected_version.startswith(f"stage-{int(Stage.ITERATIVE_REFINE):02d}")
 
     # 1. Read experiment code to find actual trial count, methods used.
     # Prefer the refined final code (ITERATIVE_REFINE) over the initial draft.
@@ -7558,8 +7660,12 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
                 stderr = payload.get("stderr", "")
                 if stderr:
                     summary["stderr_excerpt"] = stderr[:500]
+                result_label = (
+                    "Initial Version Result (not a final-version repeat)"
+                    if has_final_version else "Run Result"
+                )
                 evidence_parts.append(
-                    f"### Run Result: {run_file.name}\n```json\n{json.dumps(summary, indent=2)}\n```"
+                    f"### {result_label}: {run_file.name}\n```json\n{json.dumps(summary, indent=2)}\n```"
                 )
 
     # 3. Read refinement log for actual iteration count
@@ -7585,11 +7691,13 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
             pass
 
     # 4. Final aggregated results from RESULT_ANALYSIS — authoritative record
-    exp_summary = _load_experiment_summary(run_dir)
     if exp_summary:
         _summary_view: dict[str, Any] = {
             k: exp_summary[k]
-            for k in ("total_runs", "primary_metric_definition", "direction", "metrics_summary", "best_run")
+            for k in (
+                "total_runs", "primary_metric_definition", "direction", "metrics_summary", "best_run",
+                "selected_version", "run_count_basis",
+            )
             if k in exp_summary
         }
         _conds = exp_summary.get("condition_summaries")
@@ -7613,17 +7721,24 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
                 if rf.name != "results.json":
                     actual_run_count += 1
     if actual_run_count > 0:
-        evidence_parts.append(
-            f"### Actual Trial Count\n"
-            + (
-                f"**The analysed experiment comprises {actual_run_count} run(s) "
-                f"(per experiment_summary.json total_runs).** "
-                if actual_run_count == _total_runs
-                else f"**The experiment was executed {actual_run_count} time(s).** "
+        if exp_summary and exp_summary.get("run_count_basis") == "result_records":
+            evidence_parts.append(
+                f"### Result Record Count\n"
+                f"The selected version has {actual_run_count} result record(s). "
+                "Code versions and aggregate reports are not independent repeat trials; "
+                "verify repeat counts from explicit condition and seed records."
             )
-            +
-            f"If the paper claims a different number of trials, this is a CRITICAL discrepancy."
-        )
+        else:
+            evidence_parts.append(
+                f"### Actual Trial Count\n"
+                + (
+                    f"**The analysed experiment comprises {actual_run_count} run(s) "
+                    f"(per experiment_summary.json total_runs).** "
+                    if actual_run_count == _total_runs
+                    else f"**The experiment was executed {actual_run_count} time(s).** "
+                )
+                + "If the paper claims a different number of trials, this is a CRITICAL discrepancy."
+            )
 
     if not evidence_parts:
         return ""
