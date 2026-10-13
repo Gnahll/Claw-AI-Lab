@@ -1,0 +1,13 @@
+{
+  "source_dir": "/home/Disk/WuZihang/research-resources/codebases/Co-Transformers",
+  "split_manifest": "coverage-splits-approved.json",
+  "dataset_root": "/home/Disk/WuZihang/research-resources/datasets/COVERAGE",
+  "initial_checkpoint": "/home/Disk/WuZihang/research-resources/checkpoints/Co-Transformers/ckpt/cotransformers-104.pth",
+  "initial_checkpoint_sha256": "290143c6bfb511dc9e7f83a367cea0af7dd7c7dd45f81f510c44fc8d54de9d33",
+  "epochs": 1,
+  "steps_per_epoch": 3,
+  "learning_rate": 0.00001,
+  "weight_decay": 0.05,
+  "seed": 42,
+  "checkpoint_every_steps": 1
+}
