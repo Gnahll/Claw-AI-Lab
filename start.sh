@@ -24,7 +24,7 @@ fi
 
 # Resolve python path: env PYTHON_PATH > config sandbox.python_path > system python3
 _cfg_py=""
-for _cfg in "$BASE/examples/config_template.yaml" "$BASE"/backend/runs/project_configs/*.yaml; do
+for _cfg in "${CLAW_CONFIG_TEMPLATE:-$BASE/examples/config_template.local.yaml}" "$BASE/examples/config_template.yaml" "$BASE"/backend/runs/project_configs/*.yaml; do
     [ -f "$_cfg" ] || continue
     _cfg_py=$(grep 'python_path:' "$_cfg" 2>/dev/null | head -1 | sed 's/.*python_path:[[:space:]]*"\{0,1\}\([^"]*\)"\{0,1\}/\1/' | tr -d '[:space:]')
     [ -n "$_cfg_py" ] && [ -x "$_cfg_py" ] && break

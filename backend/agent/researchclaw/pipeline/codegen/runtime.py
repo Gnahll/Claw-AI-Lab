@@ -25,6 +25,7 @@ from researchclaw.pipeline.codegen.strategies.fallback import FallbackStrategy
 from researchclaw.pipeline.codegen.types import CodegenContext, CodegenPhase, CodegenResult, DiscoveredData, HardwareProfile
 from researchclaw.pipeline.executor import StageResult, _utcnow_iso
 from researchclaw.pipeline.stages import Stage, StageStatus
+from researchclaw.resources.intake import build_resource_manifest, render_resource_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -374,6 +375,19 @@ class CodegenRuntime:
         # ── Phase 1: CONTEXT ─────────────────────────────────────────────
         ctx = self._build_context(config, run_dir, stage_dir, session)
 
+        preflight = ctx.resource_manifest.get("preflight", {})
+        if preflight.get("required") and not preflight.get("ok"):
+            error = "Existing project resource preflight blocked: " + "; ".join(preflight.get("errors", []))
+            session.log_error(CodegenPhase.CONTEXT, error)
+            session.persist()
+            return StageResult(
+                stage=Stage.CODE_GENERATION,
+                status=StageStatus.FAILED,
+                artifacts=("resource_manifest.json", "resource_manifest.md"),
+                error=error,
+                evidence_refs=("stage-11/resource_manifest.json", "stage-11/resource_manifest.md"),
+            )
+
         # ── Phase 2: LLM_SETUP ──────────────────────────────────────────
         coding_model = getattr(config.llm, "coding_model", "") or ""
         session.log(
@@ -410,12 +424,46 @@ class CodegenRuntime:
 
         # ── Phase 5: FALLBACK ────────────────────────────────────────────
         if not files or "main.py" not in files:
+            if ctx.resource_manifest.get("preflight", {}).get("required"):
+                error = "Resource-backed code generation produced no main.py; synthetic fallback is disabled"
+                session.log_error(CodegenPhase.FALLBACK, error)
+                session.persist()
+                return StageResult(
+                    stage=Stage.CODE_GENERATION,
+                    status=StageStatus.FAILED,
+                    artifacts=("resource_manifest.json", "resource_manifest.md"),
+                    error=error,
+                    evidence_refs=("stage-11/resource_manifest.json", "stage-11/resource_manifest.md"),
+                )
             session.log(CodegenPhase.FALLBACK, "No main.py from strategy — using numpy fallback")
             fallback = FallbackStrategy()
             fb_result = fallback.generate(ctx, config, llm, session, prompts=prompts)
             files = fb_result.files
             session.files = dict(files)
             session.strategy_used = f"{session.strategy_used}+fallback"
+
+        source = "\n".join(files.values())
+        reuse_errors: list[str] = []
+        project_root = ctx.resource_manifest.get("project", {}).get("selected_root", "")
+        if project_root and Path(project_root).name.lower() not in source.lower() and "codebases" not in source.lower() and "project/" not in source.lower():
+            reuse_errors.append("generated code does not reference the selected existing project")
+        dataset_root = ctx.resource_manifest.get("dataset", {}).get("root", "")
+        if dataset_root and Path(dataset_root).name.lower() not in source.lower() and "datasets" not in source.lower():
+            reuse_errors.append("generated code does not reference the configured dataset")
+        checkpoint_root = ctx.resource_manifest.get("checkpoints", {}).get("root", "")
+        if checkpoint_root and Path(checkpoint_root).name.lower() not in source.lower() and "checkpoints" not in source.lower() and "from_pretrained" not in source.lower() and "load_state_dict" not in source.lower():
+            reuse_errors.append("generated code does not reference the configured checkpoint")
+        if reuse_errors and ctx.resource_manifest.get("preflight", {}).get("required"):
+            error = "Resource reuse gate failed: " + "; ".join(reuse_errors)
+            session.log_error(CodegenPhase.VALIDATE, error)
+            session.persist()
+            return StageResult(
+                stage=Stage.CODE_GENERATION,
+                status=StageStatus.FAILED,
+                artifacts=("resource_manifest.json", "resource_manifest.md"),
+                error=error,
+                evidence_refs=("stage-11/resource_manifest.json", "stage-11/resource_manifest.md"),
+            )
 
         # Write experiment directory
         exp_dir = stage_dir / "experiment"
@@ -463,6 +511,7 @@ class CodegenRuntime:
         codebase_info = _read_prior_artifact(run_dir, "codebase_candidates.json") or "[]"
         reference_paper_text = _read_prior_artifact(run_dir, "reference_paper_text.md") or ""
 
+        existing_project_dir = getattr(exp, "existing_project_dir", "") or ""
         datasets_dir = getattr(exp, "datasets_dir", "") or ""
         checkpoints_dir = getattr(exp, "checkpoints_dir", "") or ""
         codebases_dir = getattr(exp, "codebases_dir", "") or ""
@@ -470,9 +519,23 @@ class CodegenRuntime:
         # ── Discover filesystem context (claw-code pattern) ──
         # Like claw-code's ProjectContext.discover_with_git(), we read
         # real files BEFORE the prompt is built so the LLM has ground truth.
-        discovered = _discover_data(
-            checkpoints_dir, datasets_dir, codebases_dir, session,
+        resource_manifest = build_resource_manifest(
+            existing_project_dir=existing_project_dir,
+            codebases_dir=codebases_dir,
+            datasets_dir=datasets_dir,
+            checkpoints_dir=checkpoints_dir,
         )
+        (stage_dir / "resource_manifest.json").write_text(
+            json.dumps(resource_manifest, indent=2), encoding="utf-8",
+        )
+        (stage_dir / "resource_manifest.md").write_text(
+            render_resource_manifest(resource_manifest), encoding="utf-8",
+        )
+        session.add_artifact("resource_manifest.json")
+        session.add_artifact("resource_manifest.md")
+        discovered = _discover_data(checkpoints_dir, datasets_dir, codebases_dir, session)
+        discovered.resource_manifest = resource_manifest
+        discovered.resource_manifest_path = str(stage_dir / "resource_manifest.json")
 
         ctx = CodegenContext(
             topic=config.research.topic,
@@ -483,6 +546,7 @@ class CodegenRuntime:
             mode=exp.mode,
             hw_profile=hw,
             codebase_info=codebase_info,
+            existing_project_dir=existing_project_dir,
             datasets_dir=datasets_dir,
             checkpoints_dir=checkpoints_dir,
             codebases_dir=codebases_dir,
@@ -490,6 +554,7 @@ class CodegenRuntime:
             run_dir=run_dir,
             stage_dir=stage_dir,
             discovered=discovered,
+            resource_manifest=resource_manifest,
         )
 
         session.log(
@@ -566,7 +631,7 @@ Multi-file experiment project with {len(files)} file(s): {file_list}
 ## Constraints
 - Time budget per run: {config.experiment.time_budget_sec}s
 - Max iterations: {config.experiment.max_iterations}
-- {"Uses local data/codebases from project config" if (ctx.datasets_dir or ctx.codebases_dir) else "Self-contained execution"}
+- {"Uses local project/data/checkpoints from project config" if (ctx.existing_project_dir or ctx.datasets_dir or ctx.checkpoints_dir or ctx.codebases_dir) else "Self-contained execution"}
 
 ## Strategy
 {session.strategy_used} (claw-code agentic turn loop)
@@ -577,7 +642,7 @@ LLM calls: {session.llm_calls}, Errors: {len(session.errors)}
 """
         (stage_dir / "experiment_spec.md").write_text(spec, encoding="utf-8")
 
-        artifacts = ["experiment/", "experiment_spec.md"]
+        artifacts = ["experiment/", "experiment_spec.md", "resource_manifest.json", "resource_manifest.md"]
         for name in (
             "generation_trace.md",
             "claw_agent_log.json",

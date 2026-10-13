@@ -23,6 +23,7 @@ from researchclaw.pipeline.experiment_run.system_prompt import (
     build_user_message,
 )
 from researchclaw.pipeline.stages import Stage, StageStatus
+from researchclaw.resources.intake import build_resource_manifest, render_resource_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,28 @@ class ExperimentRunRuntime:
         stage_dir.mkdir(parents=True, exist_ok=True)
         session = StageSession(stage_dir=stage_dir, stage_name="experiment_run")
         session.log("INIT", "ExperimentRunRuntime started")
+
+        resource_manifest = build_resource_manifest(
+            existing_project_dir=getattr(config.experiment, "existing_project_dir", "") or "",
+            codebases_dir=getattr(config.experiment, "codebases_dir", "") or "",
+            datasets_dir=getattr(config.experiment, "datasets_dir", "") or "",
+            checkpoints_dir=getattr(config.experiment, "checkpoints_dir", "") or "",
+        )
+        (stage_dir / "resource_manifest.json").write_text(json.dumps(resource_manifest, indent=2), encoding="utf-8")
+        (stage_dir / "resource_manifest.md").write_text(render_resource_manifest(resource_manifest), encoding="utf-8")
+        session.add_artifact("resource_manifest.json")
+        session.add_artifact("resource_manifest.md")
+        preflight = resource_manifest.get("preflight", {})
+        if preflight.get("required") and not preflight.get("ok"):
+            error = "Existing project resource preflight blocked: " + "; ".join(preflight.get("errors", []))
+            session.log_error("INIT", error)
+            return StageResult(
+                stage=Stage.EXPERIMENT_RUN,
+                status=StageStatus.FAILED,
+                artifacts=("resource_manifest.json", "resource_manifest.md"),
+                error=error,
+                evidence_refs=("stage-14/resource_manifest.json", "stage-14/resource_manifest.md"),
+            )
 
         # Resolve coding LLM
         llm = self._resolve_coding_llm(llm, config)
@@ -82,7 +105,9 @@ class ExperimentRunRuntime:
 
         # Prepare workspace
         workspace = self._prepare_workspace(stage_dir, experiment_dir, run_dir, config)
-        session.log("INIT", f"Workspace: {workspace}")
+        (workspace / "PROJECT_CONTEXT.json").write_text(json.dumps(resource_manifest, indent=2), encoding="utf-8")
+        (workspace / "DATA_CONTRACT.md").write_text(render_resource_manifest(resource_manifest), encoding="utf-8")
+        session.log("INIT", f"Workspace: {workspace}; resource contract written")
 
         # List files
         exp_files = self._list_experiment_files(workspace)
@@ -290,6 +315,7 @@ class ExperimentRunRuntime:
         )
 
         for attr, link_name in (
+            ("existing_project_dir", "project"),
             ("datasets_dir", "datasets"),
             ("checkpoints_dir", "checkpoints"),
             ("codebases_dir", "codebases"),
@@ -329,7 +355,7 @@ class ExperimentRunRuntime:
     @staticmethod
     def _build_allowed_reads(config: RCConfig) -> list[Path]:
         dirs: list[Path] = []
-        for attr in ("datasets_dir", "checkpoints_dir", "codebases_dir"):
+        for attr in ("existing_project_dir", "datasets_dir", "checkpoints_dir", "codebases_dir"):
             d = getattr(config.experiment, attr, "") or ""
             if d and Path(d).is_dir():
                 dirs.append(Path(d))

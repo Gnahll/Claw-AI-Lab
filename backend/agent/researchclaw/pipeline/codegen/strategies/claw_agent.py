@@ -22,6 +22,7 @@ from researchclaw.pipeline.codegen.session import CodegenSession
 from researchclaw.pipeline.codegen.system_prompt import build_system_prompt, build_user_message
 from researchclaw.pipeline.codegen.turn_loop import ClawTurnLoop
 from researchclaw.pipeline.codegen.types import CodegenContext, CodegenPhase, CodegenResult
+from researchclaw.resources.intake import render_resource_manifest
 
 logger = logging.getLogger(__name__)
 
@@ -198,6 +199,15 @@ class ClawAgentStrategy:
             content = generate_codegen_md(ctx, codegen_dst)
             session.log(CodegenPhase.GENERATE, f"Auto-generated CODEGEN.md ({len(content)} chars)")
 
+        if ctx.resource_manifest:
+            (ws / "PROJECT_CONTEXT.json").write_text(
+                json.dumps(ctx.resource_manifest, indent=2), encoding="utf-8",
+            )
+            (ws / "DATA_CONTRACT.md").write_text(
+                render_resource_manifest(ctx.resource_manifest), encoding="utf-8",
+            )
+            session.log(CodegenPhase.GENERATE, "Wrote PROJECT_CONTEXT.json and DATA_CONTRACT.md")
+
         # Symlink codebases
         if ctx.codebases_dir and Path(ctx.codebases_dir).is_dir():
             cb_link = ws / "codebases"
@@ -234,7 +244,7 @@ class ClawAgentStrategy:
     def _build_allowed_reads(ctx: CodegenContext) -> list[Path]:
         """Build list of directories allowed for read operations."""
         dirs: list[Path] = []
-        for d in (ctx.codebases_dir, ctx.datasets_dir, ctx.checkpoints_dir):
+        for d in (ctx.existing_project_dir, ctx.codebases_dir, ctx.datasets_dir, ctx.checkpoints_dir):
             if d and Path(d).is_dir():
                 dirs.append(Path(d))
         return dirs

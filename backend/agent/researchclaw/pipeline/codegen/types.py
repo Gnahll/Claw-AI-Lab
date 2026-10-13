@@ -74,6 +74,8 @@ class DiscoveredData:
     dataset_sample: str = ""
     codebase_files: list[str] = field(default_factory=list)
     codebase_readme: str = ""
+    resource_manifest: dict[str, Any] = field(default_factory=dict)
+    resource_manifest_path: str = ""
 
 
 @dataclass
@@ -93,6 +95,7 @@ class CodegenContext:
 
     hw_profile: HardwareProfile | None = None
     codebase_info: str = "[]"
+    existing_project_dir: str = ""
     datasets_dir: str = ""
     checkpoints_dir: str = ""
     codebases_dir: str = ""
@@ -106,6 +109,7 @@ class CodegenContext:
     stage_dir: Path | None = None
 
     discovered: DiscoveredData = field(default_factory=DiscoveredData)
+    resource_manifest: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
