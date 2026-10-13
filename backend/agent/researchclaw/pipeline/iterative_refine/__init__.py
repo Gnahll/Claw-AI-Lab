@@ -28,6 +28,10 @@ def execute_iterative_refine(
     prompts: Any | None = None,
 ) -> StageResult:
     """Execute S15 ITERATIVE_REFINE via the claw-code agentic turn loop."""
+    if config.experiment.training_job_dir:
+        from researchclaw.training.evidence import import_training_stage
+
+        return import_training_stage(stage_dir, Path(config.experiment.training_job_dir), refinement=True)
     from researchclaw.pipeline.iterative_refine.runtime import IterativeRefineRuntime
     runtime = IterativeRefineRuntime()
     return runtime.execute(

@@ -27,6 +27,10 @@ def execute_experiment_run(
     prompts: Any | None = None,
 ) -> StageResult:
     """Execute S14 EXPERIMENT_RUN via the claw-code agentic turn loop."""
+    if config.experiment.training_job_dir:
+        from researchclaw.training.evidence import import_training_stage
+
+        return import_training_stage(stage_dir, Path(config.experiment.training_job_dir))
     from researchclaw.pipeline.experiment_run.runtime import ExperimentRunRuntime
     runtime = ExperimentRunRuntime()
     return runtime.execute(

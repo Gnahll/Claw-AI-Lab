@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import shutil
 import subprocess
 import sys
@@ -506,6 +507,43 @@ def cmd_report(args: argparse.Namespace) -> int:
         print(f"\nReport written to {output}")
     return 0
 
+def cmd_dataset(args: argparse.Namespace) -> int:
+    from researchclaw.data.coverage import (
+        audit_coverage, propose_splits, validate_splits, write_report,
+    )
+
+    try:
+        if args.command == "dataset-check":
+            manifest = json.loads(Path(args.manifest).read_text(encoding="utf-8"))
+            counts = validate_splits(
+                manifest,
+                root=Path(args.root) if args.root else None,
+                require_approval=not args.proposal,
+            )
+            print(json.dumps({"valid": True, "counts": counts, "approved": not args.proposal}))
+            return 0
+        report = audit_coverage(Path(args.root))
+        if args.command == "dataset-split":
+            report = propose_splits(
+                report, train_fraction=args.train_fraction,
+                validation_fraction=args.validation_fraction, seed=args.seed,
+                previously_evaluated_groups=tuple(args.previously_evaluated_group),
+            )
+            validate_splits(report, require_approval=False)
+            summary = {
+                "protocol_status": report["protocol_status"],
+                "counts": {name: len(records) for name, records in report["splits"].items()},
+            }
+        else:
+            summary = {key: report[key] for key in ("candidate_pairs", "valid_pairs", "excluded_pairs")}
+        write_report(Path(args.output), report)
+        print(json.dumps({**summary, "output": args.output}, ensure_ascii=False))
+        return 0
+    except (OSError, ValueError, KeyError, TypeError, ImportError) as exc:
+        print(f"Dataset preparation failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="researchclaw",
@@ -571,11 +609,40 @@ def main(argv: list[str] | None = None) -> int:
         "--run-dir", required=True, help="Path to run artifacts directory"
     )
     _ = rpt_p.add_argument("--output", "-o", help="Write report to file")
+    for command_name, help_text in (
+        ("dataset-audit", "Read-only COVERAGE image/mask audit"),
+        ("dataset-split", "Propose grouped COVERAGE pilot splits; never starts training"),
+    ):
+        dataset_parser = sub.add_parser(command_name, help=help_text)
+        dataset_parser.add_argument("--root", required=True, help="COVERAGE directory")
+        dataset_parser.add_argument("--output", required=True, help="New JSON file; refuses overwrite")
+        if command_name == "dataset-split":
+            dataset_parser.add_argument("--train-fraction", type=float, default=0.7)
+            dataset_parser.add_argument("--validation-fraction", type=float, default=0.15)
+            dataset_parser.add_argument("--seed", type=int, default=42)
+            dataset_parser.add_argument(
+                "--previously-evaluated-group", action="append", default=[],
+                help="Keep this source ID out of train/validation; repeat for each ID",
+            )
+    check_parser = sub.add_parser("dataset-check", help="Verify split approval, hashes and data leakage")
+    check_parser.add_argument("--manifest", required=True)
+    check_parser.add_argument("--root", help="Override root after transfer to the server")
+    check_parser.add_argument("--proposal", action="store_true", help="Validate only; do not authorize training")
+    training_parser = sub.add_parser("training", help="Prepare/start/status/resume/verify a managed Co-Transformers pilot")
+    training_parser.add_argument("action", choices=("prepare", "start", "status", "resume", "verify"))
+    training_parser.add_argument("--job-dir", required=True)
+    training_parser.add_argument("--spec", help="Required for prepare; immutable JSON job specification")
+    training_parser.add_argument("--gpu-uuid", help="Explicitly allocated, currently idle GPU; required for start/resume")
+    training_parser.add_argument("--watch", action="store_true", help="Watch status every 10 seconds; Ctrl+C leaves worker running")
     args = parser.parse_args(argv)
 
     command = cast(str | None, args.command)
 
-    if command == "run":
+    if command == "training":
+        return cmd_training(args)
+    elif command in {"dataset-audit", "dataset-split", "dataset-check"}:
+        return cmd_dataset(args)
+    elif command == "run":
         return cmd_run(args)
     elif command == "validate":
         return cmd_validate(args)
@@ -590,6 +657,41 @@ def main(argv: list[str] | None = None) -> int:
     else:
         parser.print_help()
         return 0
+
+
+def cmd_training(args: argparse.Namespace) -> int:
+    import time
+
+    from researchclaw.training.jobs import job_status, prepare_job, start_job
+
+    try:
+        job_dir = Path(args.job_dir)
+        if args.action == "prepare":
+            if not args.spec:
+                raise ValueError("prepare requires --spec")
+            prepare_job(Path(args.spec), job_dir)
+            result = job_status(job_dir)
+        elif args.action in {"start", "resume"}:
+            if not args.gpu_uuid:
+                raise ValueError("start/resume requires an allocated --gpu-uuid")
+            result = start_job(job_dir, args.gpu_uuid, resume=args.action == "resume")
+        elif args.action == "verify":
+            from researchclaw.training.evidence import verify_completed_job
+
+            result = verify_completed_job(job_dir)
+        else:
+            result = job_status(job_dir)
+        print(json.dumps(result, indent=2))
+        while args.action == "status" and args.watch and result["status"] in {"starting", "running"}:
+            time.sleep(10)
+            result = job_status(job_dir)
+            print(json.dumps(result), flush=True)
+        return 1 if result.get("status") in {"failed", "interrupted"} else 0
+    except KeyboardInterrupt:
+        return 0
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.SubprocessError) as exc:
+        print(f"Training command failed: {exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
