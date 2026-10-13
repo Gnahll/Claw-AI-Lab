@@ -1711,6 +1711,32 @@ class TestRunPayloadMetrics:
         payload = {"success": False, "has_results": False, "results": None, "elapsed_sec": 3.0}
         assert rc_executor._run_payload_metrics(payload) == {}
 
+    @pytest.mark.parametrize("wrapped", [False, True])
+    def test_preserves_top_level_conditions(self, wrapped: bool) -> None:
+        results = {"baseline": {"accuracy": 0.61}, "ours": {"accuracy": 0.74}}
+        payload = {"results": results, "success": True} if wrapped else results
+        assert rc_executor._run_payload_metrics(payload) == {
+            "baseline/accuracy": 0.61,
+            "ours/accuracy": 0.74,
+        }
+
+    def test_preserves_unknown_containers_and_skips_bookkeeping(self) -> None:
+        payload = {
+            "accuracy": 0.5,
+            "ours": {"accuracy": 0.74, "seed": 42},
+            "baseline": {"accuracy": 0.61},
+            "metadata": {"elapsed_seconds": 3, "samples": 100},
+        }
+        assert rc_executor._run_payload_metrics(payload) == {
+            "accuracy": 0.5,
+            "ours/accuracy": 0.74,
+            "baseline/accuracy": 0.61,
+        }
+
+    def test_limits_top_level_metric_count(self) -> None:
+        payload = {f"metric_{index}": index for index in range(250)}
+        assert len(rc_executor._run_payload_metrics(payload)) == 200
+
 
 class TestCollectExperimentResults:
     """Tests for _collect_experiment_results() with agentic outputs."""
@@ -1729,9 +1755,138 @@ class TestCollectExperimentResults:
             "conditions": {"gd": {"acc": 0.92}, "momentum": {"acc": 0.93}},
         }))
         result = rc_executor._collect_experiment_results(run_dir, metric_key="momentum/acc")
-        assert len(result["runs"]) == 2
+        assert len(result["runs"]) == 1
         assert result["metrics_summary"]["momentum/acc"]["max"] == 0.93
+        assert result["metrics_summary"]["momentum/acc"]["mean"] == 0.93
         assert result["best_run"]["metrics"]["gd/acc"] == 0.92
+        assert len(result["result_versions"]) == 2
+        assert result["selected_version"] == "stage-15"
+
+    @pytest.mark.parametrize("final_metric", [0.1, 0.3])
+    def test_final_version_is_not_a_repeat_of_initial_version(
+        self, tmp_path: Path, final_metric: float
+    ) -> None:
+        runs_dir = tmp_path / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_report.json").write_text(json.dumps({
+            "success": True,
+            "results": {"primary_metric": 0.2, "ours": {"accuracy": 0.74}},
+        }))
+        refine_dir = tmp_path / "stage-15"
+        refine_dir.mkdir()
+        (refine_dir / "results.json").write_text(json.dumps({
+            "primary_metric": final_metric, "ours": {"accuracy": 0.80},
+        }))
+        result = rc_executor._collect_experiment_results(
+            tmp_path, metric_key="primary_metric", metric_direction="minimize"
+        )
+        assert len(result["runs"]) == 1
+        assert result["metrics_summary"]["ours/accuracy"]["mean"] == 0.80
+        assert result["metrics_summary"]["ours/accuracy"]["count"] == 1
+        assert result["best_run"]["metrics"]["primary_metric"] == final_metric
+        assert result["result_versions"][0]["metrics"]["primary_metric"] == 0.2
+        assert result["run_count_basis"] == "result_records"
+
+    def test_invalid_refinement_keeps_initial_results(self, tmp_path: Path) -> None:
+        runs_dir = tmp_path / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_report.json").write_text(json.dumps({
+            "success": True, "results": {"primary_metric": 0.2},
+        }))
+        refine_dir = tmp_path / "stage-15"
+        refine_dir.mkdir()
+        (refine_dir / "results.json").write_text("null")
+        result = rc_executor._collect_experiment_results(tmp_path)
+        assert len(result["runs"]) == 1
+        assert result["best_run"]["metrics"]["primary_metric"] == 0.2
+
+    @pytest.mark.parametrize("direction, expected", [("minimize", 0.1), ("maximize", 0.2)])
+    def test_independent_runs_obey_metric_direction(
+        self, tmp_path: Path, direction: str, expected: float
+    ) -> None:
+        runs_dir = tmp_path / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        for index, score in enumerate([0.2, 0.1]):
+            (runs_dir / f"run-{index}.json").write_text(json.dumps({
+                "metrics": {"primary_metric": score}, "seed": index,
+            }))
+        result = rc_executor._collect_experiment_results(
+            tmp_path, metric_key="primary_metric", metric_direction=direction
+        )
+        assert len(result["runs"]) == 2
+        assert result["metrics_summary"]["primary_metric"]["mean"] == 0.15
+        assert result["best_run"]["metrics"]["primary_metric"] == expected
+
+
+class TestFinalVersionDataFlow:
+    @pytest.fixture()
+    def final_version_run(self, tmp_path: Path) -> Path:
+        runs_dir = tmp_path / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_report.json").write_text(json.dumps({
+            "success": True,
+            "results": {"primary_metric": 0.2, "ours": {"accuracy": 0.74}},
+        }))
+        refine_dir = tmp_path / "stage-15"
+        refine_dir.mkdir()
+        (refine_dir / "results.json").write_text(json.dumps({
+            "primary_metric": 0.1, "ours": {"accuracy": 0.80},
+        }))
+        return tmp_path
+
+    def test_raw_metrics_use_final_version_without_summary(self, final_version_run: Path) -> None:
+        block, has_metrics = rc_executor._collect_raw_experiment_metrics(final_version_run)
+        assert has_metrics
+        assert "ours/accuracy: 0.8" in block
+        assert "0.74" not in block
+        assert "independent" in block
+
+    def test_analysis_summary_and_downstream_metrics_agree(
+        self, final_version_run: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from researchclaw.pipeline.result_analysis import ResultAnalysisRuntime
+
+        monkeypatch.setattr(ResultAnalysisRuntime, "execute", lambda *args, **kwargs: None)
+        monkeypatch.setattr(rc_executor, "_run_chart_generation", lambda *args, **kwargs: None)
+        stage_dir = final_version_run / "stage-16"
+        stage_dir.mkdir()
+        rc_executor._execute_result_analysis(stage_dir, final_version_run, rc_config, adapters)
+        summary = json.loads((stage_dir / "experiment_summary.json").read_text(encoding="utf-8"))
+        assert summary["total_runs"] == 1
+        assert summary["run_count_basis"] == "result_records"
+        assert summary["selected_version"] == "stage-15"
+        assert len(summary["result_versions"]) == 2
+        assert summary["condition_summaries"]["ours"]["metrics"]["accuracy"] == 0.80
+        block, has_metrics = rc_executor._collect_raw_experiment_metrics(final_version_run)
+        assert has_metrics
+        assert "ours/accuracy: 0.8" in block
+        assert "0.74" not in block
+        evidence = rc_executor._collect_experiment_evidence(final_version_run)
+        assert "result_records" in evidence
+        assert "independent" in evidence
+        assert '"accuracy": 0.8' in evidence
+
+    def test_analysis_passes_metric_direction_to_collector(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from researchclaw.pipeline.result_analysis import ResultAnalysisRuntime
+
+        monkeypatch.setattr(ResultAnalysisRuntime, "execute", lambda *args, **kwargs: None)
+        monkeypatch.setattr(rc_executor, "_run_chart_generation", lambda *args, **kwargs: None)
+        runs_dir = tmp_path / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        for index, score in enumerate([0.2, 0.1]):
+            (runs_dir / f"run-{index}.json").write_text(json.dumps({
+                "metrics": {rc_config.experiment.metric_key: score},
+            }))
+        assert rc_config.experiment.metric_direction == "minimize"
+        stage_dir = tmp_path / "stage-16"
+        stage_dir.mkdir()
+        rc_executor._execute_result_analysis(stage_dir, tmp_path, rc_config, adapters)
+        summary = json.loads((stage_dir / "experiment_summary.json").read_text(encoding="utf-8"))
+        assert summary["best_run"]["metrics"][rc_config.experiment.metric_key] == 0.1
 
 
 class TestCollectExperimentEvidence:
