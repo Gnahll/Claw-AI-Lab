@@ -1665,6 +1665,74 @@ class TestCollectRawExperimentMetrics:
         # "loss: 0.5" should appear only once (deduplicated)
         assert result.count("loss: 0.5") == 1
 
+    def test_reads_agentic_run_report_and_refine_results(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run"
+        runs_dir = run_dir / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_report.json").write_text(json.dumps({
+            "success": True,
+            "results": {"conditions": {"baseline": {"accuracy": 0.61}}},
+        }))
+        refine_dir = run_dir / "stage-15"
+        refine_dir.mkdir(parents=True)
+        (refine_dir / "refinement_log.json").write_text(json.dumps({"iterations": 3}))
+        (refine_dir / "results.json").write_text(json.dumps({
+            "primary_metric": 0.74,
+            "conditions": {"baseline": {"accuracy": 0.62}, "ours": {"accuracy": 0.74}},
+        }))
+        summary_dir = run_dir / "stage-16"
+        summary_dir.mkdir(parents=True)
+        (summary_dir / "experiment_summary.json").write_text(json.dumps({"total_runs": 8}))
+        result, has_parsed = rc_executor._collect_raw_experiment_metrics(run_dir)
+        assert has_parsed
+        assert "ours/accuracy: 0.74" in result
+        assert "baseline/accuracy: 0.62" in result
+        assert "8 run(s)" in result
+
+
+class TestRunPayloadMetrics:
+    """Tests for _run_payload_metrics() schema handling."""
+
+    def test_flattens_free_form_result_layouts(self) -> None:
+        payload = {
+            "primary_metric": 0.2,
+            "elapsed_seconds": 12.5,
+            "condition_scores": {"gd": 0.1, "momentum": 0.2},
+            "conditions": {"gd": {"seed_1": {"acc": 0.8}}},
+        }
+        assert rc_executor._run_payload_metrics(payload) == {
+            "primary_metric": 0.2,
+            "gd": 0.1,
+            "momentum": 0.2,
+            "gd/seed_1/acc": 0.8,
+        }
+
+    def test_failed_run_report_has_no_metrics(self) -> None:
+        payload = {"success": False, "has_results": False, "results": None, "elapsed_sec": 3.0}
+        assert rc_executor._run_payload_metrics(payload) == {}
+
+
+class TestCollectExperimentResults:
+    """Tests for _collect_experiment_results() with agentic outputs."""
+
+    def test_reads_run_report_and_refined_results(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run"
+        runs_dir = run_dir / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_report.json").write_text(json.dumps({
+            "success": True,
+            "results": {"conditions": {"gd": {"acc": 0.90}, "momentum": {"acc": 0.91}}},
+        }))
+        refine_dir = run_dir / "stage-15"
+        refine_dir.mkdir(parents=True)
+        (refine_dir / "results.json").write_text(json.dumps({
+            "conditions": {"gd": {"acc": 0.92}, "momentum": {"acc": 0.93}},
+        }))
+        result = rc_executor._collect_experiment_results(run_dir, metric_key="momentum/acc")
+        assert len(result["runs"]) == 2
+        assert result["metrics_summary"]["momentum/acc"]["max"] == 0.93
+        assert result["best_run"]["metrics"]["gd/acc"] == 0.92
+
 
 class TestCollectExperimentEvidence:
     """Tests for _collect_experiment_evidence() helper."""
@@ -1731,6 +1799,37 @@ class TestCollectExperimentEvidence:
         result = rc_executor._collect_experiment_evidence(run_dir)
         assert "1 time(s)" in result
         assert "CRITICAL" in result
+
+    def test_reads_agentic_run_report_and_summary(self, run_dir: Path) -> None:
+        results = {
+            "primary_metric": 0.1,
+            "conditions": {"baseline": {"accuracy": 0.61}, "ours": {"accuracy": 0.74}},
+        }
+        runs_dir = run_dir / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(json.dumps(results), encoding="utf-8")
+        (runs_dir / "run_report.json").write_text(
+            json.dumps({"success": True, "has_results": True, "results": results, "elapsed_sec": 12.0}),
+            encoding="utf-8",
+        )
+        refine_dir = run_dir / "stage-15"
+        refine_dir.mkdir(parents=True, exist_ok=True)
+        (refine_dir / "refinement_log.json").write_text(
+            json.dumps({"iterations": 4, "improved": True, "baseline_metric": 0.2, "final_metric": 0.1}),
+            encoding="utf-8",
+        )
+        analysis_dir = run_dir / "stage-16"
+        analysis_dir.mkdir(parents=True, exist_ok=True)
+        (analysis_dir / "experiment_summary.json").write_text(
+            json.dumps({"total_runs": 6, "condition_summaries": {"ours": {"metrics": {"accuracy": 0.74}}}}),
+            encoding="utf-8",
+        )
+        result = rc_executor._collect_experiment_evidence(run_dir)
+        assert '"metrics": null' not in result
+        assert '"ours/accuracy": 0.74' in result
+        assert '"iterations_executed": 4' in result
+        assert "experiment_summary.json" in result
+        assert "comprises 6 run(s)" in result
 
 
 class TestWritePaperSections:
