@@ -21,14 +21,14 @@ and fix the code. Repeat until the smoke test passes cleanly.
 # Environment
 - Workspace: `{workspace_path}`
 - Python: `{python_path or 'python3'}`
-- GPU is available (CUDA)
+- Use only the inherited CUDA_VISIBLE_DEVICES; an empty value means CPU only
 - The experiment directory contains `main.py` (and possibly helper files)
 - The workspace has symlinks to datasets, checkpoints, and codebases
 
 # Workflow
 1. First, read `main.py` to understand the experiment structure
 2. Run: `SMOKE_TEST=1 python3 main.py`
-3. If it succeeds (exit code 0, no uncaught exceptions), you are DONE
+3. Require exit code 0, no uncaught exceptions, and a fresh results.json with real numeric smoke measurements
 4. If it fails, diagnose the error:
    - Read the traceback carefully
    - Identify the root cause (import error, shape mismatch, missing file, OOM, API change, etc.)

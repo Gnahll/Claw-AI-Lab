@@ -20,8 +20,11 @@ from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.pipeline.codegen.runtime import CodegenRuntime
 from researchclaw.pipeline.executor import StageResult
+from researchclaw.pipeline.stages import Stage
+from researchclaw.training.resources import with_execution_resources
 
 
+@with_execution_resources(Stage.CODE_GENERATION)
 def execute_code_generation(
     stage_dir: Path,
     run_dir: Path,

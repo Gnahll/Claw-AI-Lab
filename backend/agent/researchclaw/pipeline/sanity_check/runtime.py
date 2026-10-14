@@ -141,8 +141,10 @@ class SanityCheckRuntime:
         # Copy fixed files back to experiment directory
         fixed_count = self._copy_fixes_back(workspace, experiment_dir, session)
 
-        # Determine success: check if smoke test passed by examining final text
-        success = self._check_success(turn_result, workspace, max_iterations=min(max_iters, 30))
+        from researchclaw.training.execution import run_experiment
+
+        measured_smoke = run_experiment(workspace, stage_dir / "smoke_execution", config, smoke=True, timeout=180)
+        success = measured_smoke["success"]
         session.log(
             "RESULT",
             f"Sanity check {'PASSED' if success else 'FAILED'}: "
@@ -153,6 +155,7 @@ class SanityCheckRuntime:
         # Save report
         report = {
             "passed": success,
+            "execution": measured_smoke,
             "iterations": turn_result.iterations,
             "tool_calls": turn_result.tool_calls,
             "files_fixed": fixed_count,

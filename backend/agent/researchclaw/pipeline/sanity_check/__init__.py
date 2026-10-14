@@ -15,8 +15,11 @@ from typing import Any
 from researchclaw.config import RCConfig
 from researchclaw.adapters import AdapterBundle
 from researchclaw.pipeline.executor import StageResult
+from researchclaw.pipeline.stages import Stage
+from researchclaw.training.resources import with_execution_resources
 
 
+@with_execution_resources(Stage.SANITY_CHECK)
 def execute_sanity_check(
     stage_dir: Path,
     run_dir: Path,

@@ -55,7 +55,8 @@ def test_generate_config_from_template_persists_reference_papers(tmp_path: Path)
     )
 
     content = Path(config_path).read_text(encoding="utf-8")
-    assert 'reference_papers:\n    - "1234.56789"\n    - "/data/papers/local_reference.pdf"' in content
+    import yaml
+    assert yaml.safe_load(content)["research"]["reference_papers"] == ["1234.56789", "/data/papers/local_reference.pdf"]
     assert "__REFERENCE_PAPERS__" not in content
 
 
@@ -67,7 +68,7 @@ def test_local_template_is_selected_without_modifying_repository_template(tmp_pa
     monkeypatch.setenv("CLAW_CONFIG_TEMPLATE", str(template))
     state = SimpleNamespace(runs_base_dir=str(tmp_path / "runs"), agent_package_dir=str(tmp_path / "agent"))
     output = agent_bridge._generate_config_from_template(state, "local-test", "test topic")
-    assert "api_key_env: RESEARCHCLAW_API_KEY" in Path(output).read_text()
+    assert "api_key_env: RESEARCHCLAW_API_KEY" in Path(output).read_text(encoding="utf-8")
     assert template.read_bytes() == original
 
 

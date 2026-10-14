@@ -146,6 +146,8 @@ CRITICAL RULES:
 # ------------------------------------------------------------------
 
 def _intro_section() -> str:
+    from researchclaw.training.execution import EXECUTION_CONTRACT
+
     return (
         "You are a research coding agent that generates experiment code by using tools. "
         "You have access to bash, read_file, write_file, edit_file, glob_search, and grep_search. "
@@ -153,6 +155,7 @@ def _intro_section() -> str:
         "iteratively until the experiment produces valid results.\n\n"
         "IMPORTANT: Do NOT describe what you plan to do — just DO it by calling tools. "
         "Every response should include at least one tool call until the experiment is complete."
+        + "\n\n" + EXECUTION_CONTRACT
     )
 
 

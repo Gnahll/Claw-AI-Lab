@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import time
+import sys
 from pathlib import Path
 
 import pytest
@@ -73,3 +74,13 @@ def test_timeout_kills_child_processes(tmp_path: Path) -> None:
     assert "timed out" in output
     pid = int((tmp_path / "child.pid").read_text().strip())
     assert _wait_dead(pid)
+
+
+def test_python_path_keeps_virtual_environment_symlink(tmp_path: Path) -> None:
+    virtual_bin = tmp_path / "venv/bin"
+    virtual_bin.mkdir(parents=True)
+    python = virtual_bin / "python"
+    python.symlink_to(Path(sys.executable).resolve())
+    executor = ToolExecutor(tmp_path, python_path=str(python))
+    output, _ = executor.execute("bash", {"command": "command -v python"})
+    assert output.strip() == str(python)

@@ -102,7 +102,7 @@ class ToolExecutor:
         # Use python_path from config (experiment.sandbox.python_path) to
         # ensure bash runs in the correct conda/venv environment.
         if self.python_path and os.path.isfile(self.python_path):
-            python_bin_dir = os.path.dirname(os.path.realpath(self.python_path))
+            python_bin_dir = os.path.dirname(os.path.abspath(self.python_path))
             env["PATH"] = python_bin_dir + ":" + env.get("PATH", "")
             env_prefix = os.path.dirname(python_bin_dir)
             env["CONDA_PREFIX"] = env_prefix

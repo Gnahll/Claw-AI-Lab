@@ -17,11 +17,8 @@ export default defineConfig({
       '/ws/agents': {
         target: `ws://localhost:${agentPort}`,
         ws: true,
+        rewriteWsOrigin: false,
         rewrite: () => '/',
-      },
-      '/download-training': {
-        target: `http://localhost:${agentPort}`,
-        changeOrigin: true,
       },
       '/download': {
         target: `http://localhost:${agentPort}`,

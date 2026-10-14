@@ -12,6 +12,7 @@ const STATUS_ICONS: Record<string, { color: string; icon: string }> = {
 
 type SubmitMode = 'lab' | 'reproduce';
 type ReferencePdfUpload = { name: string; contentBase64: string };
+type ProjectResources = { codebases?: string; datasets?: string; checkpoints?: string; requireTraining: boolean; gpuUuid: string };
 
 function stageName(n: number, t: (k: string) => string): string {
   const key = `stage.${n}`;
@@ -37,7 +38,7 @@ interface Props {
     researchAngles: string[],
     referencePapers: string,
     referenceFiles: ReferencePdfUpload[],
-    paths: { codebases?: string; datasets?: string; checkpoints?: string }
+    paths: ProjectResources
   ) => void;
 }
 
@@ -54,6 +55,8 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
   const [codebasesPath, setCodebasesPath] = useState('');
   const [datasetsPath, setDatasetsPath] = useState('');
   const [checkpointsPath, setCheckpointsPath] = useState('');
+  const [requireTraining, setRequireTraining] = useState(true);
+  const [gpuUuid, setGpuUuid] = useState('');
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
   const { t, locale } = useLocale();
 
@@ -114,7 +117,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
     const angles = mode === 'lab'
       ? anglesInput.split(/[,，、;；]/).map(s => s.trim()).filter(Boolean)
       : [];
-    const paths: { codebases?: string; datasets?: string; checkpoints?: string } = {};
+    const paths: ProjectResources = { requireTraining, gpuUuid: gpuUuid.trim() };
     if (codebasesPath.trim()) paths.codebases = codebasesPath.trim();
     if (datasetsPath.trim()) paths.datasets = datasetsPath.trim();
     if (checkpointsPath.trim()) paths.checkpoints = checkpointsPath.trim();
@@ -321,6 +324,17 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
                   </label>
                 </div>
               )}
+              <label className="path-field">
+                <span className="path-label">
+                  <input type="checkbox" checked={requireTraining} onChange={e => setRequireTraining(e.target.checked)} disabled={!connected} />
+                  {locale === 'zh' ? '原流程必须完成真实训练（仅评估任务可取消）' : 'Require real training in this workflow (uncheck for evaluation only)'}
+                </span>
+              </label>
+              <label className="path-field">
+                <span className="path-label">{locale === 'zh' ? '已授权的 GPU UUID（留空仅用 CPU）' : 'Authorized GPU UUID (empty = CPU only)'}</span>
+                <input className="path-input" value={gpuUuid} onChange={e => setGpuUuid(e.target.value)} placeholder="GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" disabled={!connected} />
+                <span className="path-label">{locale === 'zh' ? '提交即允许此任务使用所填 GPU；占用中会停止，不会抢占。训练仍需有效的数据划分和完整实验方案。' : 'Submitting authorizes this task on the specified GPU; busy devices block execution. A valid data split and complete experiment plan are still required.'}</span>
+              </label>
               <button
                 className={`project-go-btn ${mode === 'lab' ? 'lab-mode' : 'reproduce-mode'}`}
                 onClick={submit}

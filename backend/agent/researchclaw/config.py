@@ -305,6 +305,8 @@ class FigureAgentConfig:
 class ExperimentConfig:
     mode: str = "simulated"
     training_job_dir: str = ""
+    require_training: bool = False
+    gpu_uuid: str = ""
     time_budget_sec: int = 3600
     max_iterations: int = 10
     max_refine_duration_sec: int = 0  # 0 = auto (3× time_budget_sec)
@@ -638,6 +640,8 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
     return ExperimentConfig(
         mode=data.get("mode", "simulated"),
         training_job_dir=data.get("training_job_dir", ""),
+        require_training=bool(data.get("require_training", False)),
+        gpu_uuid=str(data.get("gpu_uuid", "")),
         time_budget_sec=int(data.get("time_budget_sec", 3600)),
         max_iterations=int(data.get("max_iterations", 10)),
         max_refine_duration_sec=int(data.get("max_refine_duration_sec", 0)),
