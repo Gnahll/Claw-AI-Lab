@@ -233,6 +233,186 @@ def test_s12_does_not_trust_llm_success_text(tmp_path, monkeypatch):
     assert result.status == StageStatus.FAILED
 
 
+@pytest.mark.parametrize("status", ["blocked", "failed", "incomplete", "skipped"])
+def test_supervisor_rejects_explicit_failure_status_even_with_metric(tmp_path, status):
+    payload = json.dumps({"status": status, "metric": 0.5, "blocker": "approval required"})
+    (tmp_path / "main.py").write_text(
+        f"from pathlib import Path\nPath('results.json').write_text({payload!r})\n"
+    )
+
+    result = run_experiment(tmp_path, tmp_path / "evidence", configuration(), smoke=True)
+
+    assert not result["success"]
+    assert f"Experiment reported {status}" in result["errors"][0]
+    assert result["results"]["blocker"] == "approval required"
+
+
+def test_smoke_metadata_without_requested_metric_is_rejected(tmp_path):
+    (tmp_path / "main.py").write_text(
+        "from pathlib import Path\nPath('results.json').write_text('{\"seed\":42}')\n"
+    )
+
+    result = run_experiment(tmp_path, tmp_path / "evidence", configuration(), smoke=True)
+
+    assert not result["success"]
+    assert "missing measured metric" in result["errors"][0]
+
+
+def test_s12_valid_source_needs_no_llm_repair(tmp_path, monkeypatch):
+    from researchclaw.pipeline.sanity_check import runtime
+
+    experiment = tmp_path / "stage-11/experiment"
+    experiment.mkdir(parents=True)
+    (experiment / "main.py").write_text(
+        "from pathlib import Path\nPath('results.json').write_text('{\"metric\":0.5}')\n"
+    )
+    monkeypatch.setattr(runtime, "AgentTurnLoop", lambda **kwargs: SimpleNamespace(
+        run_turn=lambda message: pytest.fail("Passing smoke needs no LLM repair"),
+    ))
+
+    result = runtime.SanityCheckRuntime().execute(
+        tmp_path / "stage-12", tmp_path, configuration(), None,
+        llm=SimpleNamespace(config=SimpleNamespace(primary_model="test")),
+    )
+
+    assert result.status == StageStatus.DONE
+    report = json.loads((tmp_path / "stage-12/sanity_report.json").read_text())
+    assert report["iterations"] == 0
+    assert len(report["attempts"]) == 1
+    assert report["execution"]["results"] == {"metric": 0.5}
+    assert (tmp_path / "stage-12/smoke_execution/attempt-1/execution.log").is_file()
+
+
+def test_s12_feedback_repairs_nested_result_save_in_source(tmp_path, monkeypatch):
+    from researchclaw.pipeline.sanity_check import runtime
+    from researchclaw.pipeline.claw_engine.turn_loop import TurnResult
+
+    experiment = tmp_path / "stage-11/experiment"
+    experiment.mkdir(parents=True)
+    source = (
+        "from pathlib import Path\n"
+        "LR = 1e-5\n"
+        "OUT = Path('outputs/smoke')\n"
+        "OUT.mkdir(parents=True, exist_ok=True)\n"
+        "RESULT = OUT / 'results.json'\n"
+        "RESULT.write_text('{\"primary_metric\":0.4,\"status\":\"smoke_completed\"}')\n"
+    )
+    (experiment / "main.py").write_text(source)
+    (experiment / "results.json").write_text('{"primary_metric":0.99}')
+    messages = []
+
+    def repair_loop(**kwargs):
+        def repair(message):
+            messages.append(message)
+            path = kwargs["workspace"] / "main.py"
+            path.write_text(path.read_text().replace("RESULT = OUT / 'results.json'", "RESULT = Path('results.json')"))
+            return TurnResult(iterations=1, tool_calls=1)
+
+        return SimpleNamespace(run_turn=repair)
+
+    monkeypatch.setattr(runtime, "AgentTurnLoop", repair_loop)
+
+    result = runtime.SanityCheckRuntime().execute(
+        tmp_path / "stage-12", tmp_path, configuration(metric="primary_metric"), None,
+        llm=SimpleNamespace(config=SimpleNamespace(primary_model="test")),
+    )
+
+    assert result.status == StageStatus.DONE
+    assert len(messages) == 1
+    assert "Experiment did not write a fresh results.json" in messages[0]
+    assert "Execution log:" in messages[0]
+    report = json.loads((tmp_path / "stage-12/sanity_report.json").read_text())
+    assert not report["attempts"][0]["success"]
+    assert report["attempts"][1]["success"]
+    assert report["execution"]["results"]["primary_metric"] == 0.4
+    assert report["files_fixed"] == 1
+    assert "LR = 1e-5" in (experiment / "main.py").read_text()
+    assert "RESULT = Path('results.json')" in (experiment / "main.py").read_text()
+    latest = json.loads((tmp_path / "stage-12/smoke_execution/execution_report.json").read_text())
+    assert latest == report["attempts"][1]
+
+
+def test_s12_manually_written_results_cannot_pass_rerun(tmp_path, monkeypatch):
+    from researchclaw.pipeline.sanity_check import runtime
+    from researchclaw.pipeline.claw_engine.turn_loop import TurnResult
+
+    experiment = tmp_path / "stage-11/experiment"
+    experiment.mkdir(parents=True)
+    source = "print('no measurements')\n"
+    (experiment / "main.py").write_text(source)
+
+    def repair_loop(**kwargs):
+        def repair(message):
+            (kwargs["workspace"] / "results.json").write_text('{"metric":0.99}')
+            return TurnResult(final_text="smoke passed")
+
+        return SimpleNamespace(run_turn=repair)
+
+    monkeypatch.setattr(runtime, "AgentTurnLoop", repair_loop)
+
+    result = runtime.SanityCheckRuntime().execute(
+        tmp_path / "stage-12", tmp_path, configuration(), None,
+        llm=SimpleNamespace(config=SimpleNamespace(primary_model="test")),
+    )
+
+    assert result.status == StageStatus.FAILED
+    assert result.decision == "retry"
+    assert "fresh results.json" in result.error
+    assert (experiment / "main.py").read_text() == source
+    report = json.loads((tmp_path / "stage-12/sanity_report.json").read_text())
+    assert len(report["attempts"]) == 2
+    assert not any(attempt["success"] for attempt in report["attempts"])
+
+
+def test_s12_failed_fix_is_not_copied_back(tmp_path, monkeypatch):
+    from researchclaw.pipeline.sanity_check import runtime
+    from researchclaw.pipeline.claw_engine.turn_loop import TurnResult
+
+    experiment = tmp_path / "stage-11/experiment"
+    experiment.mkdir(parents=True)
+    source = "raise SystemExit(7)\n"
+    (experiment / "main.py").write_text(source)
+
+    def repair_loop(**kwargs):
+        def repair(message):
+            assert "exited with 7" in message
+            (kwargs["workspace"] / "main.py").write_text(
+                "from pathlib import Path\nPath('results.json').write_text('{\"seed\":42}')\n"
+            )
+            return TurnResult(iterations=1)
+
+        return SimpleNamespace(run_turn=repair)
+
+    monkeypatch.setattr(runtime, "AgentTurnLoop", repair_loop)
+
+    result = runtime.SanityCheckRuntime().execute(
+        tmp_path / "stage-12", tmp_path, configuration(), None,
+        llm=SimpleNamespace(config=SimpleNamespace(primary_model="test")),
+    )
+
+    assert result.status == StageStatus.FAILED
+    assert "missing measured metric" in result.error
+    assert (experiment / "main.py").read_text() == source
+    report = json.loads((tmp_path / "stage-12/sanity_report.json").read_text())
+    assert report["files_fixed"] == 0
+
+
+def test_s12_prompt_describes_fresh_root_results_and_preserves_protocol():
+    from researchclaw.pipeline.sanity_check.system_prompt import build_system_prompt, build_user_message
+
+    prompt = build_system_prompt(python_path="/approved/python", workspace_path="/workspace", metric_key="loss")
+
+    assert "SMOKE_TEST=1 /approved/python main.py" in prompt
+    assert "workspace-root results.json" in prompt
+    assert "written by main.py itself" in prompt
+    assert "finite measured `loss`" in prompt
+    assert "Preserve approved splits, optimizer, learning rate and schedule" in prompt
+    assert "held-out test split" in prompt
+    user_message = build_user_message(experiment_dir="/workspace", experiment_files=["main.py"], python_path="/approved/python")
+    assert "SMOKE_TEST=1 /approved/python main.py" in user_message
+    assert "SMOKE_TEST=1 python3 main.py" not in user_message
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process groups")
 def test_stopping_original_stage_kills_its_experiment(tmp_path):
     import signal

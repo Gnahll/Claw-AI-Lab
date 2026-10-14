@@ -22,7 +22,9 @@ TRAINING_OBJECTIVE = (
 
 EXECUTION_CONTRACT = """
 The pipeline runs main.py itself and does not accept prose as execution evidence.
-Write results.json containing finite numeric measurements from the actual evaluation.
+main.py itself must write workspace-root results.json on every execution, containing
+finite numeric measurements from the actual evaluation. A nested results file or
+one manually written by an agent after the process exits does not satisfy this contract.
 Never copy smoke/prior metrics into a full run. Keep full and SMOKE_TEST=1 paths separate.
 For a training task: use real PyTorch optimizer updates in this process (not a subprocess
 or distributed launcher), loss.backward(), and save the FINAL trained model state_dict
@@ -96,10 +98,12 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
             results = json.loads(result_path.read_text(encoding="utf-8"), parse_constant=_reject_nonfinite)
             if not isinstance(results, dict) or not _has_measurement(results):
                 raise ValueError("results.json has no finite numeric measurements")
-            if not smoke and not _has_named_metric(results, config.experiment.metric_key):
-                raise ValueError(f"results.json is missing measured metric: {config.experiment.metric_key}")
             report["results"] = results
             report["results_sha256"] = hashlib.sha256(result_path.read_bytes()).hexdigest()
+            if results.get("status") in ("blocked", "failed", "incomplete", "skipped"):
+                raise ValueError(f"Experiment reported {results['status']}: {results.get('blocker', 'see results.json')}")
+            if not _has_named_metric(results, config.experiment.metric_key):
+                raise ValueError(f"results.json is missing measured metric: {config.experiment.metric_key}")
             if training:
                 observation = json.loads(evidence_path.read_text(encoding="utf-8"))
                 report["training"] = observation

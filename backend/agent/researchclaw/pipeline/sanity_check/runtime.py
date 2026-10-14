@@ -17,6 +17,7 @@ from typing import Any
 from researchclaw.config import RCConfig
 from researchclaw.adapters import AdapterBundle
 from researchclaw.pipeline.claw_engine import AgentTurnLoop, StageSession
+from researchclaw.pipeline.claw_engine.turn_loop import TurnResult
 from researchclaw.pipeline.sanity_check.system_prompt import (
     build_system_prompt,
     build_user_message,
@@ -103,6 +104,7 @@ class SanityCheckRuntime:
         system_prompt = build_system_prompt(
             python_path=python_path,
             workspace_path=str(workspace),
+            metric_key=config.experiment.metric_key,
         )
 
         exp_plan_summary = self._load_plan_summary(run_dir)
@@ -110,6 +112,7 @@ class SanityCheckRuntime:
             experiment_dir=str(workspace),
             experiment_files=exp_files,
             exp_plan_summary=exp_plan_summary,
+            python_path=python_path,
         )
 
         # Save system prompt for debugging
@@ -135,16 +138,32 @@ class SanityCheckRuntime:
             trace_prefix="sanity",
         )
 
-        session.log("EXECUTE", "Starting sanity check turn loop...")
-        turn_result = loop.run_turn(user_message)
-
-        # Copy fixed files back to experiment directory
-        fixed_count = self._copy_fixes_back(workspace, experiment_dir, session)
-
         from researchclaw.training.execution import run_experiment
 
-        measured_smoke = run_experiment(workspace, stage_dir / "smoke_execution", config, smoke=True, timeout=180)
+        evidence_dir = stage_dir / "smoke_execution"
+        session.log("EXECUTE", "Running main.py under pipeline supervision before repair")
+        attempt_dir = evidence_dir / "attempt-1"
+        measured_smoke = run_experiment(workspace, attempt_dir, config, smoke=True, timeout=180)
+        attempts = [measured_smoke]
+        turn_result = TurnResult()
+        if not measured_smoke["success"]:
+            failure_log = (attempt_dir / "execution.log").read_text(encoding="utf-8", errors="replace")[-12000:]
+            session.log("REPAIR", "Supervised smoke failed; sending measured errors to the repair agent")
+            turn_result = loop.run_turn(
+                user_message
+                + "\nSupervised execution failed. Repair main.py or its helpers; the pipeline will rerun them.\n"
+                + json.dumps(measured_smoke["errors"])
+                + "\nExecution log:\n"
+                + failure_log
+            )
+            attempt_dir = evidence_dir / "attempt-2"
+            measured_smoke = run_experiment(workspace, attempt_dir, config, smoke=True, timeout=180)
+            attempts.append(measured_smoke)
+
+        for filename in ("execution.log", "execution_report.json"):
+            shutil.copy2(attempt_dir / filename, evidence_dir / filename)
         success = measured_smoke["success"]
+        fixed_count = self._copy_fixes_back(workspace, experiment_dir, session) if success else 0
         session.log(
             "RESULT",
             f"Sanity check {'PASSED' if success else 'FAILED'}: "
@@ -156,10 +175,11 @@ class SanityCheckRuntime:
         report = {
             "passed": success,
             "execution": measured_smoke,
+            "attempts": attempts,
             "iterations": turn_result.iterations,
             "tool_calls": turn_result.tool_calls,
             "files_fixed": fixed_count,
-            "errors": turn_result.errors,
+            "errors": [*turn_result.errors, *measured_smoke["errors"]],
             "elapsed_sec": round(turn_result.elapsed_sec, 1),
         }
         (stage_dir / "sanity_report.json").write_text(
@@ -171,7 +191,8 @@ class SanityCheckRuntime:
             stage=Stage.SANITY_CHECK,
             status=StageStatus.DONE if success else StageStatus.FAILED,
             artifacts=("sanity_report.json",),
-            error=None if success else "Smoke test did not pass",
+            error=None if success else "Smoke test did not pass: " + "; ".join(measured_smoke["errors"]),
+            decision="proceed" if success else "retry",
             evidence_refs=("experiment/",),
         )
 
