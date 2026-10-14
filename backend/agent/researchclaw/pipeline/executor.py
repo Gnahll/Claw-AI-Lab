@@ -2202,7 +2202,7 @@ def _expand_search_queries(queries: list[str], topic: str) -> list[str]:
 def _check_literature_sites_reachable(timeout: float = 4.0) -> dict[str, bool]:
     """Quick connectivity check for literature API endpoints (parallel)."""
     import urllib.request
-    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from concurrent.futures import ThreadPoolExecutor, wait
 
     sites = {
         "openalex": "https://api.openalex.org/works?filter=title.search:test&per_page=1",
@@ -2215,18 +2215,30 @@ def _check_literature_sites_reachable(timeout: float = 4.0) -> dict[str, bool]:
             req = urllib.request.Request(url, headers={"User-Agent": "ResearchClaw/0.3"})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return name, resp.status < 500
-        except Exception:
+        except Exception as exc:
+            logger.warning("Literature connectivity probe failed (%s): %s", name, type(exc).__name__)
             return name, False
 
     results: dict[str, bool] = {}
-    with ThreadPoolExecutor(max_workers=len(sites)) as pool:
+    pool = ThreadPoolExecutor(max_workers=len(sites))
+    try:
         futures = {pool.submit(_probe, n, u): n for n, u in sites.items()}
-        for fut in as_completed(futures, timeout=timeout + 2):
+        completed, pending = wait(futures, timeout=timeout + 2)
+        for fut in completed:
             try:
                 name, ok = fut.result()
                 results[name] = ok
             except Exception:
                 results[futures[fut]] = False
+        if pending:
+            logger.warning(
+                "Literature connectivity checks exceeded %.1fs; skipping pending sources: %s",
+                timeout + 2, ", ".join(sorted(futures[future] for future in pending)),
+            )
+        for future in pending:
+            future.cancel()
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
     for name in sites:
         results.setdefault(name, False)
     return results
@@ -2426,6 +2438,9 @@ def _execute_literature_collect(
 
     # Pre-flight: check if any literature site is reachable
     site_status = _check_literature_sites_reachable(timeout=4.0)
+    (stage_dir / "site_status.json").write_text(
+        json.dumps({"sources": site_status, "checked_at": _utcnow_iso()}, indent=2), encoding="utf-8",
+    )
     reachable = [name for name, ok in site_status.items() if ok]
     unreachable = [name for name, ok in site_status.items() if not ok]
     if unreachable:
@@ -2435,22 +2450,23 @@ def _execute_literature_collect(
         )
     if not reachable:
         logger.warning(
-            "ALL literature sites unreachable (%s) — skipping literature collection",
+            "ALL literature sites unreachable (%s) — literature collection needs a retry",
             ", ".join(unreachable),
         )
-        skip_note = (
-            f"Skipped: all literature API endpoints unreachable "
-            f"({', '.join(unreachable)}). Downstream stages will rely on "
-            f"LLM knowledge only."
+        failure_note = (
+            f"Literature connectivity checks failed or timed out for all sources "
+            f"({', '.join(unreachable)}). Check server network/DNS and retry S4. "
+            f"No literature search was completed."
         )
         (stage_dir / "candidates.jsonl").write_text("", encoding="utf-8")
-        (stage_dir / "skip_reason.txt").write_text(skip_note, encoding="utf-8")
+        (stage_dir / "literature_error.txt").write_text(failure_note, encoding="utf-8")
         return StageResult(
             stage=Stage.LITERATURE_COLLECT,
-            status=StageStatus.DONE,
-            artifacts=("candidates.jsonl", "skip_reason.txt"),
-            evidence_refs=(),
-            decision=skip_note,
+            status=StageStatus.FAILED,
+            artifacts=("candidates.jsonl", "site_status.json", "literature_error.txt"),
+            evidence_refs=("stage-04/site_status.json", "stage-04/literature_error.txt"),
+            decision="retry",
+            error=failure_note,
         )
 
     # Read queries.json from Stage 3 (F1.5 output)
@@ -2807,7 +2823,7 @@ def _execute_literature_collect(
         )
 
     # Write references.bib (F2.4)
-    artifacts = ["candidates.jsonl"]
+    artifacts = ["candidates.jsonl", "site_status.json"]
     if (stage_dir / "reference_paper_text.md").exists():
         artifacts.append("reference_paper_text.md")
     if web_context_parts:
