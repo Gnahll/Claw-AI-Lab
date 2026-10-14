@@ -146,7 +146,7 @@ def validate_candidate(root: Path, revision: str, destination: Path) -> None:
         archive.extractall(destination)
     environment = dict(os.environ, PYTHONPATH=str(destination / "backend/agent"),
                        PYTHONDONTWRITEBYTECODE="1", CUDA_VISIBLE_DEVICES="")
-    tests = ["test_coverage_data.py", "test_managed_training.py", "test_rc_config.py", "test_rc_cli.py",
+    tests = ["test_coverage_data.py", "test_managed_training.py", "test_web_training.py", "test_rc_config.py", "test_rc_cli.py",
              "test_resource_intake.py", "test_agent_bridge_reference_config.py", "test_stage09_stage11_regressions.py",
              "test_git_deploy.py"]
     selected = [str(destination / "backend/agent/tests" / name) for name in tests

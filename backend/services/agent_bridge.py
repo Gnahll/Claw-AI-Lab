@@ -806,6 +806,7 @@ class BridgeState:
     _fail_counts: dict[str, int] = field(default_factory=dict)  # project_id → consecutive fail count
     # Lab mode: track which sub-projects belong to the same batch
     lab_batches: dict[str, list[str]] = field(default_factory=dict)  # base_id → [sub_project_ids]
+    web_training: object | None = None
 
     def projects_dir(self) -> Path:
         return Path(self.runs_base_dir) / "projects"
@@ -2868,6 +2869,15 @@ async def handle_command(state: BridgeState, data: dict) -> list[dict]:
     cmd = data.get("command")
     messages: list[dict] = []
 
+    if isinstance(cmd, str) and cmd.startswith("training_"):
+        try:
+            service = get_web_training(state)
+            return [await asyncio.to_thread(service.handle, data)]
+        except Exception as exc:
+            return [{"type": "training_update", "payload": {
+                "action": cmd, "request_id": data.get("requestId", ""), "ok": False, "error": str(exc),
+            }}]
+
     if cmd == "list_agents":
         for a in state.agents.values():
             messages.append(msg_agent_update(a))
@@ -3106,6 +3116,16 @@ def _scan_existing_artifacts(state: BridgeState) -> list[dict]:
     return messages
 
 
+def get_web_training(state: BridgeState):
+    if state.web_training is None:
+        if state.agent_package_dir not in sys.path:
+            sys.path.insert(0, state.agent_package_dir)
+        from researchclaw.training.web import WebTrainingService
+
+        state.web_training = WebTrainingService(Path(state.runs_base_dir), Path(__file__).resolve().parents[2])
+    return state.web_training
+
+
 async def ws_handler(state: BridgeState, websocket: websockets.ServerConnection):
     state.clients.add(websocket)
     print(f"[+] Client connected (total: {len(state.clients)})")
@@ -3129,7 +3149,24 @@ async def ws_handler(state: BridgeState, websocket: websockets.ServerConnection)
     try:
         async for raw in websocket:
             try:
-                responses = await handle_command(state, json.loads(raw))
+                data = json.loads(raw)
+                command = data.get("command", "")
+                if isinstance(command, str) and command.startswith("training_"):
+                    if state.agent_package_dir not in sys.path:
+                        sys.path.insert(0, state.agent_package_dir)
+                    from researchclaw.training.web import allowed_training_origin
+
+                    if not allowed_training_origin(websocket.request.headers.get("Origin", "")):
+                        await websocket.send(json.dumps({"type": "training_update", "payload": {
+                            "action": command, "request_id": data.get("requestId", ""),
+                            "ok": False, "error": "Training commands require a trusted browser origin",
+                        }}))
+                        continue
+                    responses = await handle_command(state, data)
+                    for response in responses:
+                        await websocket.send(json.dumps(response, ensure_ascii=False))
+                    continue
+                responses = await handle_command(state, data)
                 await broadcast(state, responses)
             except json.JSONDecodeError:
                 pass
@@ -3336,6 +3373,18 @@ async def main(args: argparse.Namespace):
             return WSResponse(status_code, reason, websockets.Headers(headers), body)
 
         async def process_request(connection, request):
+            if request.path.startswith("/download-training/"):
+                from urllib.parse import unquote
+
+                try:
+                    identifier, filename = unquote(request.path[len("/download-training/"):]).split("/", 1)
+                    path = await asyncio.to_thread(get_web_training(st).artifact, identifier, filename)
+                    data = await asyncio.to_thread(path.read_bytes)
+                    content_type = "image/png" if path.suffix == ".png" else "application/octet-stream"
+                    return _http_response(200, data, content_type,
+                                          {"Content-Disposition": f'inline; filename="{path.name}"'})
+                except (OSError, ValueError, KeyError):
+                    return _http_response(404, b"Training artifact not found\n")
             if request.path.startswith("/download/"):
                 from urllib.parse import unquote
                 parts = unquote(request.path[len("/download/"):]).split("/", 1)

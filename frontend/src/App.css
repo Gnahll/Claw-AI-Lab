@@ -1405,6 +1405,24 @@
   color: #f87171;
 }
 
+.training-panel { border: 1px solid #475569; border-radius: 8px; margin-bottom: 12px; flex-shrink: 0; }
+.training-heading { width: 100%; padding: 12px; background: #17253a; color: #e2e8f0; border: 0; text-align: left; cursor: pointer; }
+.training-body { padding: 12px; max-height: 70vh; overflow-y: auto; font-size: 0.8rem; color: #cbd5e1; }
+.training-body label { display: block; margin: 10px 0; }
+.training-body input:not([type="checkbox"]), .training-body textarea, .training-body select { box-sizing: border-box; width: 100%; margin-top: 4px; padding: 6px; color: #e2e8f0; background: #0f172a; border: 1px solid #475569; border-radius: 4px; }
+.training-body textarea { min-height: 70px; }
+.training-body button { padding: 7px; margin: 4px 4px 4px 0; background: #1e3a5f; color: #e2e8f0; border: 1px solid #475569; border-radius: 4px; cursor: pointer; }
+.training-body button:disabled { opacity: 0.45; cursor: not-allowed; }
+.training-body [role="alert"] { color: #fca5a5; overflow-wrap: anywhere; }
+.training-review, .training-job { margin-top: 12px; padding-top: 8px; border-top: 1px solid #475569; }
+.training-body code, .training-gpu { overflow-wrap: anywhere; }
+.training-body pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 240px; overflow-y: auto; }
+.training-body .training-confirm { display: flex; gap: 8px; align-items: flex-start; }
+.training-passed { padding: 8px; border: 1px solid #22c55e; border-radius: 4px; margin-top: 8px; }
+.training-passed a { display: block; color: #93c5fd; overflow-wrap: anywhere; margin: 5px 0; }
+.training-masks { display: flex; gap: 5px; align-items: center; margin: 8px 0; }
+.training-masks img { width: 40%; height: auto; border: 1px solid #64748b; }
+
 /* ==================== ANIMATIONS ==================== */
 @keyframes pulse {
   0%, 100% { opacity: 1; }
