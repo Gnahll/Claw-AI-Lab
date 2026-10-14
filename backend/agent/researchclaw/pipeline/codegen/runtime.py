@@ -30,6 +30,33 @@ from researchclaw.resources.intake import build_resource_manifest, render_resour
 logger = logging.getLogger(__name__)
 
 
+def _read_optional_context_text(path: Path, session: Any) -> str | None:
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        session.log(CodegenPhase.CONTEXT, f"Skipped optional context file {path}: {exc}")
+        return None
+
+    if b"\x00" not in raw:
+        for encoding in ("utf-8-sig", "gb18030"):
+            try:
+                text = raw.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+            if encoding != "utf-8-sig":
+                session.log(
+                    CodegenPhase.CONTEXT,
+                    f"Decoded optional context file {path} using {encoding} instead of UTF-8",
+                )
+            return text
+
+    session.log(
+        CodegenPhase.CONTEXT,
+        f"Skipped optional context file {path}: unsupported encoding or binary content",
+    )
+    return None
+
+
 def _discover_data(
     checkpoints_dir: str,
     datasets_dir: str,
@@ -99,11 +126,10 @@ def _discover_data(
 
             # Read first few lines of any .txt file as a sample
             for txt in sorted(ds_path.glob("*.txt"))[:1]:
-                try:
-                    lines = txt.read_text(encoding="utf-8").splitlines()[:5]
+                text = _read_optional_context_text(txt, session)
+                if text is not None:
+                    lines = text.splitlines()[:5]
                     d.dataset_sample = f"Sample from {txt.name}:\n" + "\n".join(lines)
-                except OSError:
-                    pass
 
     # ── Discover codebase structure ──
     if codebases_dir:
@@ -121,12 +147,10 @@ def _discover_data(
             # Read README if present
             for readme in [cb_path / "README.md", *cb_path.glob("*/README.md")]:
                 if readme.is_file():
-                    try:
-                        text = readme.read_text(encoding="utf-8")
+                    text = _read_optional_context_text(readme, session)
+                    if text is not None:
                         d.codebase_readme = text[:2000]
                         break
-                    except OSError:
-                        pass
 
     return d
 
