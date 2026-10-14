@@ -340,81 +340,7 @@ export interface ProjectInfo {
 
 // ===================== WebSocket Protocol =====================
 
-export interface ManagedTrainingSpec {
-  source_dir: string;
-  dataset_root: string;
-  split_manifest: string;
-  initial_checkpoint: string;
-  initial_checkpoint_sha256: string;
-  epochs: number;
-  steps_per_epoch: number;
-  learning_rate: number;
-  weight_decay: number;
-  seed: number;
-  checkpoint_every_steps: number;
-}
-
-export interface ManagedTrainingJob {
-  id: string;
-  topic: string;
-  job_dir?: string;
-  counts?: Record<string, number>;
-  expected_steps?: number;
-  can_resume?: boolean;
-  log?: string;
-  state: {
-    status: string;
-    phase?: string;
-    global_step?: number;
-    epoch?: number;
-    evaluated?: number;
-    gpu_uuid?: string;
-    error?: string;
-    alert?: string;
-  };
-  verification?: {
-    status: string;
-    error?: string;
-    verified_at?: number;
-    pipeline_imported?: boolean;
-    result?: {
-      metrics: Record<string, number>;
-      test_images: number;
-      training_evidence: {
-        optimizer_steps: number;
-        initial_parameter_sha256: string;
-        trained_parameter_sha256: string;
-        selected_checkpoint: { filename: string; sha256: string };
-      };
-    };
-  };
-  predictions?: Array<{ id: string; prediction: string; target: string }>;
-}
-
-export interface ManagedTrainingView {
-  jobs: ManagedTrainingJob[];
-  defaults?: ManagedTrainingSpec;
-  default_topic?: string;
-  action?: string;
-  request_id?: string;
-  operation_request_id?: string;
-  ok?: boolean;
-  error?: string;
-  last_job_id?: string;
-  preflight?: {
-    id: string;
-    topic: string;
-    spec: ManagedTrainingSpec;
-    counts: Record<string, number>;
-    protocol_status: string;
-    previously_evaluated_groups: string[];
-    checked_at: number;
-  };
-  gpus?: Array<{ uuid: string; name: string; memory_mib: string; utilization: string }>;
-}
-
 export type WSMessage =
-  | { type: 'training_update'; payload: Partial<ManagedTrainingView> }
   | { type: 'agent_update'; payload: LobsterAgent }
   | { type: 'artifact_produced'; payload: Artifact }
   | { type: 'log'; payload: LogEntry }
@@ -428,7 +354,6 @@ export type WSMessage =
 // ===================== App State =====================
 
 export interface AppState {
-  training: ManagedTrainingView;
   agents: LobsterAgent[];
   artifacts: Artifact[];
   logs: LogEntry[];

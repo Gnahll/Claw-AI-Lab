@@ -10,7 +10,6 @@ import json
 import logging
 import os
 import shutil
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -23,6 +22,7 @@ from researchclaw.pipeline.iterative_refine.system_prompt import (
     build_user_message,
 )
 from researchclaw.pipeline.stages import Stage, StageStatus
+from researchclaw.training.execution import EXECUTION_CONTRACT, run_experiment
 
 logger = logging.getLogger(__name__)
 
@@ -83,8 +83,7 @@ class IterativeRefineRuntime:
         python_path = getattr(config.experiment.sandbox, "python_path", "") or ""
 
         # Select GPU
-        gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES") or self._find_free_gpu()
-        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+        gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         session.log("INIT", f"GPU: {gpu_id}")
 
         # Prepare workspace
@@ -111,6 +110,7 @@ class IterativeRefineRuntime:
             max_refine_iterations=max_iterations,
         )
 
+        system_prompt += "\n\n" + EXECUTION_CONTRACT
         user_message = build_user_message(
             experiment_dir=str(workspace),
             experiment_files=exp_files,
@@ -145,6 +145,14 @@ class IterativeRefineRuntime:
         session.log("EXECUTE", "Starting iterative refinement turn loop...")
         turn_result = loop.run_turn(user_message)
 
+        verified_run = run_experiment(workspace, stage_dir / "verified_execution", config)
+        if not verified_run["success"]:
+            return StageResult(
+                stage=Stage.ITERATIVE_REFINE, status=StageStatus.FAILED,
+                artifacts=("verified_execution/",), error="; ".join(verified_run["errors"]),
+                evidence_refs=("verified_execution/",),
+            )
+
         # Collect final results
         final_results = self._collect_final_results(workspace)
         improved = self._check_improvement(baseline_results, final_results, metric_key, metric_direction)
@@ -162,6 +170,7 @@ class IterativeRefineRuntime:
         # Save refinement log
         log_data = {
             "improved": improved,
+            "execution": verified_run,
             "baseline_metric": self._extract_metric(baseline_results, metric_key),
             "final_metric": self._extract_metric(final_results, metric_key),
             "metric_key": metric_key,
@@ -218,31 +227,6 @@ class IterativeRefineRuntime:
             if final_dir.is_dir() and (final_dir / "main.py").is_file():
                 return final_dir
         return None
-
-    @staticmethod
-    def _find_free_gpu() -> str:
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index,memory.used,memory.total,utilization.gpu",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode != 0:
-                return "0"
-            gpus: list[tuple[int, float]] = []
-            for line in result.stdout.strip().split("\n"):
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 4:
-                    idx = int(parts[0])
-                    mem_frac = float(parts[1]) / max(float(parts[2]), 1.0)
-                    util_frac = float(parts[3]) / 100.0
-                    gpus.append((idx, 0.5 * mem_frac + 0.5 * util_frac))
-            if not gpus:
-                return "0"
-            gpus.sort(key=lambda x: x[1])
-            return str(gpus[0][0])
-        except Exception:
-            return "0"
 
     @staticmethod
     def _load_baseline_results(run_dir: Path) -> str:

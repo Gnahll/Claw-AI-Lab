@@ -24,6 +24,8 @@ from researchclaw.pipeline.experiment_run.system_prompt import (
 )
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.resources.intake import build_resource_manifest, render_resource_manifest
+from researchclaw.training.execution import EXECUTION_CONTRACT, run_experiment
+from researchclaw.pipeline.claw_engine.turn_loop import TurnResult
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +97,7 @@ class ExperimentRunRuntime:
         session.log("INIT", f"Experiment dir: {experiment_dir}")
 
         # Select GPU
-        gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES") or self._find_free_gpu()
-        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_id
+        gpu_id = os.environ.get("CUDA_VISIBLE_DEVICES", "")
         session.log("INIT", f"GPU: {gpu_id}")
 
         # Auto-install missing dependencies
@@ -124,6 +125,7 @@ class ExperimentRunRuntime:
         )
 
         prior_results = self._load_sanity_results(run_dir)
+        system_prompt += "\n\n" + EXECUTION_CONTRACT
         user_message = build_user_message(
             experiment_dir=str(workspace),
             experiment_files=exp_files,
@@ -155,8 +157,14 @@ class ExperimentRunRuntime:
             trace_prefix="experiment_run",
         )
 
-        session.log("EXECUTE", "Starting experiment run turn loop...")
-        turn_result = loop.run_turn(user_message)
+        session.log("EXECUTE", "Running main.py under pipeline supervision")
+        verified_run = run_experiment(workspace, stage_dir / "runs" / "attempt-1", config)
+        turn_result = TurnResult()
+        if not verified_run["success"]:
+            failure_log = (stage_dir / "runs" / "attempt-1" / "execution.log").read_text(encoding="utf-8", errors="replace")[-12000:]
+            turn_result = loop.run_turn(user_message + "\nSupervised execution failed. Repair the code; the pipeline will rerun it.\n"
+                                        + json.dumps(verified_run["errors"]) + "\n" + failure_log)
+            verified_run = run_experiment(workspace, stage_dir / "runs" / "attempt-2", config)
 
         # Copy results back
         self._copy_results_back(workspace, experiment_dir, stage_dir, session)
@@ -173,7 +181,7 @@ class ExperimentRunRuntime:
                 session.log("RESULT", f"Failed to parse results.json: {exc}")
                 has_results = False
 
-        success = has_results and not turn_result.errors
+        success = verified_run["success"]
         session.log(
             "RESULT",
             f"Experiment run {'SUCCEEDED' if success else 'FAILED'}: "
@@ -192,6 +200,7 @@ class ExperimentRunRuntime:
             "errors": turn_result.errors,
             "elapsed_sec": round(turn_result.elapsed_sec, 1),
             "gpu_id": gpu_id,
+            "execution": verified_run,
         }
         runs_dir = stage_dir / "runs"
         runs_dir.mkdir(exist_ok=True)
@@ -204,7 +213,7 @@ class ExperimentRunRuntime:
             stage=Stage.EXPERIMENT_RUN,
             status=StageStatus.DONE if success else StageStatus.FAILED,
             artifacts=("runs/",),
-            error=None if success else "Experiment did not produce valid results",
+            error=None if success else "; ".join(verified_run["errors"]),
             evidence_refs=("runs/",),
         )
 
@@ -235,31 +244,6 @@ class ExperimentRunRuntime:
             if exp_dir.is_dir() and (exp_dir / "main.py").is_file():
                 return exp_dir
         return None
-
-    @staticmethod
-    def _find_free_gpu() -> str:
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=index,memory.used,memory.total,utilization.gpu",
-                 "--format=csv,noheader,nounits"],
-                capture_output=True, text=True, timeout=5,
-            )
-            if result.returncode != 0:
-                return "0"
-            gpus: list[tuple[int, float]] = []
-            for line in result.stdout.strip().split("\n"):
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 4:
-                    idx = int(parts[0])
-                    mem_frac = float(parts[1]) / max(float(parts[2]), 1.0)
-                    util_frac = float(parts[3]) / 100.0
-                    gpus.append((idx, 0.5 * mem_frac + 0.5 * util_frac))
-            if not gpus:
-                return "0"
-            gpus.sort(key=lambda x: x[1])
-            return str(gpus[0][0])
-        except Exception:
-            return "0"
 
     @staticmethod
     def _ensure_deps(experiment_dir: Path, python_path: str, session: StageSession) -> None:

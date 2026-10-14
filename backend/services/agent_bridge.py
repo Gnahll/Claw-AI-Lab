@@ -806,7 +806,6 @@ class BridgeState:
     _fail_counts: dict[str, int] = field(default_factory=dict)  # project_id → consecutive fail count
     # Lab mode: track which sub-projects belong to the same batch
     lab_batches: dict[str, list[str]] = field(default_factory=dict)  # base_id → [sub_project_ids]
-    web_training: object | None = None
 
     def projects_dir(self) -> Path:
         return Path(self.runs_base_dir) / "projects"
@@ -1223,7 +1222,7 @@ def launch_agent_for_task(state: BridgeState, agent: LobsterAgent, task: Task) -
 
     try:
         proc_env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-        proc_env.pop("CUDA_VISIBLE_DEVICES", None)
+        proc_env["CUDA_VISIBLE_DEVICES"] = ""
 
         log_path = Path(task.run_dir) / f"agent_{agent.id}.log"
         log_file = _open_append_log(log_path, cmd)
@@ -1250,7 +1249,7 @@ def stop_agent(agent: LobsterAgent) -> list[dict]:
     if agent.process and agent.process.poll() is None:
         agent.process.terminate()
         try:
-            agent.process.wait(timeout=5)
+            agent.process.wait(timeout=15)
         except subprocess.TimeoutExpired:
             agent.process.kill()
     agent.process = None
@@ -1810,6 +1809,7 @@ def _generate_config_from_template(
     state: BridgeState, project_id: str, topic: str, role_prompt: str = "",
     reference_papers: list[str] | None = None,
     codebases_dir: str = "", datasets_dir: str = "", checkpoints_dir: str = "",
+    require_training: bool = True, gpu_uuid: str = "",
 ) -> str:
     """Generate a project-specific YAML config from the default template.
 
@@ -1831,26 +1831,25 @@ def _generate_config_from_template(
         raise FileNotFoundError(f"Config template not found at {template_path}")
 
     full_topic = f"{role_prompt}\n\n研究主题: {topic}" if role_prompt else topic
+    if type(require_training) is not bool:
+        raise ValueError("requireTraining 必须是布尔值")
+    if not isinstance(gpu_uuid, str) or (gpu_uuid and not re.fullmatch(r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", gpu_uuid)):
+        raise ValueError("请填写已获授权的完整 GPU UUID；留空仅使用 CPU")
+    if require_training:
+        full_topic += " 要求：在原有流程内完成真实模型训练和独立评估，保存训练损失、验证指标、模型权重和实验记录；不能以仅推理、计划或短测冒充完成训练。数据划分与完整训练预算须在实验方案中明确，资源不足时报告阻碍。"
 
-    content = template_path.read_text(encoding="utf-8")
-    content = content.replace("__PROJECT_ID__", project_id)
-    content = content.replace("__TOPIC__", full_topic.replace('"', '\\"'))
+    import yaml
 
-    if reference_papers:
-        yaml_list = "\n".join(f'    - "{p}"' for p in reference_papers)
-        content = content.replace("  reference_papers: __REFERENCE_PAPERS__",
-                                  f"  reference_papers:\n{yaml_list}")
-    else:
-        content = content.replace("  reference_papers: __REFERENCE_PAPERS__",
-                                  "  reference_papers: []")
-
-    import re as _re
-    if codebases_dir:
-        content = _re.sub(r'(codebases_dir:\s*)"[^"]*"', f'\\1"{codebases_dir}"', content)
-    if datasets_dir:
-        content = _re.sub(r'(datasets_dir:\s*)"[^"]*"', f'\\1"{datasets_dir}"', content)
-    if checkpoints_dir:
-        content = _re.sub(r'(checkpoints_dir:\s*)"[^"]*"', f'\\1"{checkpoints_dir}"', content)
+    parsed = yaml.safe_load(template_path.read_text(encoding="utf-8"))
+    parsed.setdefault("project", {})["name"] = project_id
+    research = parsed.setdefault("research", {})
+    research.update(topic=full_topic, reference_papers=reference_papers or [])
+    experiment = parsed.setdefault("experiment", {})
+    experiment.update(require_training=require_training, gpu_uuid=gpu_uuid, training_job_dir="")
+    for key, value in (("codebases_dir", codebases_dir), ("datasets_dir", datasets_dir), ("checkpoints_dir", checkpoints_dir)):
+        if value:
+            experiment[key] = value
+    content = yaml.safe_dump(parsed, allow_unicode=True, sort_keys=False)
 
     configs_dir = Path(state.runs_base_dir) / "project_configs"
     configs_dir.mkdir(parents=True, exist_ok=True)
@@ -1955,7 +1954,7 @@ def quick_submit_project(
     research_angles: list[str] | None = None,
     reference_papers: list[str] | None = None,
     reference_uploads: list[dict[str, str]] | None = None,
-    path_overrides: dict[str, str] | None = None,
+    path_overrides: dict | None = None,
 ) -> list[dict]:
     """Create a project from a topic string.
 
@@ -1991,6 +1990,8 @@ def quick_submit_project(
                 codebases_dir=_po.get("codebases_dir", ""),
                 datasets_dir=_po.get("datasets_dir", ""),
                 checkpoints_dir=_po.get("checkpoints_dir", ""),
+                require_training=_po.get("require_training", True),
+                gpu_uuid=_po.get("gpu_uuid", ""),
             )
         except Exception as e:
             messages.append(msg_log(sys_agent, f"配置生成失败: {e}", "error"))
@@ -2029,6 +2030,8 @@ def quick_submit_project(
             codebases_dir=_po.get("codebases_dir", ""),
             datasets_dir=_po.get("datasets_dir", ""),
             checkpoints_dir=_po.get("checkpoints_dir", ""),
+            require_training=_po.get("require_training", True),
+            gpu_uuid=_po.get("gpu_uuid", ""),
         )
     except Exception as e:
         messages.append(msg_log(sys_agent, f"配置生成失败: {e}", "error"))
@@ -2062,6 +2065,8 @@ def quick_submit_project(
                 codebases_dir=_po.get("codebases_dir", ""),
                 datasets_dir=_po.get("datasets_dir", ""),
                 checkpoints_dir=_po.get("checkpoints_dir", ""),
+                require_training=_po.get("require_training", True),
+                gpu_uuid=_po.get("gpu_uuid", ""),
             )
         except Exception as e:
             messages.append(msg_log(sys_agent, f"配置生成失败 [{name}]: {e}", "error"))
@@ -2777,10 +2782,6 @@ def schedule_idle_agents(state: BridgeState) -> list[dict]:
         if agent.assigned_task_id:
             continue
 
-        # L4 execution layer: skip if no GPU available
-        if agent.layer == "execution" and not state.gpu_allocator.can_allocate():
-            continue
-
         # Idea agents pull from init_to_idea, and optionally execution_feedback (auto-loop)
         if agent.layer == "idea":
             candidate_queues = ["init_to_idea"]
@@ -2869,15 +2870,6 @@ async def handle_command(state: BridgeState, data: dict) -> list[dict]:
     cmd = data.get("command")
     messages: list[dict] = []
 
-    if isinstance(cmd, str) and cmd.startswith("training_"):
-        try:
-            service = get_web_training(state)
-            return [await asyncio.to_thread(service.handle, data)]
-        except Exception as exc:
-            return [{"type": "training_update", "payload": {
-                "action": cmd, "request_id": data.get("requestId", ""), "ok": False, "error": str(exc),
-            }}]
-
     if cmd == "list_agents":
         for a in state.agents.values():
             messages.append(msg_agent_update(a))
@@ -2936,6 +2928,8 @@ async def handle_command(state: BridgeState, data: dict) -> list[dict]:
             "codebases_dir": data.get("codebasesDir", ""),
             "datasets_dir": data.get("datasetsDir", ""),
             "checkpoints_dir": data.get("checkpointsDir", ""),
+            "require_training": data.get("requireTraining", True),
+            "gpu_uuid": data.get("gpuUuid", ""),
         }
         messages.extend(quick_submit_project(state, topic, project_id, mode, angles, ref_papers, reference_files, path_overrides))
         messages.extend(schedule_idle_agents(state))
@@ -3116,16 +3110,6 @@ def _scan_existing_artifacts(state: BridgeState) -> list[dict]:
     return messages
 
 
-def get_web_training(state: BridgeState):
-    if state.web_training is None:
-        if state.agent_package_dir not in sys.path:
-            sys.path.insert(0, state.agent_package_dir)
-        from researchclaw.training.web import WebTrainingService
-
-        state.web_training = WebTrainingService(Path(state.runs_base_dir), Path(__file__).resolve().parents[2])
-    return state.web_training
-
-
 async def ws_handler(state: BridgeState, websocket: websockets.ServerConnection):
     state.clients.add(websocket)
     print(f"[+] Client connected (total: {len(state.clients)})")
@@ -3149,24 +3133,7 @@ async def ws_handler(state: BridgeState, websocket: websockets.ServerConnection)
     try:
         async for raw in websocket:
             try:
-                data = json.loads(raw)
-                command = data.get("command", "")
-                if isinstance(command, str) and command.startswith("training_"):
-                    if state.agent_package_dir not in sys.path:
-                        sys.path.insert(0, state.agent_package_dir)
-                    from researchclaw.training.web import allowed_training_origin
-
-                    if not allowed_training_origin(websocket.request.headers.get("Origin", "")):
-                        await websocket.send(json.dumps({"type": "training_update", "payload": {
-                            "action": command, "request_id": data.get("requestId", ""),
-                            "ok": False, "error": "Training commands require a trusted browser origin",
-                        }}))
-                        continue
-                    responses = await handle_command(state, data)
-                    for response in responses:
-                        await websocket.send(json.dumps(response, ensure_ascii=False))
-                    continue
-                responses = await handle_command(state, data)
+                responses = await handle_command(state, json.loads(raw))
                 await broadcast(state, responses)
             except json.JSONDecodeError:
                 pass
@@ -3373,18 +3340,6 @@ async def main(args: argparse.Namespace):
             return WSResponse(status_code, reason, websockets.Headers(headers), body)
 
         async def process_request(connection, request):
-            if request.path.startswith("/download-training/"):
-                from urllib.parse import unquote
-
-                try:
-                    identifier, filename = unquote(request.path[len("/download-training/"):]).split("/", 1)
-                    path = await asyncio.to_thread(get_web_training(st).artifact, identifier, filename)
-                    data = await asyncio.to_thread(path.read_bytes)
-                    content_type = "image/png" if path.suffix == ".png" else "application/octet-stream"
-                    return _http_response(200, data, content_type,
-                                          {"Content-Disposition": f'inline; filename="{path.name}"'})
-                except (OSError, ValueError, KeyError):
-                    return _http_response(404, b"Training artifact not found\n")
             if request.path.startswith("/download/"):
                 from urllib.parse import unquote
                 parts = unquote(request.path[len("/download/"):]).split("/", 1)
@@ -3436,6 +3391,8 @@ async def main(args: argparse.Namespace):
     async with websockets.serve(
         handler, args.host, args.port,
         process_request=_make_process_request(state),
+        origins=[None, re.compile(r"https?://(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?"),
+                 *filter(None, os.environ.get("CLAW_ALLOWED_ORIGINS", "").split(","))],
         max_size=64 * 1024 * 1024,
     ):
         await poll_loop(state, args.interval)
