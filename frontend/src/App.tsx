@@ -9,6 +9,7 @@ import HumanFeedbackPanel from './components/HumanFeedbackPanel';
 import DataFlowArrow from './components/DataFlowArrow';
 import DataShelf from './components/DataShelf';
 import ProjectPanel from './components/ProjectPanel';
+import TrainingPanel from './components/TrainingPanel';
 import { LocaleContext, makeT } from './i18n';
 import type { Locale } from './i18n';
 import './App.css';
@@ -43,6 +44,15 @@ function upsertAgent(agents: LobsterAgent[], payload: LobsterAgent): LobsterAgen
 
 function reducer(state: AppState, action: Action): AppState {
   switch (action.type) {
+    case 'training_update': {
+      const passive = action.payload.action === 'training_list';
+      return { ...state, training: {
+        ...state.training, ...action.payload,
+        action: passive ? state.training.action : action.payload.action,
+        error: passive ? state.training.error : action.payload.error,
+        operation_request_id: passive ? state.training.operation_request_id : action.payload.request_id,
+      } };
+    }
     case 'agent_update':
       return { ...state, agents: upsertAgent(state.agents, action.payload) };
     case 'stage_update':
@@ -98,6 +108,7 @@ function reducer(state: AppState, action: Action): AppState {
 const WS_PROTO = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 
 const INITIAL_STATE: AppState = {
+  training: { jobs: [] },
   agents: [],
   artifacts: [],
   logs: [],
@@ -321,6 +332,14 @@ export default function App() {
 
       <div className="main-layout">
         <div className="side-panel repo-panel">
+          <TrainingPanel
+            connected={state.connected && !state.mockMode}
+            view={state.training}
+            onCommand={(command) => {
+              const ws = agentWsRef.current;
+              if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(command));
+            }}
+          />
           <ProjectPanel
             projects={state.projects}
             connected={state.connected}
