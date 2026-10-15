@@ -3073,7 +3073,10 @@ def _deliverable_artifacts(run_dir: Path, project_id: str, producer: str) -> lis
     checkpoint = _read_json(run_dir / "checkpoint.json") or {}
     stage = min(checkpoint.get("last_completed_stage", 0), TOTAL_STAGES)
     messages = []
-    for filename in ("paper.pdf", "compile_report.json"):
+    for filename in (
+        "paper.pdf", "compile_report.json", "manifest.json", "quality_report.json",
+        "verification_report.json", "citation_coverage.json",
+    ):
         artifact_path = run_dir / "deliverables" / filename
         if artifact_path.is_file():
             messages.append(msg_artifact(

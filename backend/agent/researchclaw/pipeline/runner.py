@@ -579,63 +579,28 @@ def _package_deliverables(
             bib_text = bib_path.read_text(encoding="utf-8")
             import re as _re
 
-            # IMP-15: Deduplicate .bib entries
-            _seen_bib_keys: set[str] = set()
-            _deduped_entries: list[str] = []
-            for _bm in _re.finditer(
-                r"(@\w+\{([^,]+),.*?\n\})", bib_text, _re.DOTALL
-            ):
-                _bkey = _bm.group(2).strip()
-                if _bkey not in _seen_bib_keys:
-                    _seen_bib_keys.add(_bkey)
-                    _deduped_entries.append(_bm.group(1))
-            if len(_deduped_entries) < len(
-                list(_re.finditer(r"@\w+\{", bib_text))
-            ):
-                bib_text = "\n\n".join(_deduped_entries) + "\n"
-                bib_path.write_text(bib_text, encoding="utf-8")
-                logger.info(
-                    "Deliverables: deduplicated .bib → %d entries",
-                    len(_deduped_entries),
-                )
-
             # Collect all cite keys from \cite{key1, key2}
             all_cite_keys: set[str] = set()
             for cm in _re.finditer(r"\\cite\{([^}]+)\}", tex_text):
                 all_cite_keys.update(k.strip() for k in cm.group(1).split(","))
-            bib_keys = set(_re.findall(r"@\w+\{([^,]+),", bib_text))
+            from researchclaw.pipeline.executor import _bibliography_entries, _paper_citation_keys
+
+            all_cite_keys.update(_paper_citation_keys((dest / "paper_final.md").read_text(encoding="utf-8")))
+            bib_keys = set(_bibliography_entries(bib_text))
             missing = all_cite_keys - bib_keys
 
-            # IMP-14: Strip orphaned \cite{key} from paper.tex
+            coverage = {
+                "cited_keys": sorted(all_cite_keys),
+                "bibliography_keys": sorted(bib_keys),
+                "unresolved_citation_keys": sorted(missing),
+                "action": "preserved_for_review",
+            }
+            (dest / "citation_coverage.json").write_text(
+                json.dumps(coverage, indent=2), encoding="utf-8"
+            )
+            packaged.append("citation_coverage.json")
             if missing:
-                logger.warning(
-                    "Deliverables: stripping %d orphaned cite keys from "
-                    "paper.tex: %s",
-                    len(missing),
-                    sorted(missing)[:10],
-                )
-
-                def _filter_cite(m: _re.Match[str]) -> str:
-                    keys = [k.strip() for k in m.group(1).split(",")]
-                    kept = [k for k in keys if k not in missing]
-                    if not kept:
-                        return ""
-                    return "\\cite{" + ", ".join(kept) + "}"
-
-                tex_text = _re.sub(r"\\cite\{([^}]+)\}", _filter_cite, tex_text)
-                # Clean up whitespace artifacts: double spaces, space before period
-                tex_text = _re.sub(r"  +", " ", tex_text)
-                tex_text = _re.sub(r" ([.,;:)])", r"\1", tex_text)
-                tex_path.write_text(tex_text, encoding="utf-8")
-                logger.info(
-                    "Deliverables: paper.tex repaired — all remaining cite "
-                    "keys verified"
-                )
-            else:
-                logger.info(
-                    "Deliverables: all %d cite keys verified in references.bib",
-                    len(all_cite_keys),
-                )
+                logger.warning("Deliverables: preserving %d unresolved citations for review", len(missing))
         except Exception:  # noqa: BLE001
             logger.debug("Cite key verification/repair skipped")
 
@@ -680,16 +645,45 @@ def _package_deliverables(
         dest.rmdir()
         return None
 
+    quality_report = run_dir / "stage-23" / "quality_report.json"
+    quality_decision = run_dir / "stage-23" / "decision.json"
+    quality_state = "not_checked"
+    for source in (quality_report, quality_decision):
+        if source.is_file():
+            shutil.copy2(source, dest / source.name)
+            packaged.append(source.name)
+    if quality_decision.is_file():
+        try:
+            decision = json.loads(quality_decision.read_text(encoding="utf-8"))
+            quality_state = decision.get("decision", "unknown")
+        except (ValueError, OSError):
+            quality_state = "unknown"
+    degradation = run_dir / "degradation_signal.json"
+    if degradation.is_file():
+        shutil.copy2(degradation, dest / degradation.name)
+        packaged.append(degradation.name)
+        quality_state = "degraded"
+    citation_state = "not_checked"
+    if verify_src.is_file():
+        try:
+            summary = json.loads(verify_src.read_text(encoding="utf-8")).get("summary", {})
+            citation_state = "verified" if summary.get("fully_verified") is True else "requires_review"
+        except (ValueError, OSError):
+            citation_state = "requires_review"
+
     # --- Write manifest ---
     manifest = {
         "run_id": run_id,
         "target_conference": config.export.target_conference,
         "files": packaged,
         "generated": _utcnow_iso(),
+        "publication_status": "draft_requires_review",
+        "quality_gate": quality_state,
+        "citation_verification": citation_state,
         "notes": {
-            "paper_final.md": "Final paper in Markdown format",
-            "paper.tex": f"Conference-ready LaTeX ({config.export.target_conference})",
-            "references.bib": "BibTeX bibliography (verified citations only)",
+            "paper_final.md": "Manuscript draft; consult quality and citation reports",
+            "paper.tex": f"LaTeX draft ({config.export.target_conference}); formatting does not establish publication readiness",
+            "references.bib": "Preserved bibliography; may include references requiring verification",
             "code/": "Experiment source code with requirements.txt",
             "verification_report.json": "Citation integrity & relevance verification",
             "charts/": "Result visualizations",
