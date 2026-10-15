@@ -305,8 +305,8 @@ class LLMClient:
                         raise  # Genuine bad request — don't retry
 
                 # Retryable: 429 (rate limit), transient 400, 500, 502, 503, 504,
-                # 529 (Anthropic overloaded)
-                if status in (400, 429, 500, 502, 503, 504, 529):
+                # 524 (gateway timeout), and 529 (Anthropic overloaded).
+                if status in (400, 429, 500, 502, 503, 504, 524, 529):
                     delay = self.config.retry_base_delay * (2**attempt)
                     # Add jitter
                     import random
