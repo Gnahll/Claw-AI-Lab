@@ -641,6 +641,31 @@ def test_package_deliverables_collects_all_artifacts(
     assert isinstance(report["success"], bool)
 
 
+def test_package_deliverables_keeps_orphans_and_marks_degraded_draft(
+    run_dir: Path, rc_config: RCConfig, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from researchclaw.templates import compiler
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(compiler, "compile_latex", lambda *args, **kwargs: SimpleNamespace(success=False, attempts=0, errors=["not installed"], warnings=[], fixes_applied=[]))
+    _setup_stage_artifacts(run_dir)
+    (run_dir / "stage-26/paper_final_verified.md").unlink()
+    (run_dir / "stage-25/paper.tex").write_text(r"\documentclass{article}\begin{document} Evidence \cite{missing2025}.\end{document}")
+    quality_dir = run_dir / "stage-23"
+    quality_dir.mkdir()
+    (quality_dir / "decision.json").write_text(json.dumps({"decision": "degraded"}))
+    (quality_dir / "quality_report.json").write_text(json.dumps({"score": 2.5}))
+    dest = rc_runner._package_deliverables(run_dir, "run-degraded", rc_config)
+    assert dest is not None
+    assert r"\cite{missing2025}" in (dest / "paper.tex").read_text()
+    manifest = json.loads((dest / "manifest.json").read_text())
+    assert manifest["publication_status"] == "draft_requires_review"
+    assert manifest["quality_gate"] == "degraded"
+    assert manifest["citation_verification"] == "requires_review"
+    assert (dest / "quality_report.json").exists()
+    assert json.loads((dest / "citation_coverage.json").read_text())["unresolved_citation_keys"] == ["missing2025"]
+
+
 def test_package_deliverables_prefers_verified_versions(
     run_dir: Path, rc_config: RCConfig
 ) -> None:

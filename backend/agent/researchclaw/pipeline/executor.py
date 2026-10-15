@@ -8387,9 +8387,7 @@ def _execute_quality_gate(
 
     if llm is not None:
         _pm = prompts or PromptManager()
-        # IMP-33: Evaluate the full paper instead of truncating to 12K chars.
-        # Split into chunks if very long, but prefer sending the full text.
-        paper_for_eval = revised[:40000] if len(revised) > 40000 else revised
+        paper_for_eval = revised
 
         # BUG-25: Inject experiment status into quality gate prompt
         _exp_context = ""
@@ -8444,6 +8442,11 @@ def _execute_quality_gate(
             )
     if report is None:
         report = _default_quality_report(config.research.quality_threshold)
+    report["review_scope"] = {
+        "paper_characters": len(revised),
+        "reviewed_characters": len(revised) if llm is not None else 0,
+        "full_paper_supplied": llm is not None,
+    }
     report.setdefault("generated", _utcnow_iso())
     (stage_dir / "quality_report.json").write_text(
         json.dumps(report, indent=2), encoding="utf-8"
@@ -8501,7 +8504,7 @@ def _execute_quality_gate(
         if config.research.graceful_degradation:
             logger.warning(
                 "Quality gate DEGRADED: score %.1f < threshold %.1f — "
-                "continuing with sanitization (graceful_degradation=True)",
+                "continuing as a draft requiring review (graceful_degradation=True)",
                 score, threshold,
             )
             # Write degradation signal for downstream stages
@@ -8766,6 +8769,71 @@ def _sanitize_fabricated_data(
     return sanitized, report
 
 
+def _paper_citation_keys(paper: str) -> set[str]:
+    keys: set[str] = set()
+    for match in re.finditer(r"\\cite\w*\{([^}]+)\}|\[([^\]\n]+)\]", paper):
+        inner = match.group(1) or match.group(2)
+        parts = re.split(r"[,;]\s*", inner)
+        if match.group(1) is not None or all(
+            re.fullmatch(r"[A-Za-z][A-Za-z0-9_:-]*\d{4}[A-Za-z0-9_:-]*", part.strip())
+            for part in parts
+        ):
+            keys.update(part.strip() for part in parts)
+    return keys
+
+
+def _bibliography_entries(bib_text: str) -> dict[str, str]:
+    entries: dict[str, str] = {}
+    for match in re.finditer(r"@\w+\s*\{\s*([^,\s]+)\s*,", bib_text):
+        depth = 1
+        position = match.end()
+        while position < len(bib_text) and depth:
+            character = bib_text[position]
+            if position == 0 or bib_text[position - 1] != "\\":
+                if character == "{":
+                    depth += 1
+                elif character == "}":
+                    depth -= 1
+            position += 1
+        if depth == 0:
+            entries.setdefault(match.group(1), bib_text[match.start():position])
+    return entries
+
+
+def _export_bibliography(run_dir: Path, paper: str) -> str:
+    from zipfile import BadZipFile, ZipFile
+
+    sources: list[str] = []
+    stages = sorted(
+        (
+            path for path in run_dir.glob("stage-*")
+            if path.name[6:].isdigit() and int(path.name[6:]) < int(Stage.EXPORT_PUBLISH)
+        ),
+        reverse=True,
+    )
+    for stage in stages:
+        for candidate in (stage / "references.bib", stage / "latex_package/references.bib"):
+            if candidate.is_file():
+                sources.append(candidate.read_text(encoding="utf-8"))
+        archive = stage / "latex_package.zip"
+        if archive.is_file():
+            try:
+                with ZipFile(archive) as package:
+                    for name in package.namelist():
+                        if name == "references.bib" or name.endswith("/references.bib"):
+                            sources.append(package.read(name).decode("utf-8"))
+            except (BadZipFile, OSError, UnicodeError):
+                logger.warning("Could not read bibliography from %s", archive)
+    entries: dict[str, str] = {}
+    cited_keys = _paper_citation_keys(paper)
+    for source in sources:
+        first_bibliography = not entries
+        for key, entry in _bibliography_entries(source).items():
+            if first_bibliography or key in cited_keys:
+                entries.setdefault(key, entry)
+    return "\n\n".join(entries.values()) + "\n" if entries else ""
+
+
 def _execute_export_publish(
     stage_dir: Path,
     run_dir: Path,
@@ -8776,27 +8844,7 @@ def _execute_export_publish(
     prompts: PromptManager | None = None,
 ) -> StageResult:
     revised = _read_prior_artifact(run_dir, "paper_revised.md") or ""
-    if llm is not None:
-        _pm = prompts or PromptManager()
-        _overlay = _get_evolution_overlay(run_dir, "export_publish")
-        sp = _pm.for_stage("export_publish", evolution_overlay=_overlay, revised=revised)
-        resp = _chat_with_prompt(
-            llm,
-            sp.system,
-            sp.user,
-            json_mode=sp.json_mode,
-            max_tokens=sp.max_tokens,
-        )
-        final_paper = resp.content
-        # Content guard: reject LLM output that truncates the paper
-        if revised and len(final_paper) < 0.6 * len(revised):
-            logger.warning(
-                "Stage 22: LLM output is %.0f%% of input length — using original",
-                100 * len(final_paper) / max(len(revised), 1),
-            )
-            final_paper = revised
-    else:
-        final_paper = revised
+    final_paper = revised
     if not final_paper.strip():
         final_paper = "# Final Paper\n\nNo content generated."
 
@@ -8815,10 +8863,12 @@ def _execute_export_publish(
             final_paper, encoding="utf-8"
         )
 
-        # Sanitize unverified data in tables
-        final_paper, _san_report = _sanitize_fabricated_data(
-            final_paper, run_dir
-        )
+        _san_report = {
+            "sanitized": False,
+            "numbers_replaced": 0,
+            "reason": "Original numerical claims preserved for independent review.",
+            "requires_review": True,
+        }
         (stage_dir / "sanitization_report.json").write_text(
             json.dumps(_san_report, indent=2), encoding="utf-8"
         )
@@ -8829,8 +8879,9 @@ def _execute_export_publish(
         _deg_notice = (
             "\n\n> **Note:** This paper was produced in degraded mode. "
             f"Quality gate score ({_deg_score}/{_deg_threshold}) was below "
-            "threshold. Unverified numerical results in tables have been "
-            "replaced with `---` and require independent verification.\n\n"
+            "threshold. This is a draft requiring revision. Original numerical "
+            "claims have been preserved and require independent verification; "
+            "no numbers have been replaced.\n\n"
         )
         # Try to insert after ## Abstract section
         _abstract_markers = ["## Abstract\n", "# Abstract\n"]
@@ -8857,35 +8908,10 @@ def _execute_export_publish(
             final_paper = _deg_notice + final_paper
 
         logger.info(
-            "Stage 22: Applied degraded-mode sanitization — "
+            "Stage 25: Preserved degraded draft — "
             "%d numbers replaced, %d kept",
             _san_report.get("numbers_replaced", 0),
             _san_report.get("numbers_kept", 0),
-        )
-
-    # IMP-3: Deduplicate "due to computational constraints" — keep at most 1
-    import re as _re_imp3
-    _CONSTRAINT_PAT = _re_imp3.compile(
-        r"[Dd]ue to computational constraints", _re_imp3.IGNORECASE
-    )
-    _matches = list(_CONSTRAINT_PAT.finditer(final_paper))
-    if len(_matches) > 1:
-        # Keep only the first occurrence; remove subsequent ones by
-        # deleting the enclosing sentence.
-        for m in reversed(_matches[1:]):
-            # Find sentence boundaries around the match
-            start = final_paper.rfind(".", 0, m.start())
-            start = start + 1 if start >= 0 else m.start()
-            end = final_paper.find(".", m.end())
-            end = end + 1 if end >= 0 else m.end()
-            sentence = final_paper[start:end].strip()
-            if sentence:
-                final_paper = final_paper[:start] + final_paper[end:]
-        final_paper = re.sub(r"[^\S\n]{2,}", " ", final_paper)
-        logger.info(
-            "Stage 22: Removed %d duplicate 'computational constraints' "
-            "disclaimers",
-            len(_matches) - 1,
         )
 
     # IMP-19 Layer 2: Ensure at least figures are referenced in the paper
@@ -8972,81 +8998,13 @@ def _execute_export_publish(
 
     (stage_dir / "paper_final.md").write_text(final_paper, encoding="utf-8")
 
-    # --- Fabrication sanitization: blank out unsupported numbers ---
-    _fab_flags_text = _read_prior_artifact(run_dir, "fabrication_flags.json") or ""
-    _fab_flags = _safe_json_loads(_fab_flags_text, {}) if _fab_flags_text else {}
-    if isinstance(_fab_flags, dict) and _fab_flags.get("fabrication_suspected"):
-        import re as _re_fab
-        _real_vals = set()
-        for rv in _fab_flags.get("real_metric_values", []):
-            if isinstance(rv, (int, float)) and math.isfinite(rv):
-                _real_vals.add(str(round(rv, 4)))
-                _real_vals.add(str(round(rv, 2)))
-                _real_vals.add(str(round(rv, 1)))
-                _real_vals.add(str(int(rv)) if rv == int(rv) else "")
-
-        def _sanitize_number(m: _re_fab.Match) -> str:  # type: ignore[name-defined]
-            """Replace fabricated numbers with '--' but keep real ones."""
-            num_str = m.group(0)
-            # Keep the number if it matches any known real metric value
-            try:
-                num_val = float(num_str)
-                if not math.isfinite(num_val):
-                    return "--"
-                rounded_strs = {
-                    str(round(num_val, 4)),
-                    str(round(num_val, 2)),
-                    str(round(num_val, 1)),
-                    str(int(num_val)) if num_val == int(num_val) else "",
-                }
-                if rounded_strs & _real_vals:
-                    return num_str  # real value — keep it
-            except (ValueError, OverflowError):
-                return num_str
-            return "--"
-
-        # Only sanitize numbers in Results/Experiments/Evaluation/Ablation sections
-        _result_section_pat = _re_fab.compile(
-            r"(##\s*(?:\d+\.?\s*)?(?:Results|Experiments|Evaluation|Ablation"
-            r"|Experimental Results|Quantitative).*?)(?=\n##\s|\Z)",
-            _re_fab.DOTALL | _re_fab.IGNORECASE,
-        )
-        _sanitized_count = 0
-
-        def _sanitize_section(sec_match: _re_fab.Match) -> str:  # type: ignore[name-defined]
-            nonlocal _sanitized_count
-            section_text = sec_match.group(0)
-            # Replace decimal numbers (e.g., 73.42, 0.891) but NOT integers
-            # that are likely structural (year, section number, figure number)
-            def _replace_in_section(m: _re_fab.Match) -> str:  # type: ignore[name-defined]
-                nonlocal _sanitized_count
-                result = _sanitize_number(m)
-                if result == "--":
-                    _sanitized_count += 1
-                return result
-            return _re_fab.sub(
-                r"\b\d+\.\d{1,6}\b", _replace_in_section, section_text
-            )
-
-        final_paper = _result_section_pat.sub(_sanitize_section, final_paper)
-
-        if _sanitized_count > 0:
-            logger.warning(
-                "Stage 22: Fabrication sanitization — blanked %d unsupported "
-                "numbers in Results sections (experiment had no real metrics)",
-                _sanitized_count,
-            )
-            # Rewrite the sanitized paper
-            (stage_dir / "paper_final.md").write_text(
-                final_paper, encoding="utf-8"
-            )
-
     # Initialize artifacts list
     artifacts = ["paper_final.md"]
     # F2.7: Post-process citations — [cite_key] → \cite{cite_key}
     # and copy final references.bib to export stage
     _ay_map: dict[str, str] = {}  # BUG-102: author-year → cite_key map
-    bib_text = _read_prior_artifact(run_dir, "references.bib")
+    bib_text = _export_bibliography(run_dir, final_paper)
+    final_paper_latex = final_paper
     if bib_text:
         # Replace [cite_key] patterns in the final paper with \cite{cite_key}
         # Collect all valid cite_keys from the bib file
@@ -9163,7 +9121,7 @@ def _execute_export_publish(
                 )
 
         # R10-Fix4: Citation cross-validation
-        cited_keys_in_paper = set(_re.findall(r"\[([a-z]+\d{4}[a-z]*)\]", final_paper))
+        cited_keys_in_paper = _paper_citation_keys(final_paper)
         if valid_keys and cited_keys_in_paper:
             invalid_keys = cited_keys_in_paper - valid_keys
             if invalid_keys:
@@ -9172,15 +9130,6 @@ def _execute_export_publish(
                     len(invalid_keys),
                     ", ".join(sorted(invalid_keys)[:20]),
                 )
-                # IMP-29: Silently remove invalid citations instead of
-                # leaving ugly [?key:NOT_IN_BIB] markers in the output.
-                for bad_key in invalid_keys:
-                    final_paper = final_paper.replace(f"[{bad_key}]", "")
-                # Clean up whitespace artifacts from removed citations
-                import re as _re_imp29
-                final_paper = _re_imp29.sub(r"  +", " ", final_paper)
-                final_paper = _re_imp29.sub(r" ([.,;:)])", r"\1", final_paper)
-                (stage_dir / "paper_final.md").write_text(final_paper, encoding="utf-8")
                 (stage_dir / "invalid_citations.json").write_text(
                     json.dumps(sorted(invalid_keys), indent=2), encoding="utf-8"
                 )
@@ -9194,7 +9143,7 @@ def _execute_export_publish(
             def _replace_multi_cite(m: _re.Match[str]) -> str:
                 keys = [k.strip() for k in m.group(1).split(",")]
                 matched = [k for k in keys if k in valid_keys]
-                if matched:
+                if len(matched) == len(keys):
                     return "\\cite{" + ", ".join(matched) + "}"
                 return m.group(0)
 
@@ -9230,33 +9179,6 @@ def _execute_export_publish(
                 final_paper_latex, encoding="utf-8"
             )
             artifacts.append("paper_final_latex.md")
-        # IMP-1: Prune uncited bibliography entries — keep only keys
-        # that actually appear in the paper text (bracket or \cite form).
-        if valid_keys:
-            _all_cited: set[str] = set()
-            # Bracket-format citations [key]
-            _all_cited.update(
-                _re.findall(r"\[([a-z]+\d{4}[a-z]*)\]", final_paper)
-            )
-            # \cite{key, key2} format (original + latex-converted)
-            for _src in (
-                final_paper,
-                final_paper_latex,
-            ):
-                for _cm in _re.finditer(r"\\cite\{([^}]+)\}", _src):
-                    _all_cited.update(
-                        k.strip() for k in _cm.group(1).split(",")
-                    )
-            uncited_keys = valid_keys - _all_cited
-            if uncited_keys:
-                bib_text = _remove_bibtex_entries(bib_text, uncited_keys)
-                logger.info(
-                    "Stage 22: Pruned %d uncited bibliography entries "
-                    "(kept %d)",
-                    len(uncited_keys),
-                    len(valid_keys) - len(uncited_keys),
-                )
-
         # Write final references.bib
         (stage_dir / "references.bib").write_text(bib_text, encoding="utf-8")
         artifacts.append("references.bib")
@@ -9771,8 +9693,6 @@ def _execute_citation_verify(
 ) -> StageResult:
     from researchclaw.literature.verify import (
         VerifyStatus,
-        annotate_paper_hallucinations,
-        filter_verified_bibtex,
         verify_citations,
     )
 
@@ -9787,10 +9707,13 @@ def _execute_citation_verify(
                 "suspicious": 0,
                 "hallucinated": 0,
                 "skipped": 0,
-                "integrity_score": 1.0,
+                "integrity_score": 0.0,
+                "fully_verified": False,
+                "verified_fraction": 0.0,
+                "unresolved_citation_keys": sorted(_paper_citation_keys(paper_text)),
             },
             "results": [],
-            "note": "No references.bib found — nothing to verify.",
+            "note": "No bibliography available. Citation verification is incomplete.",
         }
         (stage_dir / "verification_report.json").write_text(
             json.dumps(report_data, indent=2), encoding="utf-8"
@@ -9801,10 +9724,10 @@ def _execute_citation_verify(
         return StageResult(
             stage=Stage.CITATION_VERIFY,
             status=StageStatus.DONE,
-            artifacts=("verification_report.json", "references_verified.bib"),
+        artifacts=("verification_report.json", "references_verified.bib"),
             evidence_refs=(
-                "stage-23/verification_report.json",
-                "stage-23/references_verified.bib",
+                "stage-26/verification_report.json",
+                "stage-26/references_verified.bib",
             ),
         )
 
@@ -9825,7 +9748,7 @@ def _execute_citation_verify(
         report.suspicious,
         report.hallucinated,
         report.skipped,
-        report.integrity_score * 100,
+        100 * report.verified / report.total if report.total else 0.0,
     )
 
     # --- Relevance check: assess topical relevance of verified citations ---
@@ -9838,123 +9761,62 @@ def _execute_citation_verify(
             if score is not None:
                 cr.relevance_score = score
 
-    # FIX-5: Filter low-relevance citations and enforce hard cap
-    RELEVANCE_THRESHOLD = 0.5
-    MAX_CITATIONS = 60
-    low_relevance_keys: set[str] = set()
-    for cr in report.results:
-        if cr.relevance_score is not None and cr.relevance_score < RELEVANCE_THRESHOLD:
-            low_relevance_keys.add(cr.cite_key)
-
-    # Hard cap: if still above MAX_CITATIONS after relevance filter, drop lowest
-    # BUG-07 fix: Unscored citations (relevance_score=None) default to 0.7
-    # because they passed API verification and are likely relevant.
-    # Previously they defaulted to 0.0 which caused mass-deletion.
-    _DEFAULT_RELEVANCE = 0.7
-    remaining = [
-        cr for cr in report.results
-        if cr.cite_key not in low_relevance_keys
-        and cr.status != VerifyStatus.HALLUCINATED
-    ]
-    if len(remaining) > MAX_CITATIONS:
-        remaining.sort(
-            key=lambda c: c.relevance_score if c.relevance_score is not None else _DEFAULT_RELEVANCE,
-        )
-        overflow = remaining[:len(remaining) - MAX_CITATIONS]
-        for cr in overflow:
-            low_relevance_keys.add(cr.cite_key)
-        logger.info(
-            "Stage 23: Hard cap applied, dropping %d additional low-relevance citations",
-            len(overflow),
-        )
-
-    if low_relevance_keys:
-        logger.info(
-            "Stage 23: Filtering %d low-relevance citations (threshold=%.1f, cap=%d): %s",
-            len(low_relevance_keys),
-            RELEVANCE_THRESHOLD,
-            MAX_CITATIONS,
-            ", ".join(sorted(list(low_relevance_keys)[:20])),
-        )
-
+    bibliography_keys = set(_bibliography_entries(bib_text))
+    cited_keys = _paper_citation_keys(paper_text)
+    verified_keys = {
+        result.cite_key for result in report.results
+        if result.status == VerifyStatus.VERIFIED
+    }
+    pending_keys = bibliography_keys - verified_keys
+    missing_keys = cited_keys - bibliography_keys
+    low_relevance_keys = {
+        result.cite_key for result in report.results
+        if result.relevance_score is not None and result.relevance_score < 0.5
+    }
+    report_data = report.to_dict()
+    report_data["summary"].update({
+        "bibliography_total": len(bibliography_keys),
+        "cited_total": len(cited_keys),
+        "integrity_score": len(verified_keys & bibliography_keys) / len(bibliography_keys) if bibliography_keys else 0.0,
+        "verified_fraction": len(verified_keys & bibliography_keys) / len(bibliography_keys) if bibliography_keys else 0.0,
+        "fully_verified": bool(bibliography_keys) and not pending_keys and not missing_keys and not low_relevance_keys,
+        "pending_citation_keys": sorted(pending_keys),
+        "unresolved_citation_keys": sorted(missing_keys),
+        "low_relevance_citation_keys": sorted(low_relevance_keys),
+    })
+    report_data["note"] = "Original citations and bibliography are preserved. Pending and low-relevance entries require review; no references were removed."
     (stage_dir / "verification_report.json").write_text(
-        json.dumps(report.to_dict(), indent=2), encoding="utf-8"
+        json.dumps(report_data, indent=2), encoding="utf-8"
     )
-
-    verified_bib = filter_verified_bibtex(bib_text, report, include_suspicious=True)
-    # Remove low-relevance entries from BibTeX
-    if low_relevance_keys:
-        verified_bib = _remove_bibtex_entries(verified_bib, low_relevance_keys)
-
-    # BUG-26: If verification stripped >50% of entries (e.g. due to rate limiting),
-    # fall back to the original bib to avoid breaking the paper's references
-    original_count = len(re.findall(r"@\w+\{", bib_text))
-    verified_count = len(re.findall(r"@\w+\{", verified_bib))
-    if original_count > 0 and verified_count < original_count * 0.5:
-        logger.warning(
-            "Stage 23: Verification stripped %d→%d entries (>50%% loss). "
-            "Keeping original bib to avoid breaking references.",
-            original_count, verified_count,
-        )
-        verified_bib = bib_text
-
-    # IMP-1: Also prune uncited entries from verified bib
-    if paper_text.strip():
-        _vbib_keys = set(re.findall(r"@\w+\{([^,]+),", verified_bib))
-        _cited_in_paper: set[str] = set()
-        _cited_in_paper.update(
-            re.findall(r"\[([a-z]+\d{4}[a-z]*)\]", paper_text)
-        )
-        for _cm in re.finditer(r"\\cite\{([^}]+)\}", paper_text):
-            _cited_in_paper.update(
-                k.strip() for k in _cm.group(1).split(",")
-            )
-        _uncited_vbib = _vbib_keys - _cited_in_paper
-        if _uncited_vbib:
-            verified_bib = _remove_bibtex_entries(verified_bib, _uncited_vbib)
-            logger.info(
-                "Stage 23: Pruned %d uncited entries from verified bib "
-                "(kept %d)",
-                len(_uncited_vbib),
-                len(_vbib_keys) - len(_uncited_vbib),
-            )
-
-    # BUG-100: If all entries were filtered out (low-relevance + uncited pruning),
-    # write a comment instead of an empty file to avoid "Missing or empty output" error.
-    if not verified_bib.strip():
-        verified_bib = "% All citations were filtered out during verification\n"
-        logger.warning(
-            "Stage 23: All BibTeX entries filtered out — writing placeholder"
-        )
-
-    (stage_dir / "references_verified.bib").write_text(verified_bib, encoding="utf-8")
-
+    (stage_dir / "references_verified.bib").write_text(bib_text, encoding="utf-8")
     artifacts = ["verification_report.json", "references_verified.bib"]
-
     if paper_text.strip():
-        annotated = annotate_paper_hallucinations(paper_text, report)
-        # Remove \cite{} and [cite_key] references for low-relevance entries
-        if low_relevance_keys:
-            annotated = _remove_citations_from_text(annotated, low_relevance_keys)
+        annotated = paper_text
+        if pending_keys or missing_keys or low_relevance_keys:
+            annotated = (
+                "> **Citation review pending:** Original citations are preserved. "
+                "See verification_report.json for unresolved references and relevance concerns.\n\n"
+                + paper_text
+            )
         (stage_dir / "paper_final_verified.md").write_text(annotated, encoding="utf-8")
         artifacts.append("paper_final_verified.md")
 
     logger.info(
-        "Stage 23 citation verify: %d total, %d verified, %d suspicious, "
+        "Stage 26 citation verify: %d total, %d verified, %d suspicious, "
         "%d hallucinated, %d skipped (integrity=%.1f%%)",
         report.total,
         report.verified,
         report.suspicious,
         report.hallucinated,
         report.skipped,
-        report.integrity_score * 100,
+        report_data["summary"]["integrity_score"] * 100,
     )
 
     return StageResult(
         stage=Stage.CITATION_VERIFY,
         status=StageStatus.DONE,
         artifacts=tuple(artifacts),
-        evidence_refs=tuple(f"stage-23/{a}" for a in artifacts),
+        evidence_refs=tuple(f"stage-26/{a}" for a in artifacts),
     )
 
 

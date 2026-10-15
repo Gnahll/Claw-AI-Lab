@@ -1008,6 +1008,126 @@ class TestIterativeRefine:
         )
 
 
+def test_quality_gate_receives_complete_long_paper(
+    run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+) -> None:
+    paper = "# Abstract\n\n" + "Content. " * 6000 + "\n# Conclusion\n\nEND_OF_PAPER"
+    _write_prior_artifact(run_dir, 22, "paper_revised.md", paper)
+    stage_dir = run_dir / "stage-23"
+    stage_dir.mkdir()
+    llm = FakeLLMClient(json.dumps({"score_1_to_10": 2.5, "verdict": "revise"}))
+    rc_executor._execute_quality_gate(stage_dir, run_dir, rc_config, adapters, llm=llm)
+    assert "END_OF_PAPER" in llm.calls[0][-1]["content"]
+    report = json.loads((stage_dir / "quality_report.json").read_text())
+    assert report["review_scope"]["reviewed_characters"] == len(paper)
+    assert report["review_scope"]["full_paper_supplied"] is True
+
+
+def test_export_preserves_citations_and_numbers_in_degraded_draft(
+    run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from researchclaw.templates import compiler
+
+    monkeypatch.setattr(compiler, "compile_latex", lambda *args, **kwargs: SimpleNamespace(success=False, errors=["not installed"]))
+    paper = "# Example\n\n# Abstract\n\nSummary.\n\n# Results\n\n| Model | F1 |\n| --- | --- |\n| Ours | 0.91 |\n\nEvidence [known2024; missing2025].\n"
+    _write_prior_artifact(run_dir, 22, "paper_revised.md", paper)
+    _write_prior_artifact(run_dir, 4, "references.bib", "@article{known2024,\n title={Known},\n year={2024},\n}\n")
+    (run_dir / "degradation_signal.json").write_text(json.dumps({"score": 2.5, "threshold": 3.0}))
+    stage_dir = run_dir / "stage-25"
+    stage_dir.mkdir()
+    llm = FakeLLMClient("An unwanted rewrite")
+    rc_executor._execute_export_publish(stage_dir, run_dir, rc_config, adapters, llm=llm)
+    exported = (stage_dir / "paper_final.md").read_text(encoding="utf-8")
+    assert "0.91" in exported
+    assert "[known2024; missing2025]" in exported
+    assert "no numbers have been replaced" in exported
+    assert "have been replaced with" not in exported
+    assert all("methodology framework diagram" in call[-1]["content"] for call in llm.calls)
+    assert json.loads((stage_dir / "invalid_citations.json").read_text()) == ["missing2025"]
+    assert not json.loads((stage_dir / "sanitization_report.json").read_text())["sanitized"]
+
+
+@pytest.mark.parametrize("archive_only", [False, True])
+def test_export_recovers_cited_bibliography_without_inventing_entries(run_dir: Path, archive_only: bool) -> None:
+    from zipfile import ZipFile
+
+    _write_prior_artifact(run_dir, 4, "references.bib", "@article{known2024,\n title={Known},\n}\n")
+    package_dir = run_dir / "stage-22" / "latex_package"
+    package_dir.mkdir(parents=True)
+    recovered_bib = "@article{recovered2023,\n title={Recovered {Title}},\n}\n@article{unused2020,\n title={Unused},\n}\n"
+    if archive_only:
+        with ZipFile(run_dir / "stage-22/latex_package.zip", "w") as package:
+            package.writestr("latex_package/references.bib", recovered_bib)
+    else:
+        (package_dir / "references.bib").write_text(recovered_bib)
+    bib = rc_executor._export_bibliography(run_dir, "[known2024, recovered2023, missing2025]")
+    assert set(rc_executor._bibliography_entries(bib)) == {"known2024", "recovered2023", "unused2020"}
+    assert "missing2025" not in bib
+
+
+def test_citation_verify_preserves_pending_and_low_relevance_references(
+    run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from researchclaw.literature import verify
+
+    bib = "@article{known2024,\n title={Known},\n}\n@article{pending2023,\n title={Pending},\n}\n"
+    paper = "# Paper\n\n[known2024, pending2023, missing2025]"
+    _write_prior_artifact(run_dir, 25, "references.bib", bib)
+    _write_prior_artifact(run_dir, 25, "paper_final.md", paper)
+    report = verify.VerificationReport(total=2, verified=1, hallucinated=1, results=[
+        verify.CitationResult("known2024", "Known", verify.VerifyStatus.VERIFIED, 1.0, "test", relevance_score=0.1),
+        verify.CitationResult("pending2023", "Pending", verify.VerifyStatus.HALLUCINATED, 0.0, "test"),
+    ])
+    monkeypatch.setattr(verify, "verify_citations", lambda *args, **kwargs: report)
+    stage_dir = run_dir / "stage-26"
+    stage_dir.mkdir()
+    rc_executor._execute_citation_verify(stage_dir, run_dir, rc_config, adapters)
+    assert (stage_dir / "references_verified.bib").read_text() == bib
+    assert paper in (stage_dir / "paper_final_verified.md").read_text()
+    summary = json.loads((stage_dir / "verification_report.json").read_text())["summary"]
+    assert summary["fully_verified"] is False
+    assert summary["verified_fraction"] == 0.5
+    assert summary["unresolved_citation_keys"] == ["missing2025"]
+    assert summary["pending_citation_keys"] == ["pending2023"]
+    assert summary["low_relevance_citation_keys"] == ["known2024"]
+
+
+@pytest.mark.parametrize("status, expected_verified", [("verified", True), ("skipped", False)])
+def test_citation_verify_reports_verification_coverage(
+    run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+    monkeypatch: pytest.MonkeyPatch, status: str, expected_verified: bool,
+) -> None:
+    from researchclaw.literature import verify
+
+    _write_prior_artifact(run_dir, 25, "references.bib", "@article{known2024,\n title={Known},\n}\n")
+    _write_prior_artifact(run_dir, 25, "paper_final.md", "# Paper\n\n[known2024]")
+    report = verify.VerificationReport(
+        total=1, verified=int(expected_verified), skipped=int(not expected_verified),
+        results=[verify.CitationResult("known2024", "Known", verify.VerifyStatus(status), float(expected_verified), "test")],
+    )
+    monkeypatch.setattr(verify, "verify_citations", lambda *args, **kwargs: report)
+    stage_dir = run_dir / "stage-26"
+    stage_dir.mkdir()
+    rc_executor._execute_citation_verify(stage_dir, run_dir, rc_config, adapters)
+    summary = json.loads((stage_dir / "verification_report.json").read_text())["summary"]
+    assert summary["fully_verified"] is expected_verified
+    assert summary["integrity_score"] == float(expected_verified)
+    assert summary["verified_fraction"] == float(expected_verified)
+
+
+def test_citation_verify_no_bibliography_is_incomplete(
+    run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+) -> None:
+    _write_prior_artifact(run_dir, 25, "paper_final.md", "# Paper\n\n[missing2025]")
+    stage_dir = run_dir / "stage-26"
+    stage_dir.mkdir()
+    rc_executor._execute_citation_verify(stage_dir, run_dir, rc_config, adapters)
+    summary = json.loads((stage_dir / "verification_report.json").read_text())["summary"]
+    assert summary["fully_verified"] is False
+    assert summary["integrity_score"] == 0.0
+    assert summary["unresolved_citation_keys"] == ["missing2025"]
+
+
 class TestExportPublishCodePackage:
     def test_export_packages_experiment_final(
         self,
