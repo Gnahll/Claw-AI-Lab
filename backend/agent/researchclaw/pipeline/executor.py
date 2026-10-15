@@ -38,6 +38,9 @@ from researchclaw.experiment.validator import (
 
 logger = logging.getLogger(__name__)
 
+_PEER_REVIEW_CHUNK_CHARS = 24000
+_PEER_REVIEW_SYNTHESIS_CHARS = 9000
+
 
 # ---------------------------------------------------------------------------
 # Domain detection — maps research topic to academic domain & venue context
@@ -657,6 +660,41 @@ def _chat_with_prompt(
             else:
                 raise last_exc from None
     raise last_exc  # type: ignore[misc]  # unreachable but satisfies type checker
+
+
+def _split_markdown_for_peer_review(
+    draft: str,
+    max_chars: int = _PEER_REVIEW_CHUNK_CHARS,
+) -> list[str]:
+    """Split a long paper into reviewable chunks without dropping sections."""
+    if len(draft) <= max_chars:
+        return [draft]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_size = 0
+    for block in re.split(r"(?=^#{1,6}\s+)", draft, flags=re.MULTILINE):
+        if not block:
+            continue
+        if current and current_size + len(block) > max_chars:
+            chunks.append("".join(current).strip())
+            current = []
+            current_size = 0
+        if len(block) > max_chars:
+            if current:
+                chunks.append("".join(current).strip())
+                current = []
+                current_size = 0
+            chunks.extend(
+                block[start:start + max_chars].strip()
+                for start in range(0, len(block), max_chars)
+            )
+        else:
+            current.append(block)
+            current_size += len(block)
+    if current:
+        chunks.append("".join(current).strip())
+    return [chunk for chunk in chunks if chunk]
 
 
 def _generate_neurips_checklist(
@@ -7797,22 +7835,58 @@ def _execute_peer_review(
     if llm is not None:
         _pm = prompts or PromptManager()
         _overlay = _get_evolution_overlay(run_dir, "peer_review")
-        sp = _pm.for_stage(
-            "peer_review",
-            evolution_overlay=_overlay,
-            topic=config.research.topic,
-            draft=draft,
-            experiment_evidence=experiment_evidence,
-        )
-        _review_user = sp.user + _quality_suffix
-        resp = _chat_with_prompt(
-            llm,
-            sp.system,
-            _review_user,
-            json_mode=sp.json_mode,
-            max_tokens=sp.max_tokens,
-        )
-        reviews = resp.content
+        chunks = _split_markdown_for_peer_review(draft)
+        chunk_reviews: list[str] = []
+        for index, chunk in enumerate(chunks, start=1):
+            sp = _pm.for_stage(
+                "peer_review",
+                evolution_overlay=_overlay,
+                topic=config.research.topic,
+                draft=chunk,
+                experiment_evidence=experiment_evidence,
+            )
+            review_user = sp.user + _quality_suffix
+            if len(chunks) > 1:
+                review_user = (
+                    f"This is part {index} of {len(chunks)} of a long paper. "
+                    "Review only the supplied part, and identify missing context "
+                    "without inventing claims about unseen sections.\n\n"
+                    + review_user
+                )
+            response = _chat_with_prompt(
+                llm,
+                sp.system,
+                review_user,
+                json_mode=sp.json_mode,
+                max_tokens=sp.max_tokens,
+                retries=2,
+            )
+            chunk_reviews.append(response.content)
+
+        if len(chunk_reviews) == 1:
+            reviews = chunk_reviews[0]
+        else:
+            review_digest = "\n\n".join(
+                f"### Part {index} review\n{review[:_PEER_REVIEW_SYNTHESIS_CHARS]}"
+                for index, review in enumerate(chunk_reviews, start=1)
+            )
+            synthesis_prompt = (
+                "Synthesize the following section-level review notes into one final "
+                "peer review of the complete paper. Output exactly Reviewer A "
+                "(methodology expert), Reviewer B (domain expert), and Reviewer C "
+                "(statistics/rigor expert), each with strengths, weaknesses, and "
+                "actionable revisions. Reconcile duplicates and flag issues only "
+                "when supported by the notes.\n\n"
+                + review_digest
+            )
+            response = _chat_with_prompt(
+                llm,
+                "You are a senior editor consolidating peer-review notes.",
+                synthesis_prompt,
+                max_tokens=8192,
+                retries=2,
+            )
+            reviews = response.content
     else:
         reviews = """# Reviews
 

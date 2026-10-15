@@ -3579,3 +3579,57 @@ class TestValidateDraftQuality:
         assert "section_analysis" in data
         assert "overall_warnings" in data
         assert "revision_directives" in data
+
+
+class TestPeerReviewChunking:
+    def test_short_draft_uses_one_review_call(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        _write_prior_artifact(run_dir, 20, "paper_draft.md", "# Paper\nShort draft.")
+        stage_dir = run_dir / "stage-21"
+        stage_dir.mkdir()
+        llm = FakeLLMClient("# Reviews\nComplete review.")
+
+        result = rc_executor._execute_peer_review(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.DONE
+        assert len(llm.calls) == 1
+        assert (stage_dir / "reviews.md").read_text(encoding="utf-8") == llm.response_text
+
+    def test_long_draft_is_reviewed_in_parts_then_synthesized(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        draft = "\n".join(
+            f"# Section {index}\nMARKER-{index} " + (str(index) * 13000)
+            for index in range(1, 5)
+        )
+        chunks = rc_executor._split_markdown_for_peer_review(draft)
+        assert len(chunks) > 1
+        assert all(len(chunk) <= rc_executor._PEER_REVIEW_CHUNK_CHARS for chunk in chunks)
+        assert all(f"MARKER-{index}" in "\n".join(chunks) for index in range(1, 5))
+
+        _write_prior_artifact(run_dir, 20, "paper_draft.md", draft)
+        stage_dir = run_dir / "stage-21"
+        stage_dir.mkdir()
+        llm = FakeLLMClient("# Reviews\nConsolidated review.")
+
+        result = rc_executor._execute_peer_review(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.DONE
+        assert len(llm.calls) == len(chunks) + 1
+        prompts = [call[-1]["content"] for call in llm.calls]
+        assert all(
+            f"This is part {index} of {len(chunks)}" in prompts[index - 1]
+            for index in range(1, len(chunks) + 1)
+        )
+        assert "Synthesize the following section-level review notes" in prompts[-1]

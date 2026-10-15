@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 import urllib.request
 from types import SimpleNamespace
 from typing import Any, Mapping
@@ -321,3 +322,34 @@ def test_chat_uses_fallback_after_first_model_error(monkeypatch: pytest.MonkeyPa
     response = client.chat([{"role": "user", "content": "x"}])
     assert calls == ["gpt-5.2", "gpt-5.1"]
     assert response.model == "gpt-5.1"
+
+
+def test_call_with_retry_retries_gateway_timeout(monkeypatch: pytest.MonkeyPatch):
+    calls = 0
+
+    def fake_raw_call(
+        self: LLMClient,
+        model: str,
+        messages: list[dict[str, str]],
+        max_tokens: int,
+        temperature: float,
+        json_mode: bool,
+    ) -> LLMResponse:
+        nonlocal calls
+        _ = (self, messages, max_tokens, temperature, json_mode)
+        calls += 1
+        if calls == 1:
+            raise urllib.error.HTTPError("url", 524, "Timeout", None, None)
+        return LLMResponse(content="ok", model=model)
+
+    monkeypatch.setattr(LLMClient, "_raw_call", fake_raw_call)
+    client = _make_client(primary_model="gpt-5.2", fallback_models=[])
+    client.config.max_retries = 2
+    client.config.retry_base_delay = 0
+
+    response = client._call_with_retry(
+        "gpt-5.2", [{"role": "user", "content": "review"}], 100, 0.2, False
+    )
+
+    assert calls == 2
+    assert response.content == "ok"
