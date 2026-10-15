@@ -22,6 +22,74 @@ def tensor_hash(tensor):
     return hashlib.sha256(str((tuple(values.shape), str(values.dtype))).encode() + payload).hexdigest()
 
 
+def _state_tensors(value):
+    import torch
+
+    if torch.is_tensor(value):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _state_tensors(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _state_tensors(item)
+
+
+def _saved_hashes(state):
+    hashes = set()
+    for value in _state_tensors(state):
+        try:
+            hashes.add(tensor_hash(value))
+        except (ValueError, RuntimeError, TypeError):
+            continue  # Non-finite or non-hashable tensors cannot equal a finite trained parameter.
+    return hashes
+
+
+def verify_checkpoints(final_checkpoint, optimizers, evidence):
+    """Every trained optimizer must be saved in some outputs/ checkpoint; model.pt must be one of them.
+
+    Independent runs (e.g. one model per seed) each create their own optimizer, while
+    outputs/model.pt holds only the final deliverable, so it cannot contain them all.
+    """
+    import torch
+
+    trained = [{tensor_hash(parameter) for group in optimizer.param_groups
+                for parameter in group["params"] if parameter.requires_grad} for optimizer in optimizers]
+    trained = [(index, hashes) for index, hashes in enumerate(trained) if hashes]
+    state = torch.load(final_checkpoint, map_location="cpu", weights_only=True)
+    if isinstance(state, dict):
+        state = state.get("model_state_dict", state.get("state_dict", state))
+    if not isinstance(state, dict):
+        raise ValueError("outputs/model.pt must contain a model state_dict")
+    saved = {tensor_hash(value) for value in state.values() if torch.is_tensor(value)}
+    matches = {index: final_checkpoint.as_posix() for index, hashes in trained if hashes.issubset(saved)}
+    final_matched = bool(matches)
+    del state, saved
+
+    root = final_checkpoint.parent
+    others = sorted(path for pattern in ("*.pt", "*.pth") for path in root.rglob(pattern)
+                    if path != final_checkpoint and path.is_file() and not path.is_symlink())
+    unreadable = []
+    for path in others:
+        if len(matches) == len(trained):
+            break
+        try:
+            saved = _saved_hashes(torch.load(path, map_location="cpu", weights_only=True))
+        except Exception as exc:
+            unreadable.append({"path": path.as_posix(), "error": str(exc)[:200]})
+            continue
+        for index, hashes in trained:
+            if index not in matches and hashes.issubset(saved):
+                matches[index] = path.as_posix()
+
+    evidence["trained_optimizers"] = len(trained)
+    evidence["checkpoint_matches"] = [{"optimizer": index, "parameters": len(hashes), "checkpoint": matches.get(index)}
+                                      for index, hashes in trained]
+    if unreadable:
+        evidence["unreadable_checkpoints"] = unreadable
+    evidence["checkpoint_verified"] = bool(trained) and final_matched and len(matches) == len(trained)
+
+
 def main():
     import torch
     from torch.optim.optimizer import register_optimizer_step_post_hook, register_optimizer_step_pre_hook
@@ -78,15 +146,7 @@ def main():
                 raise
         checkpoint = Path("outputs/model.pt")
         if checkpoint.is_file() and not checkpoint.is_symlink() and checkpoint.stat().st_size > 0:
-            state = torch.load(checkpoint, map_location="cpu", weights_only=True)
-            if isinstance(state, dict):
-                state = state.get("model_state_dict", state.get("state_dict", state))
-            if not isinstance(state, dict):
-                raise ValueError("outputs/model.pt must contain a model state_dict")
-            saved = {tensor_hash(value) for value in state.values() if torch.is_tensor(value)}
-            trained = {tensor_hash(parameter) for optimizer in optimizers.values()
-                       for group in optimizer.param_groups for parameter in group["params"] if parameter.requires_grad}
-            evidence["checkpoint_verified"] = bool(trained) and trained.issubset(saved)
+            verify_checkpoints(checkpoint, list(optimizers.values()), evidence)
             evidence["checkpoint_sha256"] = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
         if evidence["cuda_update_observed"]:
             from researchclaw.training.jobs import gpu_evidence

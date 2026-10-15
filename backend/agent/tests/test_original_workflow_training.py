@@ -175,6 +175,35 @@ def test_real_cpu_torch_updates_and_matching_checkpoint(tmp_path, monkeypatch, t
         assert len((tmp_path / "evidence/training_observation.jsonl").read_text().splitlines()) == 3
 
 
+@pytest.mark.parametrize("per_seed,final,accepted", [
+    ("trained", "last", True),      # each seed saved; model.pt is the delivered last seed
+    (None, "last", False),          # model.pt overwritten per seed and nothing else kept
+    ("untrained", "last", False),   # per-seed files saved before training
+    ("trained", "fresh", False),    # per-seed files fine but model.pt was never trained
+])
+def test_independent_seed_models_each_need_a_matching_checkpoint(tmp_path, monkeypatch, per_seed, final, accepted):
+    pytest.importorskip("torch")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    script = ("import torch,json\nfrom pathlib import Path\nPath('outputs/full').mkdir(parents=True)\n"
+              "for seed in (42,123,456):\n torch.manual_seed(seed)\n model=torch.nn.Linear(2,1)\n"
+              " optimizer=torch.optim.SGD(model.parameters(),lr=0.1)\n")
+    if per_seed == "untrained":
+        script += " torch.save(model.state_dict(),f'outputs/full/final_{seed}.pt')\n"
+    script += " for step in range(2):\n  optimizer.zero_grad()\n  (model(torch.ones(2,2))-2).square().mean().backward()\n  optimizer.step()\n"
+    if per_seed == "trained":
+        script += " torch.save(model.state_dict(),f'outputs/full/final_{seed}.pt')\n"
+    script += " torch.save((model if %r=='last' else torch.nn.Linear(2,1)).state_dict(),'outputs/model.pt')\n" % final
+    script += "Path('results.json').write_text(json.dumps({'loss': 0.5}))\n"
+    (tmp_path / "main.py").write_text(script)
+    result = run_experiment(tmp_path, tmp_path / "evidence", configuration(training=True, metric="loss"))
+    assert result["success"] == accepted, result
+    matches = result["training"]["checkpoint_matches"]
+    assert result["training"]["trained_optimizers"] == 3 and len(matches) == 3
+    if accepted:
+        assert [match["checkpoint"] for match in matches] == [
+            "outputs/full/final_42.pt", "outputs/full/final_123.pt", "outputs/model.pt"]
+
+
 def test_s14_runs_actual_code_without_llm_claim(tmp_path, monkeypatch):
     from researchclaw.pipeline.experiment_run import runtime
 

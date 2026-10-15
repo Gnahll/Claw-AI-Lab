@@ -28,9 +28,11 @@ one manually written by an agent after the process exits does not satisfy this c
 Never copy smoke/prior metrics into a full run. Keep full and SMOKE_TEST=1 paths separate.
 For a training task: use real PyTorch optimizer updates in this process (not a subprocess
 or distributed launcher), loss.backward(), and save the FINAL trained model state_dict
-to outputs/model.pt using torch.save. For multiple optimizers include all their trained
-parameters in that checkpoint. The runtime checks observed parameter changes and reloads
-the checkpoint to compare trained tensors. Unsupported training backends must be reported
+to outputs/model.pt using torch.save. When several models are trained independently
+(e.g. one per seed), also save each one's final state_dict under outputs/ (e.g.
+outputs/final_<seed>.pt) before training the next; outputs/model.pt holds the delivered one.
+The runtime checks observed parameter changes and reloads the checkpoints to verify that
+every optimizer's final trained tensors were saved. Unsupported training backends must be reported
 as blockers, not replaced with a toy implementation. Record per-epoch loss and validation
 metrics, planned/completed epochs and steps, data split, sample counts, seed, evaluation
 protocol and limitations in results.json; do not change test splits or reduce planned
