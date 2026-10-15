@@ -1,11 +1,11 @@
 """LaTeX compilation and error repair utilities (IMP-18).
 
-Provides ``compile_latex()`` which attempts ``pdflatex`` compilation,
+Provides ``compile_latex()`` which attempts ``pdflatex`` or Tectonic compilation,
 parses the log for common errors, applies automated fixes, and retries
 up to 3 times.  Designed to run inside ``_package_deliverables()`` so
 that the final paper.tex in ``deliverables/`` is compile-tested.
 
-If pdflatex is not installed the module gracefully returns a failure
+If neither compiler is installed the module gracefully returns a failure
 report without raising.
 """
 
@@ -40,7 +40,7 @@ def compile_latex(
     max_attempts: int = 3,
     timeout: int = 120,
 ) -> CompileResult:
-    """Compile *tex_path* with pdflatex, auto-fixing common errors.
+    """Compile *tex_path*, auto-fixing common errors.
 
     Parameters
     ----------
@@ -50,44 +50,62 @@ def compile_latex(
     max_attempts:
         Maximum compile→fix cycles.
     timeout:
-        Seconds before killing a stuck pdflatex process.
+        Seconds before killing a stuck compiler process.
 
     Returns
     -------
     CompileResult
         Contains success flag, log excerpt, errors found, and fixes applied.
     """
-    if not shutil.which("pdflatex"):
+    tex_path = tex_path.resolve()
+    pdf_path = tex_path.with_suffix(".pdf")
+    pdf_path.unlink(missing_ok=True)
+    pdflatex = shutil.which("pdflatex")
+    tectonic = shutil.which("tectonic")
+    if not tectonic:
+        runtime_compiler = Path(__file__).resolve().parents[4] / ".runtime" / "tectonic"
+        if runtime_compiler.is_file():
+            tectonic = str(runtime_compiler)
+    if not pdflatex and not tectonic:
         return CompileResult(
             success=False,
-            log_excerpt="pdflatex not found on PATH",
-            errors=["pdflatex not installed"],
+            log_excerpt="Neither pdflatex nor Tectonic was found",
+            errors=["Install pdflatex or Tectonic (PATH or project .runtime/tectonic)"],
         )
 
     result = CompileResult(success=False)
     work_dir = tex_path.parent
     tex_name = tex_path.name
+    compiler = "pdflatex" if pdflatex else "tectonic"
+    command = (
+        [pdflatex, "-interaction=nonstopmode", "-halt-on-error", tex_name]
+        if pdflatex else [tectonic, "-X", "compile", tex_name, "--keep-logs", "--keep-intermediates"]
+    )
 
     for attempt in range(1, max_attempts + 1):
         result.attempts = attempt
+        pdf_path.unlink(missing_ok=True)
         try:
             proc = subprocess.run(
-                [
-                    "pdflatex",
-                    "-interaction=nonstopmode",
-                    "-halt-on-error",
-                    tex_name,
-                ],
+                command,
                 cwd=work_dir,
                 capture_output=True,
                 text=True,
                 timeout=timeout,
             )
+            if proc.returncode == 0 and pdflatex:
+                _run_bibtex(work_dir, tex_path.stem, timeout=60)
+                for _pass in range(2):
+                    proc = subprocess.run(
+                        command, cwd=work_dir, capture_output=True, text=True, timeout=timeout,
+                    )
+                    if proc.returncode != 0:
+                        break
         except subprocess.TimeoutExpired:
-            result.errors.append(f"pdflatex timed out after {timeout}s")
+            result.errors.append(f"{compiler} timed out after {timeout}s")
             break
         except FileNotFoundError:
-            result.errors.append("pdflatex not found")
+            result.errors.append(f"{compiler} not found")
             break
 
         log_text = proc.stdout + "\n" + proc.stderr
@@ -97,18 +115,10 @@ def compile_latex(
         result.log_excerpt = log_text[-2000:] if len(log_text) > 2000 else log_text
 
         if proc.returncode == 0:
+            if not pdf_path.is_file() or not pdf_path.read_bytes().startswith(b"%PDF-"):
+                result.errors.append(f"{compiler} did not produce a valid PDF")
+                break
             result.success = True
-            # Run bibtex + two more pdflatex passes for bibliography & cross-refs
-            bib_stem = tex_name.rsplit(".", 1)[0]
-            _run_bibtex(work_dir, bib_stem, timeout=60)
-            for _pass in range(2):
-                subprocess.run(
-                    ["pdflatex", "-interaction=nonstopmode", tex_name],
-                    cwd=work_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                )
             logger.info("IMP-18: LaTeX compiled successfully on attempt %d", attempt)
             break
 
@@ -133,6 +143,8 @@ def compile_latex(
             )
             break
 
+    if not result.success:
+        pdf_path.unlink(missing_ok=True)
     return result
 
 

@@ -78,7 +78,7 @@ const zh: Record<string, string> = {
   'layer.execution.name': '第四层 · 执行与修正',
   'layer.execution.desc': 'Phase E→F: 实验执行 → 迭代优化 → 结果分析 → 决策',
   'layer.writing.name': '第五层 · 论文写作',
-  'layer.writing.desc': 'Phase G: 论文大纲 → 初稿 → 同行评审 → 修订',
+  'layer.writing.desc': 'Phase G–H: 论文写作 → 修订 → 质量检查 → 归档 → 导出 → 引用核查',
 
   // Stage names
   'stage.1': '课题初始化',
@@ -104,6 +104,10 @@ const zh: Record<string, string> = {
   'stage.20': '论文初稿',
   'stage.21': '同行评审',
   'stage.22': '论文修订',
+  'stage.23': '质量检查',
+  'stage.24': '知识归档',
+  'stage.25': '导出论文',
+  'stage.26': '核查引用',
 
   // Repo names
   'repo.knowledge.name': 'Idea 仓库',

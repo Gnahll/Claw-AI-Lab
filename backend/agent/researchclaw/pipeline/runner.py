@@ -645,6 +645,14 @@ def _package_deliverables(
             from researchclaw.templates.compiler import compile_latex
 
             compile_result = compile_latex(tex_path, max_attempts=3, timeout=120)
+            (dest / "compile_report.json").write_text(json.dumps({
+                "success": compile_result.success,
+                "attempts": compile_result.attempts,
+                "errors": compile_result.errors,
+                "warnings": compile_result.warnings,
+                "fixes_applied": compile_result.fixes_applied,
+            }, indent=2), encoding="utf-8")
+            packaged.append("compile_report.json")
             if compile_result.success:
                 logger.info("IMP-18: paper.tex compiles successfully")
                 # Keep the generated PDF
