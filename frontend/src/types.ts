@@ -24,6 +24,10 @@ export const RCStage = {
   PAPER_DRAFT: 20,
   PEER_REVIEW: 21,
   PAPER_REVISION: 22,
+  QUALITY_GATE: 23,
+  KNOWLEDGE_ARCHIVE: 24,
+  EXPORT_PUBLISH: 25,
+  CITATION_VERIFY: 26,
 } as const;
 
 export type RCStage = (typeof RCStage)[keyof typeof RCStage];
@@ -60,6 +64,10 @@ export const STAGE_META: Record<RCStage, StageMeta> = {
   20: { id: 20, displayNumber: 20, name: '论文初稿',     key: 'PAPER_DRAFT',         outputs: ['paper_draft.md'] },
   21: { id: 21, displayNumber: 21, name: '同行评审',     key: 'PEER_REVIEW',         outputs: ['reviews.md'] },
   22: { id: 22, displayNumber: 22, name: '论文修订',     key: 'PAPER_REVISION',      outputs: ['paper_revised.md', 'latex_package.zip'] },
+  23: { id: 23, displayNumber: 23, name: '质量检查',     key: 'QUALITY_GATE',        outputs: ['quality_report.json'] },
+  24: { id: 24, displayNumber: 24, name: '知识归档',     key: 'KNOWLEDGE_ARCHIVE',   outputs: ['archive.md', 'bundle_index.json'] },
+  25: { id: 25, displayNumber: 25, name: '导出论文',     key: 'EXPORT_PUBLISH',      outputs: ['paper_final.md'] },
+  26: { id: 26, displayNumber: 26, name: '核查引用',     key: 'CITATION_VERIFY',     outputs: ['verification_report.json', 'references_verified.bib', 'paper_final_verified.md'] },
 };
 
 // ===================== Pyramid Layer Definitions =====================
@@ -109,8 +117,8 @@ export const LAYER_META: Record<AgentLayer, LayerMeta> = {
   [AgentLayer.WRITING]: {
     name: '第五层 · 论文写作',
     color: '#a855f7',
-    desc: 'Phase G: 论文大纲 → 初稿 → 同行评审 → 修订',
-    stages: [19, 20, 21, 22],
+    desc: 'Phase G–H: 论文写作 → 修订 → 质量检查 → 归档 → 导出 → 引用核查',
+    stages: [19, 20, 21, 22, 23, 24, 25, 26],
   },
 };
 
@@ -191,7 +199,7 @@ export const REPO_META: Record<RepoId, RepoMeta> = {
     desc: '论文大纲、初稿、评审、修订稿',
     fromLayer: AgentLayer.WRITING,
     toLayer: null,
-    artifacts: ['outline.md', 'paper_draft.md', 'reviews.md', 'paper_revised.md'],
+    artifacts: ['outline.md', 'paper_draft.md', 'reviews.md', 'paper_revised.md', 'paper_final.md', 'deliverables/paper.pdf', 'verification_report.json'],
   },
 };
 
@@ -261,7 +269,16 @@ export const ARTIFACT_LABELS: Record<string, { icon: string; zh: string; en: str
   'outline.md':            { icon: '📝', zh: '论文大纲', en: 'Paper Outline' },
   'paper_draft.md':        { icon: '📄', zh: '论文初稿', en: 'Paper Draft' },
   'reviews.md':            { icon: '👁️', zh: '同行评审', en: 'Peer Reviews' },
-  'paper_revised.md':      { icon: '✍️', zh: '论文终稿', en: 'Paper Revised' },
+  'paper_revised.md':      { icon: '✍️', zh: '论文修订稿', en: 'Paper Revised' },
+  'paper_final.md':        { icon: '📄', zh: '导出论文', en: 'Exported Paper' },
+  'paper_final_verified.md': { icon: '📄', zh: '引用核查后论文', en: 'Paper After Citation Check' },
+  'paper.pdf':            { icon: '📕', zh: '论文 PDF', en: 'Paper PDF' },
+  'deliverables/paper.pdf': { icon: '📕', zh: '论文 PDF', en: 'Paper PDF' },
+  'deliverables/compile_report.json': { icon: '📋', zh: 'PDF 生成报告', en: 'PDF Compilation Report' },
+  'quality_report.json':  { icon: '📋', zh: '质量检查报告', en: 'Quality Report' },
+  'archive.md':           { icon: '📚', zh: '知识归档', en: 'Knowledge Archive' },
+  'verification_report.json': { icon: '🔎', zh: '引用核查报告', en: 'Citation Verification' },
+  'references_verified.bib': { icon: '📚', zh: '核查后参考文献', en: 'Checked References' },
   'latex_package.zip':     { icon: '📦', zh: 'LaTeX 包', en: 'LaTeX Package' },
   'discussion_transcript.md': { icon: '💬', zh: '讨论记录', en: 'Discussion Transcript' },
   'consensus_synthesis.md':   { icon: '🤝', zh: '共识综合', en: 'Consensus Synthesis' },

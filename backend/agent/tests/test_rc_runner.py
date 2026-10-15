@@ -636,6 +636,9 @@ def test_package_deliverables_collects_all_artifacts(
     manifest = json.loads((dest / "manifest.json").read_text())
     assert manifest["run_id"] == "run-pkg-test"
     assert "paper_final.md" in manifest["files"]
+    assert "compile_report.json" in manifest["files"]
+    report = json.loads((dest / "compile_report.json").read_text())
+    assert isinstance(report["success"], bool)
 
 
 def test_package_deliverables_prefers_verified_versions(

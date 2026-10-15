@@ -48,6 +48,7 @@ STAGE_TO_LAYER: dict[int, str] = {
     10: "coding", 11: "coding", 12: "coding", 13: "coding",
     14: "execution", 15: "execution", 16: "execution", 17: "execution", 18: "execution",
     19: "writing", 20: "writing", 21: "writing", 22: "writing",
+    23: "writing", 24: "writing", 25: "writing", 26: "writing",
 }
 
 LAYER_STAGES: dict[str, list[int]] = {
@@ -55,7 +56,7 @@ LAYER_STAGES: dict[str, list[int]] = {
     "experiment": [9],
     "coding": [10, 11, 12, 13],
     "execution": [14, 15, 16, 17, 18],
-    "writing": [19, 20, 21, 22],
+    "writing": [19, 20, 21, 22, 23, 24, 25, 26],
 }
 
 LAYER_RANGE: dict[str, tuple[int, int]] = {
@@ -63,7 +64,7 @@ LAYER_RANGE: dict[str, tuple[int, int]] = {
     "experiment": (9, 9),
     "coding": (10, 13),
     "execution": (14, 18),
-    "writing": (19, 22),
+    "writing": (19, 26),
 }
 
 LAYER_RANGE_PHASE1: dict[str, tuple[int, int]] = {"idea": (1, 7)}
@@ -81,7 +82,10 @@ STAGE_NAMES: dict[int, str] = {
     13: "RESOURCE_PLANNING", 14: "EXPERIMENT_RUN", 15: "ITERATIVE_REFINE",
     16: "RESULT_ANALYSIS", 17: "RESEARCH_DECISION", 18: "KNOWLEDGE_SUMMARY",
     19: "PAPER_OUTLINE", 20: "PAPER_DRAFT", 21: "PEER_REVIEW", 22: "PAPER_REVISION",
+    23: "QUALITY_GATE", 24: "KNOWLEDGE_ARCHIVE", 25: "EXPORT_PUBLISH", 26: "CITATION_VERIFY",
 }
+
+TOTAL_STAGES = max(STAGE_NAMES)
 
 STAGE_OUTPUTS: dict[int, list[str]] = {
     1: ["goal.md", "hardware_profile.json"], 2: ["problem_tree.md"],
@@ -93,6 +97,9 @@ STAGE_OUTPUTS: dict[int, list[str]] = {
     15: ["refinement_log.json", "experiment_final/"],
     16: ["analysis.md", "experiment_summary.json", "charts/"], 17: ["decision.md"], 18: ["knowledge_entry.json"],
     19: ["outline.md"], 20: ["paper_draft.md"], 21: ["reviews.md"], 22: ["paper_revised.md", "latex_package.zip"],
+    23: ["quality_report.json"], 24: ["archive.md", "bundle_index.json"],
+    25: ["paper_final.md"],
+    26: ["verification_report.json", "references_verified.bib", "paper_final_verified.md"],
 }
 
 # Curated artifacts to display in the frontend DataShelf (subset of STAGE_OUTPUTS)
@@ -102,7 +109,8 @@ DISPLAY_ARTIFACTS: set[str] = {
     # 知识库
     "knowledge_entry.json",
     # 论文仓库 — final paper + LaTeX package
-    "paper_revised.md", "latex_package.zip",
+    "paper_revised.md", "latex_package.zip", "paper_final.md", "paper_final_verified.md",
+    "quality_report.json", "archive.md", "verification_report.json", "references_verified.bib",
     # 结果
     "analysis.md", "charts/", "decision.md",
     # 实验设计
@@ -118,6 +126,7 @@ REPO_FOR_STAGE: dict[int, str] = {
     10: "codebase", 11: "codebase", 12: "codebase", 13: "codebase",
     14: "results", 15: "results", 16: "results", 17: "results", 18: "insights",
     19: "papers", 20: "papers", 21: "papers", 22: "papers",
+    23: "papers", 24: "knowledge", 25: "papers", 26: "papers",
 }
 
 # Queue names between layers
@@ -554,7 +563,7 @@ def _build_status_summary(state: "BridgeState", target_layer: str = "all") -> st
         if stage_statuses:
             last_done = [s for s in stage_statuses if "✅" in s]
             failed = [s for s in stage_statuses if "❌" in s]
-            lines.append(f"  已完成: {len(last_done)}/22 阶段" + (f", {len(failed)} 失败" if failed else ""))
+            lines.append(f"  已完成: {len(last_done)}/{TOTAL_STAGES} 阶段" + (f", {len(failed)} 失败" if failed else ""))
             for s in stage_statuses:
                 lines.append(s)
         else:
@@ -839,7 +848,7 @@ _NO_CONTENT_ARTIFACTS: set[str] = {"paper_revised.md", "paper_draft.md", "outlin
 
 def _extract_artifact_summary(path: Path, filename: str, max_chars: int = 500) -> str:
     """Extract a human-readable summary from an artifact file."""
-    if filename in _NO_CONTENT_ARTIFACTS:
+    if filename in _NO_CONTENT_ARTIFACTS or path.suffix.lower() in {".pdf", ".zip"}:
         return ""
     try:
         if path.is_dir():
@@ -1064,6 +1073,7 @@ def poll_agent(agent: LobsterAgent) -> list[dict]:
                 agent._prev_checkpoint = cp
 
             if retcode == 0:
+                messages.extend(_deliverable_artifacts(run_dir, agent.project_id, agent.name))
                 agent.status = "done"
                 agent.current_task = ""
                 agent.current_stage = None
@@ -1291,7 +1301,7 @@ def _determine_resume_target(run_dir: str) -> tuple[str, int] | None:
     if last_done <= 0:
         return None
     next_stage = last_done + 1
-    if next_stage > 22:
+    if next_stage > TOTAL_STAGES:
         return None
     target_layer = STAGE_TO_LAYER.get(next_stage)
     if not target_layer:
@@ -1644,7 +1654,7 @@ def list_all_projects(state: BridgeState) -> list[dict]:
         timestamp = cp.get("timestamp", "") if cp else ""
 
         first_stage = 1
-        total_stages = 22
+        total_stages = TOTAL_STAGES
         completed_threshold = total_stages
 
         if last_stage >= completed_threshold:
@@ -3059,6 +3069,43 @@ async def handle_command(state: BridgeState, data: dict) -> list[dict]:
     return messages
 
 
+def _deliverable_artifacts(run_dir: Path, project_id: str, producer: str) -> list[dict]:
+    checkpoint = _read_json(run_dir / "checkpoint.json") or {}
+    stage = min(checkpoint.get("last_completed_stage", 0), TOTAL_STAGES)
+    messages = []
+    for filename in ("paper.pdf", "compile_report.json"):
+        artifact_path = run_dir / "deliverables" / filename
+        if artifact_path.is_file():
+            messages.append(msg_artifact(
+                "papers", f"deliverables/{filename}", producer,
+                f"{artifact_path.stat().st_size / 1024:.1f} KB", project_id,
+                _extract_artifact_summary(artifact_path, filename), stage=stage,
+            ))
+    return messages
+
+
+def _resolve_download_file(state: BridgeState, project_id: str, filename: str) -> Path | None:
+    projects_dir = state.projects_dir().resolve()
+    if not project_id or Path(project_id).name != project_id or project_id in {".", ".."}:
+        return None
+    if Path(filename).is_absolute() or ".." in Path(filename).parts:
+        return None
+    roots = [projects_dir / project_id, projects_dir / "_cross_discussions" / project_id]
+    for root_dir in roots:
+        if not root_dir.is_dir() or not root_dir.resolve().is_relative_to(projects_dir):
+            continue
+        run_dirs = sorted(root_dir.glob("run-*"), reverse=True) + [root_dir]
+        for run_dir in run_dirs:
+            search_dirs = [run_dir / "deliverables", *sorted(run_dir.glob("stage-*"), reverse=True), run_dir / "discussion"]
+            if filename.startswith("deliverables/"):
+                search_dirs = [run_dir]
+            for search_dir in search_dirs:
+                candidate = (search_dir / filename).resolve()
+                if candidate.is_relative_to(root_dir.resolve()) and candidate.is_file():
+                    return candidate
+    return None
+
+
 def _scan_existing_artifacts(state: BridgeState) -> list[dict]:
     """Scan all project directories for completed stage artifacts to send on connect."""
     messages: list[dict] = []
@@ -3081,6 +3128,7 @@ def _scan_existing_artifacts(state: BridgeState) -> list[dict]:
 
         seen: set[str] = set()
         for run_dir in run_dirs:
+            messages.extend(_deliverable_artifacts(run_dir, project_id, project_id))
             for s, outputs in STAGE_OUTPUTS.items():
                 stage_dir = run_dir / f"stage-{s:02d}"
                 if not stage_dir.is_dir():
@@ -3274,7 +3322,7 @@ async def main(args: argparse.Namespace):
     for _pd in state.projects_dir().iterdir():
         if _pd.is_dir() and not _pd.name.startswith("_"):
             _cp = _read_json(_pd / "checkpoint.json")
-            if _cp and _cp.get("last_completed_stage", 0) >= 22:
+            if _cp and _cp.get("last_completed_stage", 0) >= TOTAL_STAGES:
                 _completed_projects.add(_pd.name)
     for queue_name in list(QUEUE_NAMES.keys()) + ["init_to_idea"]:
         q = TaskQueue(name=queue_name, path=state.queues_dir() / f"{queue_name}.json")
@@ -3346,36 +3394,7 @@ async def main(args: argparse.Namespace):
                 if len(parts) < 2:
                     return _http_response(404, b"Not found\n")
                 project_id, filename = parts[0], parts[1]
-                proj_dir = Path(st.runs_base_dir) / "projects" / project_id
-                file_path = None
-                search_roots: list[Path] = []
-                if proj_dir.is_dir():
-                    search_roots.append(proj_dir)
-                cross_proj_dir = Path(st.runs_base_dir) / "projects" / "_cross_discussions" / project_id
-                if cross_proj_dir.is_dir():
-                    search_roots.append(cross_proj_dir)
-                if not search_roots:
-                    return _http_response(404, f"Project {project_id} not found\n".encode())
-
-                for root_dir in search_roots:
-                    for stage_dir in sorted(root_dir.glob("run-*/stage-*"), reverse=True):
-                        candidate = stage_dir / filename
-                        if candidate.is_file():
-                            file_path = candidate
-                            break
-                    if file_path:
-                        break
-                    for discussion_dir in sorted(root_dir.glob("run-*/discussion"), reverse=True):
-                        candidate = discussion_dir / filename
-                        if candidate.is_file():
-                            file_path = candidate
-                            break
-                    if file_path:
-                        break
-                    candidate = root_dir / "discussion" / filename
-                    if candidate.is_file():
-                        file_path = candidate
-                        break
+                file_path = _resolve_download_file(st, project_id, filename)
                 if not file_path:
                     return _http_response(404, f"File {filename} not found\n".encode())
                 try:

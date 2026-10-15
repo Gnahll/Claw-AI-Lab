@@ -78,7 +78,7 @@ const en: Record<string, string> = {
   'layer.execution.name': 'L4 · Execution & Refinement',
   'layer.execution.desc': 'Phase E→F: Run → Iterate → Analyze → Decision',
   'layer.writing.name': 'L5 · Paper Writing',
-  'layer.writing.desc': 'Phase G: Outline → Draft → Peer Review → Revision',
+  'layer.writing.desc': 'Phase G–H: Writing → Revision → Quality Check → Archive → Export → Citation Check',
 
   // Stage names
   'stage.1': 'Topic Init',
@@ -104,6 +104,10 @@ const en: Record<string, string> = {
   'stage.20': 'Paper Draft',
   'stage.21': 'Peer Review',
   'stage.22': 'Paper Revision',
+  'stage.23': 'Quality Check',
+  'stage.24': 'Knowledge Archive',
+  'stage.25': 'Paper Export',
+  'stage.26': 'Citation Verification',
 
   // Repo names
   'repo.knowledge.name': 'Idea Store',

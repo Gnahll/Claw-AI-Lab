@@ -10,7 +10,7 @@ function getLayerForStage(stage: number | null | undefined): AgentLayer | null {
   if (stage === 9) return 'experiment';
   if (stage >= 10 && stage <= 13) return 'coding';
   if (stage >= 14 && stage <= 18) return 'execution';
-  if (stage >= 19 && stage <= 22) return 'writing';
+  if (stage >= 19 && stage <= 26) return 'writing';
   return null;
 }
 
