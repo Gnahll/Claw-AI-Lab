@@ -2290,7 +2290,9 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
             "will break all references in the final PDF.\n"
             "{writing_structure}\n"
             "{topic_constraint}"
-            "Draft:\n{draft}\n\nReviews:\n{reviews}"
+            "Draft:\n{draft}\n\n"
+            "Authoritative experiment evidence:\n{experiment_evidence}\n\n"
+            "Reviews:\n{reviews}"
         ),
         "max_tokens": 16384,
     },

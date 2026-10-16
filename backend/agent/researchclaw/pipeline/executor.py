@@ -5336,6 +5336,181 @@ def _load_experiment_summary(run_dir: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _paper_experiment_evidence(run_dir: Path) -> str:
+    """Build a compact, auditable experiment snapshot for paper writing."""
+    summary = _load_experiment_summary(run_dir)
+    if not summary:
+        return ""
+
+    snapshot: dict[str, Any] = {
+        key: summary[key]
+        for key in (
+            "metrics_summary",
+            "metrics_summary_scope",
+            "total_runs",
+            "total_conditions",
+            "best_run",
+            "best_condition",
+            "paired_comparisons",
+            "provenance",
+            "audit",
+            "limitations",
+            "approval_compliance",
+            "input_json_count",
+            "smoke_runs_included",
+        )
+        if key in summary
+    }
+
+    condition_summaries = summary.get("condition_summaries")
+    if isinstance(condition_summaries, dict):
+        snapshot["condition_summaries"] = condition_summaries
+
+    compact_runs: list[dict[str, Any]] = []
+    per_seed_results = summary.get("per_seed_results")
+    if isinstance(per_seed_results, list):
+        for record in per_seed_results:
+            if not isinstance(record, dict):
+                continue
+            compact_record = {
+                key: record[key]
+                for key in (
+                    "condition", "seed", "best_epoch", "metrics",
+                    "optimizer_steps", "backward_steps",
+                )
+                if key in record
+            }
+            compact_epochs: list[dict[str, Any]] = []
+            epochs = record.get("epochs")
+            if isinstance(epochs, list):
+                for epoch in epochs:
+                    if not isinstance(epoch, dict):
+                        continue
+                    compact_epoch = {
+                        key: epoch[key]
+                        for key in ("epoch", "mean_loss", "samples")
+                        if key in epoch
+                    }
+                    validation = epoch.get("validation")
+                    if isinstance(validation, dict):
+                        compact_epoch["validation"] = {
+                            key: validation[key]
+                            for key in ("f1", "iou", "sample_count")
+                            if key in validation
+                        }
+                    compact_epochs.append(compact_epoch)
+            if compact_epochs:
+                compact_record["epochs"] = compact_epochs
+            compact_runs.append(compact_record)
+    if compact_runs:
+        snapshot["per_seed_results"] = compact_runs
+
+    summary_path = _find_prior_file(run_dir, "experiment_summary.json")
+    source = str(summary_path.relative_to(run_dir)) if summary_path else "experiment_summary.json"
+    payload = json.dumps(snapshot, indent=2, ensure_ascii=False)
+    return (
+        "\n\n## AUTHORITATIVE EXPERIMENT EVIDENCE FOR PAPER WRITING\n"
+        f"Source: `{source}`\n"
+        "The structured snapshot below is authoritative for completed runs, metrics, "
+        "hardware, checkpoints, protocol deviations, and limitations. It is compacted "
+        "only by removing per-image arrays and sample-loss arrays.\n"
+        "```json\n"
+        f"{payload}\n"
+        "```\n"
+        "EVIDENCE SYNCHRONIZATION RULES:\n"
+        "- Update stale draft or review statements when this snapshot contains newer evidence.\n"
+        "- Do not say that only aggregate means exist when per-seed results are listed.\n"
+        "- Do not say training, GPU use, or checkpoints are unverified when the audit records "
+        "them; describe the exact level of verification instead.\n"
+        "- Preserve every limitation, approval deviation, test-exposure warning, and "
+        "independent-replay caveat in the snapshot.\n"
+        "- Never convert file-existence checks into claims of checkpoint reload or independent "
+        "metric reproduction.\n"
+        "- If the draft conflicts with this snapshot, revise the draft and retain the supported "
+        "scientific boundary.\n"
+    )
+
+
+def _paper_evidence_conflicts(paper: str, run_dir: Path) -> list[str]:
+    """Detect claims that contradict the authoritative experiment summary."""
+    summary = _load_experiment_summary(run_dir) or {}
+    lowered = " ".join(paper.lower().split())
+    conflicts: list[str] = []
+
+    per_seed_results = summary.get("per_seed_results")
+    if isinstance(per_seed_results, list) and per_seed_results:
+        aggregate_only_patterns = (
+            "only aggregate means",
+            "contains aggregate means, not the full run-by-epoch",
+            "does not contain the full run-by-epoch",
+            "cannot be reconstructed from those means",
+        )
+        if any(pattern in lowered for pattern in aggregate_only_patterns):
+            conflicts.append(
+                "Paper says only aggregate means are available although per-seed results exist."
+            )
+
+    audit = summary.get("audit")
+    completed_audits = []
+    if isinstance(audit, dict):
+        completed_audits = [
+            value for value in audit.values()
+            if isinstance(value, dict) and value.get("status") == "completed"
+        ]
+    if completed_audits:
+        completion_patterns = (
+            "no new execution occurred",
+            "actual completed progress for the independent task therefore remain unverified",
+            "does not establish completion of the newly authorized server run",
+        )
+        if any(pattern in lowered for pattern in completion_patterns):
+            conflicts.append(
+                "Paper denies completed execution although the audit contains completed runs."
+            )
+
+    return conflicts
+
+
+def _paper_evidence_conflicts(paper: str, run_dir: Path) -> list[str]:
+    """Detect claims that contradict the authoritative experiment summary."""
+    summary = _load_experiment_summary(run_dir) or {}
+    lowered = " ".join(paper.lower().split())
+    conflicts: list[str] = []
+
+    per_seed_results = summary.get("per_seed_results")
+    if isinstance(per_seed_results, list) and per_seed_results:
+        aggregate_only_patterns = (
+            "only aggregate means",
+            "contains aggregate means, not the full run-by-epoch",
+            "does not contain the full run-by-epoch",
+            "cannot be reconstructed from those means",
+        )
+        if any(pattern in lowered for pattern in aggregate_only_patterns):
+            conflicts.append(
+                "Paper says only aggregate means are available although per-seed results exist."
+            )
+
+    audit = summary.get("audit")
+    completed_audits = []
+    if isinstance(audit, dict):
+        completed_audits = [
+            value for value in audit.values()
+            if isinstance(value, dict) and value.get("status") == "completed"
+        ]
+    if completed_audits:
+        completion_patterns = (
+            "no new execution occurred",
+            "actual completed progress for the independent task therefore remain unverified",
+            "does not establish completion of the newly authorized server run",
+        )
+        if any(pattern in lowered for pattern in completion_patterns):
+            conflicts.append(
+                "Paper denies completed execution although the audit contains completed runs."
+            )
+
+    return conflicts
+
+
 _MAX_PAYLOAD_METRICS = 200
 # Bookkeeping fields that appear next to metrics in results payloads
 _NON_METRIC_KEYS = frozenset({
@@ -6788,12 +6963,9 @@ def _execute_paper_draft(
             config, run_dir, include_analysis=True, include_experiment_data=True,
         )
         analysis = _read_prior_artifact(run_dir, "analysis.md") or ""
-        exp_summary_text = _read_prior_artifact(run_dir, "experiment_summary.json") or ""
-        _extra = ""
-        if exp_summary_text:
-            _extra = f"\n\nExperiment Summary JSON:\n```json\n{exp_summary_text[:3000]}\n```\n"
+        experiment_evidence = _paper_experiment_evidence(run_dir)
         _short_user = (
-            f"{preamble}\n\n{_extra}\n\nOutline:\n{outline}\n\n"
+            f"{preamble}\n\n{experiment_evidence}\n\nOutline:\n{outline}\n\n"
             "Write a SHORT WORKSHOP PAPER (2-3 pages, ~1500-2000 words total) "
             "in markdown. Include these sections:\n"
             "1. **Title** (catchy, <=14 words)\n"
@@ -6814,10 +6986,16 @@ def _execute_paper_draft(
         draft = resp.content
         logger.info("Stage 20: Short paper mode — single LLM call (%d words)", len(draft.split()))
         (stage_dir / "paper_draft.md").write_text(draft, encoding="utf-8")
+        artifacts = ["paper_draft.md"]
+        if experiment_evidence:
+            (stage_dir / "experiment_evidence.md").write_text(
+                experiment_evidence, encoding="utf-8"
+            )
+            artifacts.append("experiment_evidence.md")
         return StageResult(
             stage=Stage.PAPER_DRAFT,
             status=StageStatus.DONE,
-            artifacts=("paper_draft.md",),
+            artifacts=tuple(artifacts),
             evidence_refs=("stage-20/paper_draft.md",),
         )
     # ── END short fast-path ──
@@ -7273,6 +7451,10 @@ def _execute_paper_draft(
         )
 
     # R4-2: Anti-fabrication data integrity instruction
+    experiment_evidence = _paper_experiment_evidence(run_dir)
+    if experiment_evidence:
+        exp_metrics_instruction += experiment_evidence
+
     exp_metrics_instruction += (
         "\n\n## CRITICAL: Data Integrity Rules\n"
         "- You may ONLY report numbers that appear in the experiment data above\n"
@@ -7647,6 +7829,11 @@ Generated: {_utcnow_iso()}
     _topic = config.research.topic if hasattr(config, "research") else ""
     _fig_prompts = _extract_figure_prompts(draft, topic=_topic)
     _draft_artifacts = ["paper_draft.md"]
+    if experiment_evidence:
+        (stage_dir / "experiment_evidence.md").write_text(
+            experiment_evidence, encoding="utf-8"
+        )
+        _draft_artifacts.append("experiment_evidence.md")
     if _fig_prompts:
         _fig_prompts = _render_figure_prompts(
             _fig_prompts, stage_dir, config, llm, topic=_topic,
@@ -7926,6 +8113,7 @@ def _execute_paper_revision(
     # BUG-47: _collect_raw_experiment_metrics returns tuple[str, bool], must unpack
     _raw_metrics_tuple = _collect_raw_experiment_metrics(run_dir)
     raw_metrics_revision = _raw_metrics_tuple[0] if isinstance(_raw_metrics_tuple, tuple) else (_raw_metrics_tuple or "")
+    experiment_evidence = _paper_experiment_evidence(run_dir)
     data_integrity_revision = ""
     if raw_metrics_revision:
         data_integrity_revision = (
@@ -7974,6 +8162,7 @@ def _execute_paper_revision(
             writing_structure=_ws_revision,
             draft=draft,
             reviews=_quality_prefix + reviews + data_integrity_revision,
+            experiment_evidence=experiment_evidence,
             **_rev_blocks,
         )
         # R10-Fix2: Ensure max_tokens is sufficient for full paper revision
@@ -8053,11 +8242,71 @@ def _execute_paper_revision(
                         revision_summary, encoding="utf-8"
                     )
                 revised = draft
+        sync_conflicts = _paper_evidence_conflicts(revised, run_dir)
+        if sync_conflicts:
+            correction_prompt = (
+                "The proposed revision contradicts the authoritative experiment evidence. "
+                "Correct every listed conflict while preserving all supported limitations. "
+                "Return the complete revised markdown only.\n\n"
+                + "\n".join(f"- {conflict}" for conflict in sync_conflicts)
+                + "\n\n"
+                + sp.user
+            )
+            corrected = _chat_with_prompt(
+                llm,
+                sp.system,
+                correction_prompt,
+                json_mode=sp.json_mode,
+                max_tokens=revision_max_tokens,
+                retries=1,
+            ).content
+            corrected_conflicts = _paper_evidence_conflicts(corrected, run_dir)
+            draft_conflicts = _paper_evidence_conflicts(draft, run_dir)
+            candidates = (
+                (corrected, corrected_conflicts, "corrected_revision"),
+                (revised, sync_conflicts, "initial_revision"),
+                (draft, draft_conflicts, "original_draft"),
+            )
+            revised, final_conflicts, selected_source = min(
+                candidates, key=lambda item: (len(item[1]), -len(item[0]))
+            )
+            sync_report = {
+                "initial_conflicts": sync_conflicts,
+                "corrected_conflicts": corrected_conflicts,
+                "original_draft_conflicts": draft_conflicts,
+                "selected_source": selected_source,
+                "remaining_conflicts": final_conflicts,
+            }
+        else:
+            sync_report = {
+                "initial_conflicts": [],
+                "corrected_conflicts": [],
+                "original_draft_conflicts": _paper_evidence_conflicts(draft, run_dir),
+                "selected_source": "initial_revision",
+                "remaining_conflicts": [],
+            }
     else:
         revised = draft
+        draft_conflicts = _paper_evidence_conflicts(draft, run_dir)
+        sync_report = {
+            "initial_conflicts": [],
+            "corrected_conflicts": [],
+            "original_draft_conflicts": draft_conflicts,
+            "selected_source": "original_draft_no_llm",
+            "remaining_conflicts": draft_conflicts,
+        }
     (stage_dir / "paper_revised.md").write_text(revised, encoding="utf-8")
 
     _revision_artifacts = ["paper_revised.md"]
+    if experiment_evidence:
+        (stage_dir / "experiment_evidence.md").write_text(
+            experiment_evidence, encoding="utf-8"
+        )
+        _revision_artifacts.append("experiment_evidence.md")
+        (stage_dir / "experiment_sync_report.json").write_text(
+            json.dumps(sync_report, indent=2), encoding="utf-8"
+        )
+        _revision_artifacts.append("experiment_sync_report.json")
     _topic = config.research.topic if hasattr(config, "research") else ""
 
     # Reuse figures from S20 (PAPER_DRAFT) instead of regenerating

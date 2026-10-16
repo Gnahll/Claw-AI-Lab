@@ -46,7 +46,10 @@ def test_pdf_download_uses_deliverables_and_supports_direct_stage_layout(tmp_pat
     dest = project / "deliverables"
     dest.mkdir()
     (dest / "paper.pdf").write_bytes(b"%PDF-final")
-    for name in ("manifest.json", "quality_report.json", "verification_report.json", "citation_coverage.json"):
+    for name in (
+        "manifest.json", "quality_report.json", "verification_report.json",
+        "citation_coverage.json", "experiment_evidence.md", "experiment_sync_report.json",
+    ):
         (dest / name).write_text("{}", encoding="utf-8")
     (project / "checkpoint.json").write_text(json.dumps({"last_completed_stage": 26}), encoding="utf-8")
     state = SimpleNamespace(projects_dir=lambda: projects)
@@ -60,7 +63,10 @@ def test_pdf_download_uses_deliverables_and_supports_direct_stage_layout(tmp_pat
     assert pdf["stage"] == 26
     assert not pdf.get("content")
     filenames = {message["payload"]["filename"] for message in artifacts}
-    for name in ("manifest.json", "quality_report.json", "verification_report.json", "citation_coverage.json"):
+    for name in (
+        "manifest.json", "quality_report.json", "verification_report.json",
+        "citation_coverage.json", "experiment_evidence.md", "experiment_sync_report.json",
+    ):
         assert f"deliverables/{name}" in filenames
         assert bridge._resolve_download_file(state, "test", f"deliverables/{name}") == dest / name
 
