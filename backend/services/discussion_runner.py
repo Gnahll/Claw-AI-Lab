@@ -17,6 +17,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import sys
 import time
@@ -28,6 +29,7 @@ if AGENT_PACKAGE_DIR not in sys.path:
 
 from researchclaw.config import RCConfig
 from researchclaw.llm import create_llm_client
+from researchclaw.topic_translation import ensure_english_topic
 
 
 def _read_synthesis(stage_dir: Path) -> str | None:
@@ -201,7 +203,10 @@ def main():
     config = RCConfig.load(args.config, check_paths=False)
     llm = create_llm_client(config)
 
-    topic = args.topic or config.research.topic
+    if args.topic:
+        config = dataclasses.replace(config, research=dataclasses.replace(config.research, topic=args.topic))
+    config = ensure_english_topic(config, output_dir, llm)
+    topic = config.research.topic
     print(f"   Topic:      {topic}")
 
     # Collect syntheses

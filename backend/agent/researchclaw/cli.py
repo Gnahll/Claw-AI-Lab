@@ -216,6 +216,10 @@ def cmd_run(args: argparse.Namespace) -> int:
     run_dir = Path(output or f"artifacts/{run_id}")
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    from researchclaw.topic_translation import ensure_english_topic
+
+    config = ensure_english_topic(config, run_dir)
+
     if config.knowledge_base.root:
         kb_root_path = Path(config.knowledge_base.root)
         kb_root_path.mkdir(parents=True, exist_ok=True)
