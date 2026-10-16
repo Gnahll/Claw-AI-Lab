@@ -1957,6 +1957,67 @@ Derived from `goal.md` for topic: {config.research.topic}
     )
 
 
+_PLAN_QUERY_KEYS = frozenset({"queries", "query", "search_queries"})
+# Longer values stored under a query key are retrieval instructions, not queries.
+_MAX_PLAN_QUERY_CHARS = 150
+
+
+def _plan_query_values(value: Any) -> list[str]:
+    items = [value] if isinstance(value, str) else value if isinstance(value, list) else []
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        for part in item.split(";"):
+            part = part.strip()
+            if part and len(part) <= _MAX_PLAN_QUERY_CHARS and not re.search(r"[\u4e00-\u9fff]", part):
+                out.append(part)
+    return out
+
+
+def _collect_plan_queries(plan: Any, llm_sources: list[dict[str, Any]]) -> list[str]:
+    """Pull literature queries out of the S3 search plan.
+
+    The prompt asks for ``search_strategies[].queries``, but LLMs regularly
+    rename that structure (``search_tracks``, ``search_phases`` ...).  Instead
+    of discarding such a plan and rebuilding queries from the topic, fall back
+    to every ``queries``/``query`` field in the plan, then to the queries the
+    LLM attached to its sources.
+    """
+    queries: list[str] = []
+    if isinstance(plan, dict):
+        strategies = plan.get("search_strategies", [])
+        if isinstance(strategies, list):
+            for strat in strategies:
+                if isinstance(strat, dict):
+                    qs = strat.get("queries", [])
+                    if isinstance(qs, list):
+                        queries.extend(str(q) for q in qs if q)
+    if queries:
+        return queries
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in _PLAN_QUERY_KEYS:
+                    queries.extend(_plan_query_values(value))
+                else:
+                    _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(plan)
+    if queries:
+        logger.info("Stage 03: plan has no search_strategies; using %d queries found elsewhere in the plan", len(queries))
+        return list(dict.fromkeys(queries))
+    for src in llm_sources:
+        queries.extend(_plan_query_values(src.get("query")))
+    if queries:
+        logger.info("Stage 03: plan has no queries; using %d queries from the LLM's sources", len(queries))
+    return list(dict.fromkeys(queries))
+
+
 def _execute_search_strategy(
     stage_dir: Path,
     run_dir: Path,
@@ -1994,6 +2055,7 @@ def _execute_search_strategy(
             src = payload.get("sources", [])
             if isinstance(src, list):
                 sources = [item for item in src if isinstance(item, dict)]
+    llm_plan = plan
     if plan is None:
         # Build smart fallback queries by extracting key terms from topic
         # instead of using the raw (often very long) topic string.
@@ -2022,6 +2084,7 @@ def _execute_search_strategy(
             },
             "deduplication": {"method": "title_doi_hash", "fuzzy_threshold": 0.9},
         }
+    llm_sources = list(sources or [])
     if not sources:
         sources = [
             {
@@ -2068,16 +2131,11 @@ def _execute_search_strategy(
     )
 
     # F1.5: Extract queries from plan for Stage 4 real literature search
-    queries_list: list[str] = []
+    # The LLM's own queries (plan, then its sources) beat queries rebuilt from
+    # the topic; a single YAML typo must not throw them all away.
+    queries_list = _collect_plan_queries(llm_plan, llm_sources) or _collect_plan_queries(plan, [])
     year_min = 2020
     if isinstance(plan, dict):
-        strategies = plan.get("search_strategies", [])
-        if isinstance(strategies, list):
-            for strat in strategies:
-                if isinstance(strat, dict):
-                    qs = strat.get("queries", [])
-                    if isinstance(qs, list):
-                        queries_list.extend(str(q) for q in qs if q)
         filters = plan.get("filters", {})
         if isinstance(filters, dict) and filters.get("min_year"):
             try:
