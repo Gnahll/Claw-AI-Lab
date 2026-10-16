@@ -1810,6 +1810,147 @@ class TestCollectRawExperimentMetrics:
         assert "8 run(s)" in result
 
 
+class TestPaperExperimentEvidence:
+    def test_preserves_run_audit_and_scientific_limits(self, tmp_path: Path) -> None:
+        run_dir = tmp_path / "run"
+        summary_dir = run_dir / "stage-16"
+        summary_dir.mkdir(parents=True)
+        summary = {
+            "total_runs": 12,
+            "total_conditions": 4,
+            "metrics_summary": {"validation_f1": {"mean": 0.8272}},
+            "condition_summaries": {
+                "Final": {"metrics": {"validation_f1": 0.8677}}
+            },
+            "per_seed_results": [{
+                "condition": "Final",
+                "seed": 123,
+                "best_epoch": 2,
+                "metrics": {"validation_f1": 0.8787, "test_f1": 0.8589},
+                "optimizer_steps": 13,
+                "backward_steps": 126,
+                "epochs": [{
+                    "epoch": 2,
+                    "mean_loss": 0.426,
+                    "sample_losses": [0.1, 0.2],
+                    "validation": {
+                        "f1": 0.8787,
+                        "iou": 0.8304,
+                        "sample_count": 13,
+                        "per_image": [{"id": "12", "f1": 0.9}],
+                    },
+                }],
+            }],
+            "audit": {
+                "Final": {
+                    "status": "completed",
+                    "gpu": {
+                        "visible_devices": "GPU-test-uuid",
+                        "name": "NVIDIA A800-SXM4-80GB",
+                    },
+                    "artifacts": [{"path": "best_123.pt", "exists": True}],
+                }
+            },
+            "approval_compliance": "not established; explicit deviations detected",
+            "limitations": ["Checkpoint tensors were not independently reloaded."],
+        }
+        (summary_dir / "experiment_summary.json").write_text(
+            json.dumps(summary), encoding="utf-8"
+        )
+
+        evidence = rc_executor._paper_experiment_evidence(run_dir)
+
+        assert "12" in evidence
+        assert "GPU-test-uuid" in evidence
+        assert "best_123.pt" in evidence
+        assert "0.8787" in evidence
+        assert "optimizer_steps" in evidence
+        assert "not independently reloaded" in evidence
+        assert "sample_losses" not in evidence
+        assert "per_image" not in evidence
+
+    def test_revision_receives_and_saves_authoritative_evidence(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_prior_artifact(run_dir, 20, "paper_draft.md", "# Paper\n\nOriginal draft.")
+        _write_prior_artifact(run_dir, 21, "reviews.md", "Use complete experiment evidence.")
+        _write_prior_artifact(run_dir, 16, "experiment_summary.json", json.dumps({
+            "total_runs": 12,
+            "metrics_summary": {"validation_f1": {"mean": 0.8272}},
+            "per_seed_results": [{
+                "condition": "Final", "seed": 123,
+                "metrics": {"validation_f1": 0.8787},
+            }],
+            "audit": {"Final": {
+                "status": "completed",
+                "gpu": {"visible_devices": "GPU-test-uuid"},
+                "artifacts": [{"path": "best_123.pt", "exists": True}],
+            }},
+            "limitations": ["Weights were not independently reloaded."],
+        }))
+        monkeypatch.setattr(rc_executor, "_generate_latex_package", lambda *args, **kwargs: [])
+        stage_dir = run_dir / "stage-22"
+        stage_dir.mkdir()
+        llm = FakeLLMClient("# Paper\n\nRevised with synchronized evidence.")
+
+        result = rc_executor._execute_paper_revision(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        prompts = "\n".join(
+            message["content"] for call in llm.calls for message in call
+        )
+        assert "AUTHORITATIVE EXPERIMENT EVIDENCE" in prompts
+        assert "GPU-test-uuid" in prompts
+        assert "best_123.pt" in prompts
+        assert "Weights were not independently reloaded" in prompts
+        assert "experiment_evidence.md" in result.artifacts
+        assert "experiment_sync_report.json" in result.artifacts
+        saved = (stage_dir / "experiment_evidence.md").read_text(encoding="utf-8")
+        assert "0.8787" in saved
+
+    def test_revision_rejects_claim_that_only_aggregate_means_exist(
+        self,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        draft = "# Paper\n\nTwelve completed runs provide per-seed measurements."
+        _write_prior_artifact(run_dir, 20, "paper_draft.md", draft)
+        _write_prior_artifact(run_dir, 21, "reviews.md", "Keep the evidence synchronized.")
+        _write_prior_artifact(run_dir, 16, "experiment_summary.json", json.dumps({
+            "metrics_summary": {"validation_f1": {"mean": 0.82}},
+            "per_seed_results": [{"condition": "Final", "seed": 123}],
+            "audit": {"Final": {"status": "completed"}},
+        }))
+        monkeypatch.setattr(rc_executor, "_generate_latex_package", lambda *args, **kwargs: [])
+        stage_dir = run_dir / "stage-22"
+        stage_dir.mkdir()
+        stale = (
+            "# Paper\n\nThe available numerical input contains aggregate means, "
+            "not the full run-by-epoch or condition-by-seed matrix. "
+            "No new execution occurred."
+        )
+        llm = FakeLLMClient(stale)
+
+        rc_executor._execute_paper_revision(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert (stage_dir / "paper_revised.md").read_text(encoding="utf-8") == draft
+        report = json.loads(
+            (stage_dir / "experiment_sync_report.json").read_text(encoding="utf-8")
+        )
+        assert report["selected_source"] == "original_draft"
+        assert report["remaining_conflicts"] == []
+        assert len(llm.calls) == 2
+
+
 class TestRunPayloadMetrics:
     """Tests for _run_payload_metrics() schema handling."""
 

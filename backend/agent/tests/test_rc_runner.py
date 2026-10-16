@@ -655,6 +655,12 @@ def test_package_deliverables_keeps_orphans_and_marks_degraded_draft(
     quality_dir.mkdir()
     (quality_dir / "decision.json").write_text(json.dumps({"decision": "degraded"}))
     (quality_dir / "quality_report.json").write_text(json.dumps({"score": 2.5}))
+    revision_dir = run_dir / "stage-22"
+    revision_dir.mkdir(exist_ok=True)
+    (revision_dir / "experiment_evidence.md").write_text("authoritative evidence")
+    (revision_dir / "experiment_sync_report.json").write_text(json.dumps({
+        "selected_source": "corrected_revision", "remaining_conflicts": []
+    }))
     dest = rc_runner._package_deliverables(run_dir, "run-degraded", rc_config)
     assert dest is not None
     assert r"\cite{missing2025}" in (dest / "paper.tex").read_text()
@@ -663,6 +669,8 @@ def test_package_deliverables_keeps_orphans_and_marks_degraded_draft(
     assert manifest["quality_gate"] == "degraded"
     assert manifest["citation_verification"] == "requires_review"
     assert (dest / "quality_report.json").exists()
+    assert (dest / "experiment_evidence.md").exists()
+    assert (dest / "experiment_sync_report.json").exists()
     assert json.loads((dest / "citation_coverage.json").read_text())["unresolved_citation_keys"] == ["missing2025"]
 
 

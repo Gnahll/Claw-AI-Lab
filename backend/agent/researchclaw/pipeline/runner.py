@@ -647,6 +647,12 @@ def _package_deliverables(
 
     quality_report = run_dir / "stage-23" / "quality_report.json"
     quality_decision = run_dir / "stage-23" / "decision.json"
+    revision_dir = _stage_dir(run_dir, Stage.PAPER_REVISION)
+    for filename in ("experiment_evidence.md", "experiment_sync_report.json"):
+        source = revision_dir / filename
+        if source.is_file():
+            shutil.copy2(source, dest / filename)
+            packaged.append(filename)
     quality_state = "not_checked"
     for source in (quality_report, quality_decision):
         if source.is_file():
@@ -686,6 +692,8 @@ def _package_deliverables(
             "references.bib": "Preserved bibliography; may include references requiring verification",
             "code/": "Experiment source code with requirements.txt",
             "verification_report.json": "Citation integrity & relevance verification",
+            "experiment_evidence.md": "Authoritative experiment facts supplied to paper revision",
+            "experiment_sync_report.json": "Detected evidence conflicts and selected revision source",
             "charts/": "Result visualizations",
         },
     }
