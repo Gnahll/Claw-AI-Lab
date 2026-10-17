@@ -1200,6 +1200,16 @@ def launch_agent_for_task(state: BridgeState, agent: LobsterAgent, task: Task) -
         if state.discussion_mode and agent.layer == "idea" and not _is_reproduce and last_done >= ts:
             for s in range(fs, ts + 1):
                 agent.stage_progress[s] = "completed"
+            # Lab project with several angles: rejoin the discussion instead of
+            # running S8 alone, so S8 still selects a single direction.
+            if state.lab_batches.get(agent.project_id, 0) >= 2:
+                messages.append(msg_log(
+                    agent,
+                    f"S1-S7 已完成 (checkpoint={last_done}), 跳过重跑 → 等待同项目其他方向进入讨论",
+                    "info",
+                ))
+                messages.extend(on_agent_done(state, agent))
+                return messages
             messages.append(msg_log(
                 agent,
                 f"S1-S7 已完成 (checkpoint={last_done}), 跳过重跑 → 直接进入讨论/S8",
@@ -1745,6 +1755,17 @@ def list_all_projects(state: BridgeState) -> list[dict]:
     return result
 
 
+def _clear_stale_discussion(state: BridgeState, project_id: str) -> None:
+    for aid, a in list(state.discussion_waiting.items()):
+        if a.project_id == project_id:
+            state.discussion_waiting.pop(aid, None)
+            _reset_agent_idle(a)
+    group = state.discussion_groups.get(project_id)
+    proc = getattr(group, "discussion_process", None) if group else None
+    if group and (proc is None or proc.poll() is not None):
+        state.discussion_groups.pop(project_id, None)
+
+
 def resume_project(state: BridgeState, project_id: str) -> list[dict]:
     """Resume a project from its last checkpoint."""
     messages: list[dict] = []
@@ -1780,6 +1801,10 @@ def resume_project(state: BridgeState, project_id: str) -> list[dict]:
     if not config_path:
         messages.append(msg_log(sys_agent, f"项目 [{project_id}] 缺少配置文件路径, 无法恢复", "error"))
         return messages
+
+    # Drop agents still parked for a discussion that will never start (e.g. a
+    # peer angle failed before S7); resumed tasks rejoin the discussion fresh.
+    _clear_stale_discussion(state, project_id)
 
     # Lab mode with run-* sub-directories: resume each angle separately
     angle_dirs, eliminated_dirs = _lab_resume_angle_dirs(proj_dir, meta)
@@ -2525,7 +2550,7 @@ def _skip_discussion_proceed_s8(state: BridgeState, agent: LobsterAgent) -> list
         "--skip-preflight",
     ]
     if agent.project_id:
-        cmd.extend(["--topic", agent.project_id])
+        cmd.extend(["--topic", getattr(agent, "_topic", "") or agent.project_id])
 
     try:
         log_path = Path(agent.run_dir) / f"agent_{agent.id}_s8.log"
