@@ -382,21 +382,26 @@ stages:
   search_strategy:
     json_mode: true
     system: You design literature retrieval strategies and source verification plans. You aim for COMPREHENSIVE coverage — a good research paper needs 30-60 references.
-    user: 'Create a merged search strategy package.
-
+    user: |-
+      Create a merged search strategy package.
       Return a JSON object with keys: search_plan_yaml, sources.
-
-      search_plan_yaml must be valid YAML text with search_strategies containing at least 3 strategies,
-      each with 3-5 diverse keyword queries (short, 3-6 words each). Generate at least 8 total queries.
-      Cover: core topic, related methods, benchmarks/datasets, theoretical foundations, applications.
-
-      sources must include id,name,type,url,status,query,verified_at.
-
+      search_plan_yaml must be valid YAML text. Keep these key names exactly (you may add other keys):
+      search_strategies:
+        - name: <strategy name>
+          queries:
+            - <3-8 English keywords>
+            - <3-8 English keywords>
+      filters:
+        min_year: <year>
+      Query rules:
+      - At least 3 strategies with 3-5 queries each, at least 8 queries in total.
+      - Each query is a short English keyword query for arXiv / Semantic Scholar / OpenAlex: no sentences, instructions, file paths or local file names.
+      - Cover the core topic, every method/model/dataset named in the topic, related methods, benchmarks/datasets, theoretical foundations and applications.
+      - Set filters.min_year early enough to include the original papers of any named method or dataset.
+      sources must include id,name,type,url,status,query,verified_at; each query follows the same query rules.
       Topic: {topic}
-
       Problem tree:
-
-      {problem_tree}'
+      {problem_tree}
   synthesis:
     system: You are a synthesis specialist for literature reviews.
     user: 'Produce merged synthesis output (topic clusters + research gaps).

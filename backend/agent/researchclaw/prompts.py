@@ -1557,13 +1557,31 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
     # ── Phase B: Literature Discovery ────────────────────────────────────
     "search_strategy": {
         "system": (
-            "You design literature retrieval strategies and source verification plans."
+            "You design literature retrieval strategies and source verification plans. "
+            "You aim for COMPREHENSIVE coverage — a good research paper needs 30-60 references."
         ),
         "user": (
             "Create a merged search strategy package.\n"
             "Return a JSON object with keys: search_plan_yaml, sources.\n"
-            "search_plan_yaml must be valid YAML text.\n"
-            "sources must include id,name,type,url,status,query,verified_at.\n"
+            "search_plan_yaml must be valid YAML text. Keep these key names exactly "
+            "(you may add other keys):\n"
+            "search_strategies:\n"
+            "  - name: <strategy name>\n"
+            "    queries:\n"
+            "      - <3-8 English keywords>\n"
+            "      - <3-8 English keywords>\n"
+            "filters:\n"
+            "  min_year: <year>\n"
+            "Query rules:\n"
+            "- At least 3 strategies with 3-5 queries each, at least 8 queries in total.\n"
+            "- Each query is a short English keyword query for arXiv / Semantic Scholar / "
+            "OpenAlex: no sentences, instructions, file paths or local file names.\n"
+            "- Cover the core topic, every method/model/dataset named in the topic, related "
+            "methods, benchmarks/datasets, theoretical foundations and applications.\n"
+            "- Set filters.min_year early enough to include the original papers of any "
+            "named method or dataset.\n"
+            "sources must include id,name,type,url,status,query,verified_at; each query "
+            "follows the same query rules.\n"
             "Topic: {topic}\n"
             "Problem tree:\n{problem_tree}"
         ),

@@ -3894,3 +3894,101 @@ class TestPeerReviewChunking:
             for index in range(1, len(chunks) + 1)
         )
         assert "Synthesize the following section-level review notes" in prompts[-1]
+
+
+# ---------------------------------------------------------------------------
+# Stage 03 query extraction
+# ---------------------------------------------------------------------------
+
+# Shape of a real S3 plan whose LLM renamed search_strategies to search_tracks.
+_TRACKS_PLAN = {
+    "language": "zh-CN",
+    "search_tracks": [
+        {
+            "id": "T1",
+            "queries": [
+                '"Co-Transformers" "image manipulation localization"',
+                '"Co-Transformers" "image forgery"',
+                '"Co-Transformers" 图像 篡改 定位',
+            ],
+            "procedure": ["从检索结果提取准确题名、作者、年份。"],
+        },
+        {"id": "T2", "local_search_patterns": ["rg --files <dir>"]},
+    ],
+}
+
+
+def test_collect_plan_queries_prefers_search_strategies() -> None:
+    plan = {
+        "search_strategies": [{"name": "core", "queries": ["a b c", "d e f"]}],
+        "search_tracks": [{"queries": ["ignored track query"]}],
+    }
+    assert rc_executor._collect_plan_queries(plan, [{"query": "ignored source"}]) == ["a b c", "d e f"]
+
+
+def test_collect_plan_queries_reads_renamed_structures() -> None:
+    queries = rc_executor._collect_plan_queries(_TRACKS_PLAN, [])
+    assert queries == [
+        '"Co-Transformers" "image manipulation localization"',
+        '"Co-Transformers" "image forgery"',
+    ]
+
+
+def test_collect_plan_queries_falls_back_to_llm_sources() -> None:
+    sources = [
+        {"id": "S01", "query": '"Co-Transformers" "image manipulation localization"; "Co-Transformers"'},
+        {"id": "S04", "query": "在模型路径中定位 cotransformers-104.pth，计算哈希并核对参数键"},
+        {"id": "S10", "query": "x" * 200},
+    ]
+    assert rc_executor._collect_plan_queries({"search_phases": []}, sources) == [
+        '"Co-Transformers" "image manipulation localization"',
+        '"Co-Transformers"',
+    ]
+
+
+def test_search_strategy_keeps_llm_queries_from_renamed_plan(
+    tmp_path: Path, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle
+) -> None:
+    import yaml
+
+    payload = {"search_plan_yaml": yaml.safe_dump(_TRACKS_PLAN, allow_unicode=True), "sources": []}
+    stage_dir = tmp_path / "run" / "stage-03"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    result = rc_executor._execute_search_strategy(
+        stage_dir, run_dir, rc_config, adapters, llm=FakeLLMClient(json.dumps(payload))
+    )
+    assert result.status == StageStatus.DONE
+    queries = json.loads((stage_dir / "queries.json").read_text(encoding="utf-8"))["queries"]
+    assert queries[:2] == [
+        '"Co-Transformers" "image manipulation localization"',
+        '"Co-Transformers" "image forgery"',
+    ]
+
+
+def test_search_strategy_uses_llm_sources_when_plan_yaml_is_broken(
+    tmp_path: Path, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle
+) -> None:
+    broken_yaml = (
+        "search_strategies:\n"
+        "  - name: core\n"
+        "    queries:\n"
+        "      - co transformers image forgery\n"
+        "      -noiseprint forensic feature extractor\n"
+    )
+    payload = {
+        "search_plan_yaml": broken_yaml,
+        "sources": [
+            {"id": "s1", "query": "image tampering localization transformer"},
+            {"id": "s2", "query": "copy move forgery detection dual stream"},
+        ],
+    }
+    stage_dir = tmp_path / "run" / "stage-03"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    rc_executor._execute_search_strategy(
+        stage_dir, run_dir, rc_config, adapters, llm=FakeLLMClient(json.dumps(payload))
+    )
+    queries = json.loads((stage_dir / "queries.json").read_text(encoding="utf-8"))["queries"]
+    assert queries[:2] == [
+        "image tampering localization transformer",
+        "copy move forgery detection dual stream",
+    ]
