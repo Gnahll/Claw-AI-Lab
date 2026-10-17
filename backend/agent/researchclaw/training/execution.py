@@ -102,8 +102,9 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
                 raise ValueError("results.json has no finite numeric measurements")
             report["results"] = results
             report["results_sha256"] = hashlib.sha256(result_path.read_bytes()).hexdigest()
-            if results.get("status") in ("blocked", "failed", "incomplete", "skipped"):
-                raise ValueError(f"Experiment reported {results['status']}: {results.get('blocker', 'see results.json')}")
+            if _reports_failure_status(results.get("status")):
+                blocker = results.get("blocker") or results.get("blockers") or "see results.json"
+                raise ValueError(f"Experiment reported {results['status']}: {blocker}")
             if not _has_named_metric(results, config.experiment.metric_key):
                 raise ValueError(f"results.json is missing measured metric: {config.experiment.metric_key}")
             if training:
@@ -135,6 +136,18 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
 
 def _reject_nonfinite(value):
     raise ValueError(f"Non-finite result: {value}")
+
+
+_FAILURE_STATUSES = ("blocked", "failed", "incomplete", "skipped")
+
+
+def _reports_failure_status(status: object) -> bool:
+    """Treat qualified statuses such as ``blocked_architecture_prerequisite`` as failures."""
+    if not isinstance(status, str):
+        return False
+    normalized = status.strip().lower()
+    return any(normalized == word or normalized.startswith((f"{word}_", f"{word}-", f"{word}:", f"{word} "))
+               for word in _FAILURE_STATUSES)
 
 
 def _has_named_metric(value, metric):

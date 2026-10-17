@@ -179,3 +179,45 @@ def test_persist_reference_uploads_saves_pdf_files(tmp_path: Path) -> None:
     assert saved_path.exists()
     assert saved_path.suffix == ".pdf"
     assert saved_path.read_bytes() == b"%PDF-1.4 sample"
+
+
+def _write_angle(proj_dir, name, last_stage):
+    angle = proj_dir / f"run-{name}"
+    angle.mkdir(parents=True)
+    (angle / "checkpoint.json").write_text(json.dumps({"last_completed_stage": last_stage}), encoding="utf-8")
+    return angle
+
+
+def test_discussion_resume_skips_eliminated_angle(tmp_path):
+    bridge = _load_agent_bridge_module()
+    proj = tmp_path / "proj"
+    winner = _write_angle(proj, "adaptive", 13)
+    loser = _write_angle(proj, "cross", 8)
+    (proj / "project_meta.json").write_text(json.dumps({"mode": "lab"}), encoding="utf-8")
+    bridge._record_discussion_selection(proj, str(winner), [str(loser)])
+    meta = json.loads((proj / "project_meta.json").read_text(encoding="utf-8"))
+    assert meta["discussion_selected_run"] == "run-adaptive"
+    assert meta["discussion_eliminated_runs"] == ["run-cross"]
+    assert bridge._lab_resume_angle_dirs(proj, meta) == ([winner], [loser])
+
+
+def test_discussion_resume_infers_winner_for_legacy_projects(tmp_path):
+    bridge = _load_agent_bridge_module()
+    proj = tmp_path / "proj"
+    winner = _write_angle(proj, "adaptive", 13)
+    loser = _write_angle(proj, "cross", 11)
+    (proj / "discussion").mkdir()
+    assert bridge._lab_resume_angle_dirs(proj, {"mode": "lab"}) == ([winner], [loser])
+
+
+def test_resume_keeps_all_angles_before_selection_or_without_discussion(tmp_path):
+    bridge = _load_agent_bridge_module()
+    proj = tmp_path / "proj"
+    first = _write_angle(proj, "a", 8)
+    second = _write_angle(proj, "b", 5)
+    (proj / "discussion").mkdir()
+    assert bridge._lab_resume_angle_dirs(proj, {}) == ([first, second], [])
+    independent = tmp_path / "independent"
+    one = _write_angle(independent, "a", 14)
+    two = _write_angle(independent, "b", 12)
+    assert bridge._lab_resume_angle_dirs(independent, {}) == ([one, two], [])
