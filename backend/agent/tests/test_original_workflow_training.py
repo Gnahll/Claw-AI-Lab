@@ -262,7 +262,8 @@ def test_s12_does_not_trust_llm_success_text(tmp_path, monkeypatch):
     assert result.status == StageStatus.FAILED
 
 
-@pytest.mark.parametrize("status", ["blocked", "failed", "incomplete", "skipped"])
+@pytest.mark.parametrize("status", ["blocked", "failed", "incomplete", "skipped",
+                                    "blocked_architecture_prerequisite", "Failed: OOM"])
 def test_supervisor_rejects_explicit_failure_status_even_with_metric(tmp_path, status):
     payload = json.dumps({"status": status, "metric": 0.5, "blocker": "approval required"})
     (tmp_path / "main.py").write_text(
@@ -476,3 +477,15 @@ def test_stopping_original_stage_kills_its_experiment(tmp_path):
         if process.poll() is None:
             process.kill()
         process.wait()
+
+
+@pytest.mark.parametrize("status", ["completed", "ok", "unblocked", "success"])
+def test_supervisor_accepts_non_failure_status(tmp_path, status):
+    payload = json.dumps({"status": status, "metric": 0.5})
+    (tmp_path / "main.py").write_text(
+        f"from pathlib import Path\nPath('results.json').write_text({payload!r})\n"
+    )
+
+    result = run_experiment(tmp_path, tmp_path / "evidence", configuration(), smoke=True)
+
+    assert result["success"], result["errors"]

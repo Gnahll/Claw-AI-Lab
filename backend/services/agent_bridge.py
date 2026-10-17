@@ -435,6 +435,10 @@ def _restart_project(state: "BridgeState", project_id: str) -> list[dict]:
                 shutil.rmtree(item, ignore_errors=True)
             else:
                 item.unlink(missing_ok=True)
+        if meta and ("discussion_selected_run" in meta or "discussion_eliminated_runs" in meta):
+            meta.pop("discussion_selected_run", None)
+            meta.pop("discussion_eliminated_runs", None)
+            _write_json(proj_dir / "project_meta.json", meta)
         messages.append(msg_log(sys_agent, f"项目 [{project_id}] 已清除进度，正在重新启动…", "info"))
         messages.extend(resume_project(state, project_id))
     else:
@@ -1292,6 +1296,42 @@ def _read_project_meta(run_dir: str) -> dict | None:
     return _read_json(Path(run_dir) / "project_meta.json")
 
 
+def _record_discussion_selection(proj_dir: Path, selected_run_dir: str, eliminated_run_dirs: list[str]) -> None:
+    """Persist the S8 winner so a later resume does not revive eliminated angles."""
+    meta_path = Path(proj_dir) / "project_meta.json"
+    meta = _read_json(meta_path)
+    if not meta:
+        return
+    meta["discussion_selected_run"] = Path(selected_run_dir).name
+    meta["discussion_eliminated_runs"] = sorted(Path(d).name for d in eliminated_run_dirs)
+    _write_json(meta_path, meta)
+
+
+def _lab_resume_angle_dirs(proj_dir: Path, meta: dict | None) -> tuple[list[Path], list[Path]]:
+    """Return (angles to resume, eliminated angles) for a Lab project.
+
+    After the S8 discussion only one angle continues.  Prefer the persisted
+    selection; for projects created before it was persisted, infer the winner
+    once every angle has finished S8 (the most advanced checkpoint wins).
+    """
+    angle_dirs = [d for d in sorted(Path(proj_dir).glob("run-*")) if d.is_dir()]
+    if len(angle_dirs) < 2:
+        return angle_dirs, []
+    selected = (meta or {}).get("discussion_selected_run", "")
+    winner = next((d for d in angle_dirs if d.name == selected), None)
+    if winner is None:
+        if not (Path(proj_dir) / "discussion").is_dir():
+            return angle_dirs, []  # Lab·独立: every angle runs its own experiments
+        progress = {}
+        for d in angle_dirs:
+            cp = _read_json(d / "checkpoint.json") or {}
+            progress[d] = int(cp.get("last_completed_stage", 0) or 0)
+        if min(progress.values()) < 8 or max(progress.values()) <= 8:
+            return angle_dirs, []
+        winner = max(angle_dirs, key=lambda d: (progress[d], (d / "stage-09").is_dir()))
+    return [winner], [d for d in angle_dirs if d != winner]
+
+
 def _determine_resume_target(run_dir: str) -> tuple[str, int] | None:
     """Read checkpoint and return (target_layer, next_stage) or None if no checkpoint."""
     cp = _read_json(Path(run_dir) / "checkpoint.json")
@@ -1742,9 +1782,15 @@ def resume_project(state: BridgeState, project_id: str) -> list[dict]:
         return messages
 
     # Lab mode with run-* sub-directories: resume each angle separately
-    angle_dirs = sorted(proj_dir.glob("run-*"))
+    angle_dirs, eliminated_dirs = _lab_resume_angle_dirs(proj_dir, meta)
     if mode == "lab" and angle_dirs:
         task_count = 0
+        for eliminated in eliminated_dirs:
+            messages.append(msg_log(
+                sys_agent,
+                f"  方向 [{eliminated.name.removeprefix('run-')}] 已在 S8 讨论后淘汰，不再恢复",
+                "info",
+            ))
         for angle_dir in angle_dirs:
             if not angle_dir.is_dir():
                 continue
@@ -2742,6 +2788,10 @@ def _on_discussion_s8_done(state: BridgeState, agent: LobsterAgent) -> list[dict
             best_agent = state.agents.get(best_id)
             best_config = (best_agent.config_path if best_agent else "") or agent.config_path
         other_ids = [a for a in group.agent_ids if a != best_id]
+        _record_discussion_selection(
+            Path(best_run_dir).parent, best_run_dir,
+            [group.run_dirs[a] for a in other_ids if group.run_dirs.get(a)],
+        )
         messages.append(msg_log(
             sys_agent,
             f"项目 [{merged_project_id}] 所有 agent S8 完成 → 选择最优假设 (agent {best_id})，"
