@@ -221,3 +221,70 @@ def test_resume_keeps_all_angles_before_selection_or_without_discussion(tmp_path
     one = _write_angle(independent, "a", 14)
     two = _write_angle(independent, "b", 12)
     assert bridge._lab_resume_angle_dirs(independent, {}) == ([one, two], [])
+
+
+def _resumed_lab_idea_agent(bridge, tmp_path, name, last_stage):
+    state = bridge.BridgeState(runs_base_dir=str(tmp_path))
+    proj = tmp_path / "projects" / "proj"
+    angle = _write_angle(proj, name, last_stage)
+    (proj / "project_meta.json").write_text(json.dumps({"mode": "lab"}), encoding="utf-8")
+    agent = bridge.create_agent(state, "L1", "idea")
+    task = bridge.Task(
+        id=f"task-{name}", project_id="proj", run_dir=str(angle), config_path="cfg.yaml",
+        topic=f"[{name}] full topic", source_layer="init", target_layer="idea",
+    )
+    return state, agent, task
+
+
+def test_resumed_lab_angle_rejoins_discussion_instead_of_solo_s8(tmp_path, monkeypatch):
+    bridge = _load_agent_bridge_module()
+    triggered = []
+    monkeypatch.setattr(bridge, "_trigger_discussion", lambda state, group: triggered.append(group) or [])
+    monkeypatch.setattr(bridge, "_skip_discussion_proceed_s8",
+                        lambda *a: (_ for _ in ()).throw(AssertionError("solo S8 in lab mode")))
+    state, first, task = _resumed_lab_idea_agent(bridge, tmp_path, "adaptive", 7)
+    state.lab_batches["proj"] = 2
+
+    bridge.launch_agent_for_task(state, first, task)
+    assert first.status == "waiting_discussion"
+    assert first.process is None
+    assert not triggered
+
+    second = bridge.create_agent(state, "L2", "idea")
+    second.project_id = "proj"
+    second._topic = "[cross] full topic"
+    second.run_dir = str(tmp_path / "projects" / "proj" / "run-cross")
+    bridge.on_agent_done(state, second)
+    assert len(triggered) == 1
+    assert set(triggered[0].agent_ids) == {first.id, second.id}
+
+
+def test_single_angle_skip_s8_keeps_full_topic(tmp_path, monkeypatch):
+    bridge = _load_agent_bridge_module()
+    launched = []
+
+    class _Proc:
+        pid = 1
+
+    monkeypatch.setattr(bridge.subprocess, "Popen", lambda cmd, **kw: launched.append(cmd) or _Proc())
+    state, agent, task = _resumed_lab_idea_agent(bridge, tmp_path, "solo", 7)
+    bridge.launch_agent_for_task(state, agent, task)
+    cmd = launched[0]
+    assert cmd[cmd.index("--topic") + 1] == "[solo] full topic"
+
+
+def test_resume_clears_agents_parked_for_a_dead_discussion(tmp_path):
+    bridge = _load_agent_bridge_module()
+    state = bridge.BridgeState(runs_base_dir=str(tmp_path))
+    parked = bridge.create_agent(state, "L1", "idea")
+    parked.project_id = "proj"
+    parked.status = "waiting_discussion"
+    state.discussion_waiting[parked.id] = parked
+    other = bridge.create_agent(state, "L2", "idea")
+    other.project_id = "other"
+    state.discussion_waiting[other.id] = other
+
+    bridge._clear_stale_discussion(state, "proj")
+    assert parked.id not in state.discussion_waiting
+    assert parked.status == "idle" and parked.project_id == ""
+    assert other.id in state.discussion_waiting
