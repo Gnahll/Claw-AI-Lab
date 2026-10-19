@@ -35,14 +35,41 @@ def _state_tensors(value):
             yield from _state_tensors(item)
 
 
-def _saved_hashes(state):
-    hashes = set()
+# Some layers (e.g. BayarConv2d) renormalise their own weights in place on every forward
+# pass, so evaluating a model after loading its checkpoint shifts a few tensors by float
+# rounding. Such a tensor may match its saved copy numerically instead of bit-for-bit.
+NUMERIC_RTOL = 1e-5
+NUMERIC_ATOL = 1e-8
+
+
+def _saved_tensors(state):
+    hashes, tensors = set(), {}
     for value in _state_tensors(state):
         try:
             hashes.add(tensor_hash(value))
         except (ValueError, RuntimeError, TypeError):
             continue  # Non-finite or non-hashable tensors cannot equal a finite trained parameter.
-    return hashes
+        tensors.setdefault((tuple(value.shape), value.dtype), []).append(value)
+    return hashes, tensors
+
+
+def _match(parameters, saved):
+    """Return the number of numerically matched tensors, or None when the file does not hold them.
+
+    All but max(1, 1%) of the tensors must match exactly; the rest within NUMERIC_RTOL/ATOL.
+    """
+    import torch
+
+    hashes, tensors = saved
+    missing = [parameter for digest, parameter in parameters if digest not in hashes]
+    if len(missing) > max(1, len(parameters) // 100):
+        return None
+    for parameter in missing:
+        values = parameter.detach().cpu()
+        if not any(torch.allclose(values, candidate, rtol=NUMERIC_RTOL, atol=NUMERIC_ATOL)
+                   for candidate in tensors.get((tuple(values.shape), values.dtype), [])):
+            return None
+    return len(missing)
 
 
 def verify_checkpoints(final_checkpoint, optimizers, evidence):
@@ -53,16 +80,20 @@ def verify_checkpoints(final_checkpoint, optimizers, evidence):
     """
     import torch
 
-    trained = [{tensor_hash(parameter) for group in optimizer.param_groups
-                for parameter in group["params"] if parameter.requires_grad} for optimizer in optimizers]
-    trained = [(index, hashes) for index, hashes in enumerate(trained) if hashes]
+    trained = [[(tensor_hash(parameter), parameter) for group in optimizer.param_groups
+                for parameter in group["params"] if parameter.requires_grad] for optimizer in optimizers]
+    trained = [(index, parameters) for index, parameters in enumerate(trained) if parameters]
     state = torch.load(final_checkpoint, map_location="cpu", weights_only=True)
     if isinstance(state, dict):
         state = state.get("model_state_dict", state.get("state_dict", state))
     if not isinstance(state, dict):
         raise ValueError("outputs/model.pt must contain a model state_dict")
-    saved = {tensor_hash(value) for value in state.values() if torch.is_tensor(value)}
-    matches = {index: final_checkpoint.as_posix() for index, hashes in trained if hashes.issubset(saved)}
+    saved = _saved_tensors({key: value for key, value in state.items() if torch.is_tensor(value)})
+    matches, numeric = {}, {}
+    for index, parameters in trained:
+        count = _match(parameters, saved)
+        if count is not None:
+            matches[index], numeric[index] = final_checkpoint.as_posix(), count
     final_matched = bool(matches)
     del state, saved
 
@@ -74,17 +105,23 @@ def verify_checkpoints(final_checkpoint, optimizers, evidence):
         if len(matches) == len(trained):
             break
         try:
-            saved = _saved_hashes(torch.load(path, map_location="cpu", weights_only=True))
+            saved = _saved_tensors(torch.load(path, map_location="cpu", weights_only=True))
         except Exception as exc:
             unreadable.append({"path": path.as_posix(), "error": str(exc)[:200]})
             continue
-        for index, hashes in trained:
-            if index not in matches and hashes.issubset(saved):
-                matches[index] = path.as_posix()
+        for index, parameters in trained:
+            if index not in matches:
+                count = _match(parameters, saved)
+                if count is not None:
+                    matches[index], numeric[index] = path.as_posix(), count
+        del saved
 
     evidence["trained_optimizers"] = len(trained)
-    evidence["checkpoint_matches"] = [{"optimizer": index, "parameters": len(hashes), "checkpoint": matches.get(index)}
-                                      for index, hashes in trained]
+    evidence["checkpoint_matches"] = [{"optimizer": index, "parameters": len(parameters),
+                                       "checkpoint": matches.get(index), "numeric_matches": numeric.get(index, 0)}
+                                      for index, parameters in trained]
+    if any(numeric.values()):
+        evidence["checkpoint_numeric_tolerance"] = {"rtol": NUMERIC_RTOL, "atol": NUMERIC_ATOL}
     if unreadable:
         evidence["unreadable_checkpoints"] = unreadable
     evidence["checkpoint_verified"] = bool(trained) and final_matched and len(matches) == len(trained)

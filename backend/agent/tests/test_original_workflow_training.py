@@ -153,6 +153,70 @@ def test_hung_process_times_out(tmp_path):
     assert not result["success"] and result["elapsed_sec"] < 15
 
 
+def watched(stall=0, gpu_idle=0):
+    config = configuration()
+    config.experiment = ExperimentConfig(time_budget_sec=30, metric_key="metric", stall_timeout_sec=stall,
+                                         gpu_idle_timeout_sec=gpu_idle, monitor_interval_sec=1,
+                                         sandbox=SandboxConfig(python_path=sys.executable))
+    return config
+
+
+@pytest.mark.parametrize("script,accepted", [
+    ("print('epoch 1', flush=True)\ntime.sleep(60)\n", False),                       # hung after start
+    ("for epoch in range(8):\n print('epoch', epoch, flush=True)\n time.sleep(0.5)\n", True),
+])
+def test_watchdog_kills_a_stalled_run_but_not_a_progressing_one(tmp_path, script, accepted):
+    (tmp_path / "main.py").write_text("import json,time\n" + script +
+                                      "open('results.json','w').write(json.dumps({'metric': 1.0}))\n")
+    result = run_experiment(tmp_path, tmp_path / "evidence", watched(stall=2))
+    assert result["success"] == accepted, result
+    assert result["elapsed_sec"] < 15 and result["monitor"]["samples"] >= 1
+    if not accepted:
+        assert "Training stalled" in result["errors"][0]
+    assert (tmp_path / "evidence/training_monitor.jsonl").read_text().strip()
+
+
+@pytest.mark.parametrize("sample,accepted", [
+    ({"utilization": 0.0, "memory_mib": 0.0, "process_memory_mib": 0.0, "process_on_gpu": False}, False),
+    ({"utilization": 87.0, "memory_mib": 9000.0, "process_memory_mib": 9000.0, "process_on_gpu": True}, True),
+    ({"error": "nvidia-smi timed out"}, True),   # a monitoring failure must not kill training
+])
+def test_watchdog_kills_a_run_that_never_uses_its_gpu(tmp_path, monkeypatch, sample, accepted):
+    from researchclaw.training import execution
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", GPU_UUID)
+    monkeypatch.setattr(execution, "_gpu_sample", lambda uuid, pid: dict(sample))
+    (tmp_path / "main.py").write_text("import json,time\nfor epoch in range(8):\n print(epoch, flush=True)\n"
+                                      " time.sleep(0.5)\nopen('results.json','w').write(json.dumps({'metric': 1.0}))\n")
+    result = run_experiment(tmp_path, tmp_path / "evidence", watched(gpu_idle=2))
+    assert result["success"] == accepted, result
+    if not accepted:
+        assert "idle and unused" in result["errors"][0]
+
+
+@pytest.mark.parametrize("drift,tensors,accepted", [
+    ("1e-9", "weight", True),          # in-place renormalisation (BayarConv2d) after saving: float rounding
+    ("1e-3", "weight", False),         # a real change is not rounding
+    ("1e-9", "both", False),           # only max(1, 1%) tensors may differ from their saved bits
+])
+def test_checkpoint_tolerates_in_place_rounding_of_one_tensor(tmp_path, monkeypatch, drift, tensors, accepted):
+    pytest.importorskip("torch")
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    script = ("import torch,json\nfrom pathlib import Path\nmodel=torch.nn.Linear(2,1)\n"
+              "optimizer=torch.optim.SGD(model.parameters(),lr=0.1)\n"
+              "for step in range(3):\n optimizer.zero_grad()\n (model(torch.ones(2,2))-2).square().mean().backward()\n"
+              " optimizer.step()\nPath('outputs').mkdir()\ntorch.save(model.state_dict(),'outputs/model.pt')\n"
+              "with torch.no_grad():\n model.weight.add_(%s)\n" % drift)
+    if tensors == "both":
+        script += " model.bias.add_(%s)\n" % drift
+    script += "Path('results.json').write_text(json.dumps({'loss': 0.5}))\n"
+    (tmp_path / "main.py").write_text(script)
+    result = run_experiment(tmp_path, tmp_path / "evidence", configuration(training=True, metric="loss"))
+    assert result["success"] == accepted, result
+    if accepted:
+        assert result["training"]["checkpoint_matches"][0]["numeric_matches"] == 1
+
+
 @pytest.mark.parametrize("train,save,correct,accepted", [(True, True, True, True), (False, False, False, False),
                                                         (True, False, False, False), (True, True, False, False)])
 def test_real_cpu_torch_updates_and_matching_checkpoint(tmp_path, monkeypatch, train, save, correct, accepted):

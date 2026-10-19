@@ -72,6 +72,11 @@ LAYER_RANGE_PHASE2: dict[str, tuple[int, int]] = {"idea": (8, 8)}
 
 DISCUSSION_STAGE = 100
 
+# A crashed layer (exit code != 0, e.g. LLM 524, stalled training killed by the
+# watchdog) is re-queued from its checkpoint after a growing backoff.
+AUTO_RETRY_LIMIT = 3
+AUTO_RETRY_BACKOFF_SEC = 120
+
 PASSTHROUGH_LAYERS: set[str] = set()
 
 STAGE_NAMES: dict[int, str] = {
@@ -605,6 +610,8 @@ class Task:
     created_at: int = 0
     assigned_at: int = 0
     completed_at: int = 0
+    not_before: int = 0              # automatic retry backoff (ms epoch)
+    attempt: int = 0                 # automatic retries already used
 
     def to_dict(self) -> dict:
         return {k: v for k, v in self.__dict__.items()}
@@ -622,6 +629,8 @@ class Task:
         t.created_at = d.get("created_at", 0)
         t.assigned_at = d.get("assigned_at", 0)
         t.completed_at = d.get("completed_at", 0)
+        t.not_before = d.get("not_before", 0)
+        t.attempt = d.get("attempt", 0)
         return t
 
 
@@ -1641,6 +1650,47 @@ def on_agent_done(state: BridgeState, agent: LobsterAgent) -> list[dict]:
     messages.append(msg_queue_update(state.queues))
 
     return messages
+
+
+def _queue_auto_retry(state: BridgeState, agent: LobsterAgent, failed: Task | None, n_fails: int) -> list[dict]:
+    """Re-queue a crashed layer task from the run's checkpoint after a backoff.
+
+    Skipped for agents inside a formed discussion group or the idea factory, whose
+    peers are cleaned up separately, and for paused/deleted projects.
+    """
+    if failed is None or not failed.project_id or not failed.run_dir:
+        return []
+    if any(getattr(agent, flag, False) for flag in
+           ("_is_idea_factory", "_is_idea_factory_s7_only", "_is_discussion_s8", "_idea_factory_batch_id")):
+        return []
+    group = state.discussion_groups.get(failed.project_id)
+    if group and agent.id in group.agent_ids:
+        return []
+    proj_dir = state.projects_dir() / failed.project_id
+    meta = _read_project_meta(str(proj_dir)) if proj_dir.exists() else None
+    if not meta or meta.get("intervention") or not Path(failed.run_dir).is_dir():
+        return []
+    resume_info = _determine_resume_target(failed.run_dir)
+    target_layer, next_stage = resume_info or (failed.target_layer, None)
+    if any(t.status in ("pending", "assigned") and t.run_dir == failed.run_dir
+           for q in state.queues.values() for t in q.tasks):
+        return []
+    delay = AUTO_RETRY_BACKOFF_SEC * n_fails
+    task = Task(
+        id=f"task-{_uid()}", project_id=failed.project_id, run_dir=failed.run_dir,
+        config_path=failed.config_path, topic=failed.topic,
+        source_layer=failed.source_layer if target_layer == failed.target_layer else {
+            "idea": "init", "experiment": "idea", "coding": "experiment",
+            "execution": "coding", "writing": "execution",
+        }.get(target_layer, "init"),
+        target_layer=target_layer, created_at=_now_ms(),
+        not_before=_now_ms() + delay * 1000, attempt=n_fails,
+    )
+    state.queues[_queue_for_layer(target_layer)].push(task)
+    where = STAGE_NAMES.get(next_stage, f"S{next_stage}") if next_stage else f"{target_layer} 层开头"
+    return [msg_log(agent, f"自动恢复：{delay}s 后从断点 {where} 重试 (第 {n_fails}/{AUTO_RETRY_LIMIT - 1} 次)",
+                    "warning"),
+            msg_queue_update(state.queues)]
 
 
 def _reset_agent_idle(agent: LobsterAgent) -> None:
@@ -2881,13 +2931,15 @@ def schedule_idle_agents(state: BridgeState) -> list[dict]:
             queue = state.queues.get(queue_name)
             if not queue:
                 continue
-            task = queue.peek_pending()
-            if not task or task.target_layer != agent.layer:
-                continue
-            if state._fail_counts.get(task.project_id, 0) >= 3:
+            # First pending task that is not backing off after a failure. The fail
+            # counter is only reset by success or a manual resume, so retries are bounded.
+            now = _now_ms()
+            task = next((t for t in queue.tasks if t.status == "pending" and t.target_layer == agent.layer
+                         and t.not_before <= now
+                         and state._fail_counts.get(t.project_id, 0) < AUTO_RETRY_LIMIT), None)
+            if not task:
                 continue
 
-            state._fail_counts.pop(task.project_id, None)  # reset on successful assignment
             queue.assign(task.id, agent.id)
             messages.extend(launch_agent_for_task(state, agent, task))
             messages.append(msg_queue_update(state.queues))
@@ -3297,10 +3349,13 @@ async def poll_loop(state: BridgeState, interval: float):
                 _fail_pid = agent.project_id or "unknown"
                 state._fail_counts[_fail_pid] = state._fail_counts.get(_fail_pid, 0) + 1
                 _n_fails = state._fail_counts[_fail_pid]
-                _MAX_RETRIES = 3
+                _MAX_RETRIES = AUTO_RETRY_LIMIT
 
+                _failed_task = None
                 if agent.assigned_task_id:
                     for q in state.queues.values():
+                        _failed_task = _failed_task or next(
+                            (t for t in q.tasks if t.id == agent.assigned_task_id), None)
                         q.fail(agent.assigned_task_id)
 
                 # S12 sanity check failure → pause project and notify user
@@ -3321,6 +3376,8 @@ async def poll_loop(state: BridgeState, interval: float):
                         f"项目 [{_fail_pid}] 连续失败 {_n_fails} 次，已停止自动重试。请检查日志后手动恢复。",
                         "error",
                     ))
+                else:
+                    all_messages.extend(_queue_auto_retry(state, agent, _failed_task, _n_fails))
 
                 # Clean up discussion group if agent failed
                 _batch_id = getattr(agent, '_idea_factory_batch_id', None)
