@@ -817,6 +817,7 @@ class BridgeState:
     discussion_mode: bool = True
     discussion_groups: dict[str, DiscussionGroup] = field(default_factory=dict)
     discussion_rounds: int = 3
+    discussion_max_chars: int = 14000
     discussion_models: list[str] = field(default_factory=lambda: ["gpt-5.3-codex-spark", "claude-opus-4-6"])
     # Cross-project discussion: agents waiting for a peer to discuss with
     discussion_waiting: dict[str, "LobsterAgent"] = field(default_factory=dict)
@@ -1816,6 +1817,23 @@ def _clear_stale_discussion(state: BridgeState, project_id: str) -> None:
         state.discussion_groups.pop(project_id, None)
 
 
+def _release_project_agents(state: BridgeState, project_id: str) -> list[dict]:
+    """Reset a stopped project's agents to idle and cancel its unfinished queue tasks."""
+    messages: list[dict] = []
+    for a in state.agents.values():
+        if a.project_id == project_id:
+            state.discussion_waiting.pop(a.id, None)
+            _reset_agent_idle(a)
+            messages.append(msg_agent_update(a))
+    for q in state.queues.values():
+        stale = [t for t in q.tasks if t.project_id == project_id and t.status in ("pending", "assigned")]
+        for t in stale:
+            t.status = "cancelled"
+        if stale:
+            q.save()
+    return messages
+
+
 def resume_project(state: BridgeState, project_id: str) -> list[dict]:
     """Resume a project from its last checkpoint."""
     messages: list[dict] = []
@@ -1832,6 +1850,15 @@ def resume_project(state: BridgeState, project_id: str) -> list[dict]:
         if a.project_id == project_id and a.process is not None and a.process.poll() is None:
             messages.append(msg_log(sys_agent, f"项目 [{project_id}] 已在运行中", "warning"))
             return messages
+    group = state.discussion_groups.get(project_id)
+    proc = getattr(group, "discussion_process", None) if group else None
+    if proc is not None and proc.poll() is None:
+        messages.append(msg_log(sys_agent, f"项目 [{project_id}] 沟通讨论进行中，请等讨论结束后再恢复", "warning"))
+        return messages
+
+    # Nothing of this project is running: agents left in error / waiting / discussing
+    # states and tasks queued by an earlier resume would otherwise block the new tasks.
+    messages.extend(_release_project_agents(state, project_id))
 
     meta = _read_json(proj_dir / "project_meta.json")
     config_path = meta.get("config_path", "") if meta else ""
@@ -2479,6 +2506,7 @@ def _trigger_discussion(state: BridgeState, group: DiscussionGroup) -> list[dict
         "--synthesis-dirs", *synthesis_dirs,
         "--output", disc_dir,
         "--rounds", str(state.discussion_rounds),
+        "--max-prompt-chars", str(state.discussion_max_chars),
     ]
     if group.topic:
         cmd.extend(["--topic", group.topic])
@@ -2553,6 +2581,7 @@ def _trigger_cross_project_discussion(
         "--synthesis-dirs", *synthesis_dirs,
         "--output", disc_dir,
         "--rounds", str(state.discussion_rounds),
+        "--max-prompt-chars", str(state.discussion_max_chars),
         "--topic", group.topic,
     ]
 
@@ -2632,6 +2661,21 @@ def _skip_discussion_proceed_s8(state: BridgeState, agent: LobsterAgent) -> list
     return messages
 
 
+def _mark_discussion_failed(output_dir: str, retcode: int) -> str:
+    """Make heartbeat.json say failed (the runner may have been killed) and return the error."""
+    if not output_dir:
+        return ""
+    path = Path(output_dir) / "heartbeat.json"
+    heartbeat = _read_json(path) or {}
+    if heartbeat.get("status") != "failed":
+        heartbeat.update(status="failed", error=f"discussion runner exited with code {retcode}")
+        try:
+            _write_json(path, heartbeat)
+        except OSError:
+            pass
+    return str(heartbeat.get("error", ""))[:300]
+
+
 def _poll_discussion(state: BridgeState, group: DiscussionGroup) -> list[dict]:
     """Check if a discussion subprocess has finished and handle completion."""
     messages: list[dict] = []
@@ -2649,7 +2693,9 @@ def _poll_discussion(state: BridgeState, group: DiscussionGroup) -> list[dict]:
 
     if retcode != 0:
         group.status = "done"
-        messages.append(msg_log(sys_agent, f"讨论 [{group.project_id}] 失败 (exit={retcode})", "error", DISCUSSION_STAGE))
+        error = _mark_discussion_failed(group.discussion_output_dir, retcode)
+        messages.append(msg_log(sys_agent, f"讨论 [{group.project_id}] 失败 (exit={retcode}): {error}"
+                                f"；可点“恢复”从 S7 断点重新讨论", "error", DISCUSSION_STAGE))
         for aid in group.agent_ids:
             agent = state.agents.get(aid)
             if agent:
@@ -3447,6 +3493,7 @@ async def main(args: argparse.Namespace):
         auto_loop=args.auto_loop,
         discussion_mode=args.discussion_mode,
         discussion_rounds=args.discussion_rounds,
+        discussion_max_chars=args.discussion_max_chars,
         discussion_models=[m.strip() for m in args.discussion_models.split(",") if m.strip()],
         idea_factory_topic=args.idea_topic,
         idea_factory_config=args.idea_config,
@@ -3591,6 +3638,8 @@ if __name__ == "__main__":
                         help="Disable L1 discussion mode")
     parser.add_argument("--discussion-rounds", type=int, default=3,
                         help="Number of LLM discussion rounds (default: 3)")
+    parser.add_argument("--discussion-max-chars", type=int, default=14000,
+                        help="Max prompt characters per discussion LLM call; the model gateway rejects longer requests")
     parser.add_argument("--discussion-models", default="gpt-5.3-codex-spark,claude-opus-4-6",
                         help="Comma-separated LLM models for discussion agents (different companies for diversity)")
     parser.add_argument("--idea-count", type=int, default=0,
