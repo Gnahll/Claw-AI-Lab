@@ -12,6 +12,8 @@ import sys
 import time
 from pathlib import Path
 
+from researchclaw.training.predictions import check_predictions
+
 
 TRAINING_OBJECTIVE = (
     "Mandatory training objective: train the actual model on the approved data protocol, "
@@ -19,6 +21,26 @@ TRAINING_OBJECTIVE = (
     "Inference-only runs, smoke tests and written plans do not fulfill this task. "
     "Specify the full training budget and splits in the experiment plan; report resource blockers honestly."
 )
+
+OPTIONAL_EXPERIMENTS = {
+    "ablation": "ablation study removing or replacing one proposed component at a time",
+    "visualization": "visualization of qualitative predictions and intermediate features or attention maps",
+    "analysis": "qualitative and quantitative analysis beyond the main comparison (failure cases, sensitivity)",
+}
+
+
+def optional_experiments_directive(selected) -> str:
+    """Topic directive fixing which optional studies the user chose to run or skip."""
+    chosen = [name for name in OPTIONAL_EXPERIMENTS if name in set(selected)]
+    lines = ["Optional experiments were selected by the user; follow this choice exactly."]
+    for name, description in OPTIONAL_EXPERIMENTS.items():
+        if name in chosen:
+            lines.append(f"- Required: {description}.")
+        else:
+            lines.append(f"- Not requested: do not plan or run any {name} experiment; "
+                         "state its absence as a limitation.")
+    return "\n".join(lines)
+
 
 EXECUTION_CONTRACT = """
 The pipeline runs main.py itself and does not accept prose as execution evidence.
@@ -31,6 +53,10 @@ or distributed launcher), loss.backward(), and save the FINAL trained model stat
 to outputs/model.pt using torch.save. When several models are trained independently
 (e.g. one per seed), also save each one's final state_dict under outputs/ (e.g.
 outputs/final_<seed>.pt) before training the next; outputs/model.pt holds the delivered one.
+Also save the final model's raw test-set predictions under outputs/ in a path containing
+"pred" (e.g. outputs/test_predictions/<sample>.npy or .png masks, or outputs/predictions.json
+with a "predictions" list or a CSV with a "pred" column). The runtime reloads them and rejects
+missing, non-finite, or collapsed output (every prediction identical or constant).
 The runtime checks observed parameter changes and reloads the checkpoints to verify that
 every optimizer's final trained tensors were saved. Unsupported training backends must be reported
 as blockers, not replaced with a toy implementation. Record per-epoch loss and validation
@@ -85,6 +111,7 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
     report = {"success": False, "smoke": smoke, "require_training": training, "command": cmd,
               "gpu_id": env.get("CUDA_VISIBLE_DEVICES", ""), "results": {}, "errors": []}
     start = time.monotonic()
+    started_at = time.time() - 2  # coarse filesystem mtime resolution
     process = None
     with (output_dir / "execution.log").open("w", encoding="utf-8") as log:
         try:
@@ -117,6 +144,14 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
                     raise ValueError("Missing training loss or checkpoint matching trained parameters")
                 if report["gpu_id"] and not observation.get("gpu_process"):
                     raise ValueError("GPU requested but no GPU training process observed")
+                predictions = report["predictions"] = check_predictions(workspace / "outputs", started_at)
+                if not predictions["groups"]:
+                    raise ValueError("No saved test-set predictions found under outputs/ (path containing 'pred')")
+                if predictions["unreadable"]:
+                    raise ValueError(f"Unreadable or non-finite predictions: {predictions['unreadable'][0]['path']}")
+                if predictions["degenerate"]:
+                    raise ValueError("Degenerate test-set predictions (all identical or constant): "
+                                     + ", ".join(predictions["degenerate"][:3]))
             report["success"] = True
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             report["errors"].append(str(exc))

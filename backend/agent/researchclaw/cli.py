@@ -199,6 +199,15 @@ def cmd_run(args: argparse.Namespace) -> int:
             research = dataclasses.replace(config.research, topic=config.research.topic + "\n\n" + TRAINING_OBJECTIVE)
             config = dataclasses.replace(config, research=research)
 
+    if config.experiment.optional_experiments is not None:
+        import dataclasses
+        from researchclaw.training.execution import optional_experiments_directive
+
+        directive = optional_experiments_directive(config.experiment.optional_experiments)
+        if directive not in config.research.topic:
+            research = dataclasses.replace(config.research, topic=config.research.topic + "\n\n" + directive)
+            config = dataclasses.replace(config, research=research)
+
     # --- LLM Preflight ---
     if not skip_preflight:
         from researchclaw.llm import create_llm_client

@@ -313,6 +313,8 @@ class ExperimentConfig:
     stall_timeout_sec: int = 1800
     gpu_idle_timeout_sec: int = 1800
     monitor_interval_sec: int = 30
+    # User-selected optional studies (ablation / visualization / analysis); None = planner decides.
+    optional_experiments: tuple[str, ...] | None = None
     max_iterations: int = 10
     max_refine_duration_sec: int = 0  # 0 = auto (3× time_budget_sec)
     metric_key: str = "primary_metric"
@@ -651,6 +653,8 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         stall_timeout_sec=int(data.get("stall_timeout_sec", 1800)),
         gpu_idle_timeout_sec=int(data.get("gpu_idle_timeout_sec", 1800)),
         monitor_interval_sec=int(data.get("monitor_interval_sec", 30)),
+        optional_experiments=None if data.get("optional_experiments") is None
+        else tuple(str(item) for item in data["optional_experiments"]),
         max_iterations=int(data.get("max_iterations", 10)),
         max_refine_duration_sec=int(data.get("max_refine_duration_sec", 0)),
         metric_key=data.get("metric_key", "primary_metric"),
