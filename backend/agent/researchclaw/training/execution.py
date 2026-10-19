@@ -140,8 +140,12 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
                 report["training"] = observation
                 if not observation.get("parameter_update_observed") or observation.get("optimizer_steps", 0) < 1:
                     raise ValueError("No actual PyTorch parameter update observed")
-                if not observation.get("losses") or not observation.get("checkpoint_verified"):
-                    raise ValueError("Missing training loss or checkpoint matching trained parameters")
+                if not observation.get("losses"):
+                    raise ValueError("Missing training loss: no scalar loss was passed to backward()")
+                if not observation.get("checkpoint_verified"):
+                    problem = (observation.get("checkpoint_problem") or observation.get("error")
+                               or "outputs/model.pt was not saved or is empty")
+                    raise ValueError(f"Missing checkpoint matching trained parameters: {problem}")
                 if report["gpu_id"] and not observation.get("gpu_process"):
                     raise ValueError("GPU requested but no GPU training process observed")
                 predictions = report["predictions"] = check_predictions(workspace / "outputs", started_at)
