@@ -195,9 +195,9 @@ def test_watchdog_kills_a_run_that_never_uses_its_gpu(tmp_path, monkeypatch, sam
 
 
 @pytest.mark.parametrize("drift,tensors,accepted", [
-    ("1e-9", "weight", True),          # in-place renormalisation (BayarConv2d) after saving: float rounding
-    ("1e-3", "weight", False),         # a real change is not rounding
-    ("1e-9", "both", False),           # only max(1, 1%) tensors may differ from their saved bits
+    ("1+1e-6", "weight", True),        # in-place renormalisation (BayarConv2d) after saving: float rounding
+    ("1+1e-3", "weight", False),       # a real change is not rounding
+    ("1+1e-6", "both", False),         # only max(1, 1%) tensors may differ from their saved bits
 ])
 def test_checkpoint_tolerates_in_place_rounding_of_one_tensor(tmp_path, monkeypatch, drift, tensors, accepted):
     pytest.importorskip("torch")
@@ -206,9 +206,9 @@ def test_checkpoint_tolerates_in_place_rounding_of_one_tensor(tmp_path, monkeypa
               "optimizer=torch.optim.SGD(model.parameters(),lr=0.1)\n"
               "for step in range(3):\n optimizer.zero_grad()\n (model(torch.ones(2,2))-2).square().mean().backward()\n"
               " optimizer.step()\nPath('outputs').mkdir()\ntorch.save(model.state_dict(),'outputs/model.pt')\n"
-              "with torch.no_grad():\n model.weight.add_(%s)\n" % drift)
+              "with torch.no_grad():\n model.weight.mul_(%s)\n" % drift)
     if tensors == "both":
-        script += " model.bias.add_(%s)\n" % drift
+        script += " model.bias.mul_(%s)\n" % drift
     script += "Path('results.json').write_text(json.dumps({'loss': 0.5}))\n"
     (tmp_path / "main.py").write_text(script)
     result = run_experiment(tmp_path, tmp_path / "evidence", configuration(training=True, metric="loss"))
