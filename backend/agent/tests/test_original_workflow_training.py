@@ -207,16 +207,15 @@ def test_watchdog_kills_a_run_that_never_uses_its_gpu(tmp_path, monkeypatch, sam
 def test_checkpoint_tolerates_in_place_rounding_of_one_tensor(tmp_path, monkeypatch, drift, tensors, accepted):
     pytest.importorskip("torch")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    # Drift once before and once after saving, so model.pt matches neither the state after the
-    # last optimizer step nor the state at exit bit for bit.
-    drifted = "with torch.no_grad():\n model.weight.mul_(%s)\n" % drift
-    if tensors == "both":
-        drifted += " model.bias.mul_(%s)\n" % drift
+    # Saved from copies, so only the comparison with the parameters at exit can match.
     script = ("import torch,json\nfrom pathlib import Path\nmodel=torch.nn.Linear(2,1)\n"
               "optimizer=torch.optim.SGD(model.parameters(),lr=0.1)\n"
               "for step in range(3):\n optimizer.zero_grad()\n (model(torch.ones(2,2))-2).square().mean().backward()\n"
-              " optimizer.step()\nPath('outputs').mkdir()\n" + drifted +
-              "torch.save(model.state_dict(),'outputs/model.pt')\n" + drifted)
+              " optimizer.step()\nPath('outputs').mkdir()\n"
+              "torch.save({k:v.clone() for k,v in model.state_dict().items()},'outputs/model.pt')\n"
+              "with torch.no_grad():\n model.weight.mul_(%s)\n" % drift)
+    if tensors == "both":
+        script += " model.bias.mul_(%s)\n" % drift
     script += PREDICTIONS + "Path('results.json').write_text(json.dumps({'loss': 0.5}))\n"
     (tmp_path / "main.py").write_text(script)
     result = run_experiment(tmp_path, tmp_path / "evidence", configuration(training=True, metric="loss"))
@@ -277,32 +276,39 @@ def test_independent_seed_models_each_need_a_matching_checkpoint(tmp_path, monke
 
 
 @pytest.mark.parametrize("delivered,accepted", [
-    ("final", True),    # 2026-10-19 S15: model.pt = final weights, then best reloaded for testing
-    ("best", True),     # model.pt saved after reloading the best checkpoint
-    ("fresh", False),   # model.pt never trained
+    ("final", True),        # model.pt = final weights, then best reloaded for testing
+    ("renormalised", True), # 2026-10-19 S15: as above, but validation after the last step renormalised a
+                            # weight in place (BayarConv2d assigns kernel.data on every forward pass)
+    ("best", True),         # model.pt saved after reloading the best checkpoint
+    ("fresh", False),       # model.pt never trained
+    ("overwritten", False), # saved from the trained model, then replaced without torch.save
 ])
 def test_model_saved_before_reloading_best_checkpoint_is_accepted(tmp_path, monkeypatch, delivered, accepted):
     pytest.importorskip("torch")
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-    script = ("import torch,json\nfrom pathlib import Path\nPath('outputs').mkdir()\n"
+    script = ("import io,torch,json\nfrom pathlib import Path\nPath('outputs').mkdir()\n"
               "for seed in (42,123,456):\n torch.manual_seed(seed)\n model=torch.nn.Linear(2,1)\n"
               " optimizer=torch.optim.SGD(model.parameters(),lr=0.1)\n"
               " for step in range(3):\n  optimizer.zero_grad()\n  (model(torch.ones(2,2))-2).square().mean().backward()\n"
               "  optimizer.step()\n  if step==0:torch.save(model.state_dict(),f'outputs/best_{seed}.pt')\n"
+              f" if {delivered!r}=='renormalised':model.weight.data=model.weight.data/model.weight.data.sum()\n"
               " torch.save(model.state_dict(),f'outputs/final_{seed}.pt')\n"
-              f" if {delivered!r}=='final':torch.save(model.state_dict(),'outputs/model.pt')\n"
+              f" if {delivered!r} in ('final','renormalised','overwritten'):torch.save(model.state_dict(),'outputs/model.pt')\n"
               " model.load_state_dict(torch.load(f'outputs/best_{seed}.pt'))\n"
               f" if {delivered!r}=='best':torch.save(model.state_dict(),'outputs/model.pt')\n"
-              f" if {delivered!r}=='fresh':torch.save(torch.nn.Linear(2,1).state_dict(),'outputs/model.pt')\n")
+              f" if {delivered!r}=='fresh':torch.save(torch.nn.Linear(2,1).state_dict(),'outputs/model.pt')\n"
+              f"if {delivered!r}=='overwritten':\n buffer=io.BytesIO();torch.save(torch.nn.Linear(2,1).state_dict(),buffer)\n"
+              " Path('outputs/model.pt').write_bytes(buffer.getvalue())\n")
     script += PREDICTIONS + "Path('results.json').write_text(json.dumps({'loss': 0.5}))\n"
     (tmp_path / "main.py").write_text(script)
     result = run_experiment(tmp_path, tmp_path / "evidence", configuration(training=True, metric="loss"))
     assert result["success"] == accepted, result
     matches = result["training"]["checkpoint_matches"]
-    if delivered == "final":
-        assert matches[2] == {"optimizer": 2, "parameters": 2, "checkpoint": "outputs/model.pt",
-                              "state": "last_optimizer_step", "numeric_matches": 0}
-    if not accepted:
+    if accepted:
+        assert [(match["checkpoint"], match["state"]) for match in matches] == [
+            ("outputs/final_42.pt", "saved_from_trained_model"), ("outputs/final_123.pt", "saved_from_trained_model"),
+            ("outputs/model.pt", "saved_from_trained_model")]
+    else:
         assert "outputs/model.pt matches none of the trained models" in result["errors"][0]
 
 
