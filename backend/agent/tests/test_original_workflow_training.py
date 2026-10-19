@@ -16,6 +16,8 @@ from researchclaw.training.resources import validate_gpu_uuid, with_execution_re
 
 
 GPU_UUID = "GPU-11111111-2222-3333-4444-555555555555"
+PREDICTIONS = ("Path('outputs').mkdir(exist_ok=True)\n"
+               "Path('outputs/predictions.json').write_text(json.dumps({'predictions': [0.1, 0.7, 0.3]}))\n")
 
 
 def configuration(training=False, gpu="", metric="metric"):
@@ -66,6 +68,7 @@ def test_all_original_submissions_propagate_training_config(tmp_path, monkeypatc
                                 research_angles=["CV", "VLM"], path_overrides={
                                     "require_training": True, "gpu_uuid": GPU_UUID,
                                     "datasets_dir": "/allocated/data", "codebases_dir": "/allocated/code",
+                                    "optional_experiments": ["visualization", "ablation"],
                                 })
     configs = list((tmp_path / "project_configs").glob("*.yaml"))
     assert len(configs) == (1 if mode == "reproduce" else 3)
@@ -76,6 +79,8 @@ def test_all_original_submissions_propagate_training_config(tmp_path, monkeypatc
         assert data["experiment"]["datasets_dir"] == "/allocated/data"
         assert data["experiment"]["training_job_dir"] == ""
         assert "真实模型训练" in data["research"]["topic"]
+        assert data["experiment"]["optional_experiments"] == ["ablation", "visualization"]
+        assert _parse_experiment_config(data["experiment"]).optional_experiments == ("ablation", "visualization")
 
 
 @pytest.mark.parametrize("value", ["0", "all", "GPU-1", "GPU-../unsafe", "GPU-a,GPU-b"])
@@ -209,7 +214,7 @@ def test_checkpoint_tolerates_in_place_rounding_of_one_tensor(tmp_path, monkeypa
               "with torch.no_grad():\n model.weight.mul_(%s)\n" % drift)
     if tensors == "both":
         script += " model.bias.mul_(%s)\n" % drift
-    script += "Path('results.json').write_text(json.dumps({'loss': 0.5}))\n"
+    script += PREDICTIONS + "Path('results.json').write_text(json.dumps({'loss': 0.5}))\n"
     (tmp_path / "main.py").write_text(script)
     result = run_experiment(tmp_path, tmp_path / "evidence", configuration(training=True, metric="loss"))
     assert result["success"] == accepted, result
@@ -228,7 +233,7 @@ def test_real_cpu_torch_updates_and_matching_checkpoint(tmp_path, monkeypatch, t
     if save:
         script += "Path('outputs').mkdir(exist_ok=True)\n"
         script += "torch.save(" + ("model" if correct else "torch.nn.Linear(2,1)") + ".state_dict(),'outputs/model.pt')\n"
-    script += "Path('results.json').write_text(json.dumps({'loss': float(model(torch.ones(2,2)).square().mean().item())}))\n"
+    script += PREDICTIONS + "Path('results.json').write_text(json.dumps({'loss': float(model(torch.ones(2,2)).square().mean().item())}))\n"
     (tmp_path / "main.py").write_text(script)
     result = run_experiment(tmp_path, tmp_path / "evidence", configuration(training=True, metric="loss"))
     assert result["success"] == accepted, result
@@ -257,7 +262,7 @@ def test_independent_seed_models_each_need_a_matching_checkpoint(tmp_path, monke
     if per_seed == "trained":
         script += " torch.save(model.state_dict(),f'outputs/full/final_{seed}.pt')\n"
     script += " torch.save((model if %r=='last' else torch.nn.Linear(2,1)).state_dict(),'outputs/model.pt')\n" % final
-    script += "Path('results.json').write_text(json.dumps({'loss': 0.5}))\n"
+    script += PREDICTIONS + "Path('results.json').write_text(json.dumps({'loss': 0.5}))\n"
     (tmp_path / "main.py").write_text(script)
     result = run_experiment(tmp_path, tmp_path / "evidence", configuration(training=True, metric="loss"))
     assert result["success"] == accepted, result

@@ -371,6 +371,7 @@ export default function App() {
                   checkpointsDir: paths?.checkpoints || undefined,
                   requireTraining: paths.requireTraining,
                   gpuUuid: paths.gpuUuid,
+                  optionalExperiments: paths.optionalExperiments,
                 }));
               }
             }}

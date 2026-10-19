@@ -12,7 +12,13 @@ const STATUS_ICONS: Record<string, { color: string; icon: string }> = {
 
 type SubmitMode = 'lab' | 'reproduce';
 type ReferencePdfUpload = { name: string; contentBase64: string };
-type ProjectResources = { codebases?: string; datasets?: string; checkpoints?: string; requireTraining: boolean; gpuUuid: string };
+type ProjectResources = { codebases?: string; datasets?: string; checkpoints?: string; requireTraining: boolean; gpuUuid: string; optionalExperiments: string[] };
+
+const OPTIONAL_EXPERIMENTS = [
+  { key: 'ablation', zh: '消融实验', en: 'Ablation study' },
+  { key: 'visualization', zh: '可视化（预测结果、特征/注意力图）', en: 'Visualization (predictions, feature/attention maps)' },
+  { key: 'analysis', zh: '定性/定量分析', en: 'Qualitative / quantitative analysis' },
+];
 
 function stageName(n: number, t: (k: string) => string): string {
   const key = `stage.${n}`;
@@ -57,6 +63,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
   const [checkpointsPath, setCheckpointsPath] = useState('');
   const [requireTraining, setRequireTraining] = useState(true);
   const [gpuUuid, setGpuUuid] = useState('');
+  const [optionalExperiments, setOptionalExperiments] = useState<string[]>([]);
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
   const { t, locale } = useLocale();
 
@@ -117,7 +124,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
     const angles = mode === 'lab'
       ? anglesInput.split(/[,，、;；]/).map(s => s.trim()).filter(Boolean)
       : [];
-    const paths: ProjectResources = { requireTraining, gpuUuid: gpuUuid.trim() };
+    const paths: ProjectResources = { requireTraining, gpuUuid: gpuUuid.trim(), optionalExperiments };
     if (codebasesPath.trim()) paths.codebases = codebasesPath.trim();
     if (datasetsPath.trim()) paths.datasets = datasetsPath.trim();
     if (checkpointsPath.trim()) paths.checkpoints = checkpointsPath.trim();
@@ -330,6 +337,20 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
                   {locale === 'zh' ? '原流程必须完成真实训练（仅评估任务可取消）' : 'Require real training in this workflow (uncheck for evaluation only)'}
                 </span>
               </label>
+              <div className="path-field">
+                <span className="path-label">{locale === 'zh' ? '可选实验（不勾选即不做）' : 'Optional experiments (unchecked = skipped)'}</span>
+                {OPTIONAL_EXPERIMENTS.map(item => (
+                  <label key={item.key} className="path-label">
+                    <input
+                      type="checkbox"
+                      checked={optionalExperiments.includes(item.key)}
+                      onChange={e => setOptionalExperiments(prev => e.target.checked ? [...prev, item.key] : prev.filter(k => k !== item.key))}
+                      disabled={!connected}
+                    />
+                    {locale === 'zh' ? item.zh : item.en}
+                  </label>
+                ))}
+              </div>
               <label className="path-field">
                 <span className="path-label">{locale === 'zh' ? '已授权的 GPU UUID（留空仅用 CPU）' : 'Authorized GPU UUID (empty = CPU only)'}</span>
                 <input className="path-input" value={gpuUuid} onChange={e => setGpuUuid(e.target.value)} placeholder="GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" disabled={!connected} />
