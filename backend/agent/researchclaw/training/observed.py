@@ -72,28 +72,51 @@ def _match(parameters, saved):
     return len(missing)
 
 
-def verify_checkpoints(final_checkpoint, optimizers, evidence):
+def _find(states, saved):
+    """Return (state name, numeric matches) of the first trained state the file holds, or None."""
+    for name, parameters in states.items():
+        count = _match(parameters, saved)
+        if count is not None:
+            return name, count
+    return None
+
+
+def verify_checkpoints(final_checkpoint, optimizers, evidence, last_steps=()):
     """Every trained optimizer must be saved in some outputs/ checkpoint; model.pt must be one of them.
 
     Independent runs (e.g. one model per seed) each create their own optimizer, while
     outputs/model.pt holds only the final deliverable, so it cannot contain them all.
+    A model counts as saved in the state right after its last optimizer step
+    (``last_steps``, aligned with ``optimizers``) or at process exit: scripts often save
+    the final model and then reload the best-validation checkpoint for testing.
     """
     import torch
 
-    trained = [[(tensor_hash(parameter), parameter) for group in optimizer.param_groups
-                for parameter in group["params"] if parameter.requires_grad] for optimizer in optimizers]
-    trained = [(index, parameters) for index, parameters in enumerate(trained) if parameters]
+    last_steps = dict(enumerate(last_steps))
+    trained = []
+    for index, optimizer in enumerate(optimizers):
+        parameters = [parameter for group in optimizer.param_groups
+                      for parameter in group["params"] if parameter.requires_grad]
+        if not parameters:
+            continue
+        states = {"process_exit": [(tensor_hash(parameter), parameter) for parameter in parameters]}
+        snapshot = last_steps.get(index)
+        if snapshot is not None and len(snapshot) == len(parameters):
+            hashed = [(tensor_hash(tensor), tensor) for tensor in snapshot]
+            if [digest for digest, _ in hashed] != [digest for digest, _ in states["process_exit"]]:
+                states["last_optimizer_step"] = hashed
+        trained.append((index, states))
     state = torch.load(final_checkpoint, map_location="cpu", weights_only=True)
     if isinstance(state, dict):
         state = state.get("model_state_dict", state.get("state_dict", state))
     if not isinstance(state, dict):
         raise ValueError("outputs/model.pt must contain a model state_dict")
     saved = _saved_tensors({key: value for key, value in state.items() if torch.is_tensor(value)})
-    matches, numeric = {}, {}
-    for index, parameters in trained:
-        count = _match(parameters, saved)
-        if count is not None:
-            matches[index], numeric[index] = final_checkpoint.as_posix(), count
+    matches = {}
+    for index, states in trained:
+        found = _find(states, saved)
+        if found is not None:
+            matches[index] = (final_checkpoint.as_posix(), *found)
     final_matched = bool(matches)
     del state, saved
 
@@ -109,22 +132,35 @@ def verify_checkpoints(final_checkpoint, optimizers, evidence):
         except Exception as exc:
             unreadable.append({"path": path.as_posix(), "error": str(exc)[:200]})
             continue
-        for index, parameters in trained:
+        for index, states in trained:
             if index not in matches:
-                count = _match(parameters, saved)
-                if count is not None:
-                    matches[index], numeric[index] = path.as_posix(), count
+                found = _find(states, saved)
+                if found is not None:
+                    matches[index] = (path.as_posix(), *found)
         del saved
 
     evidence["trained_optimizers"] = len(trained)
-    evidence["checkpoint_matches"] = [{"optimizer": index, "parameters": len(parameters),
-                                       "checkpoint": matches.get(index), "numeric_matches": numeric.get(index, 0)}
-                                      for index, parameters in trained]
-    if any(numeric.values()):
+    evidence["checkpoint_matches"] = [{"optimizer": index, "parameters": len(states["process_exit"]),
+                                       "checkpoint": matches.get(index, (None,))[0],
+                                       "state": matches.get(index, (None, None))[1],
+                                       "numeric_matches": matches.get(index, (None, None, 0))[2]}
+                                      for index, states in trained]
+    if any(match[2] for match in matches.values()):
         evidence["checkpoint_numeric_tolerance"] = {"rtol": NUMERIC_RTOL, "atol": NUMERIC_ATOL}
     if unreadable:
         evidence["unreadable_checkpoints"] = unreadable
-    evidence["checkpoint_verified"] = bool(trained) and final_matched and len(matches) == len(trained)
+    missing = [index for index, _ in trained if index not in matches]
+    if not trained:
+        evidence["checkpoint_problem"] = "no optimizer updated any trainable parameter"
+    elif not final_matched:
+        evidence["checkpoint_problem"] = (
+            "outputs/model.pt matches none of the trained models, neither right after its last optimizer "
+            "step nor at process exit; save model.pt from the trained weights of the delivered model")
+    elif missing:
+        evidence["checkpoint_problem"] = (
+            f"trained model(s) {missing} (in order of creation) are not saved in any outputs/*.pt checkpoint; "
+            "each independently trained model, e.g. one per seed, needs its own checkpoint")
+    evidence["checkpoint_verified"] = bool(trained) and final_matched and not missing
 
 
 def main():
@@ -138,6 +174,7 @@ def main():
                 "loss_semantics": "Scalars passed to Tensor.backward; may be AMP-scaled. See experiment logs for unscaled losses."}
     snapshots = {}
     optimizers = {}
+    last_steps = {}
     original_backward = torch.Tensor.backward
 
     def backward(tensor, *args, **kwargs):
@@ -169,6 +206,26 @@ def main():
         with evidence_path.with_suffix(".jsonl").open("a", encoding="utf-8") as events:
             events.write(json.dumps({"step": evidence["optimizer_steps"], "loss": evidence.get("last_loss"),
                                      "parameter_update_observed": evidence["parameter_update_observed"]}) + "\n")
+        remember_last_step(optimizer)
+
+    def remember_last_step(optimizer):
+        """Keep each optimizer's trainable parameters as they are right after its latest step."""
+        parameters = [parameter for group in optimizer.param_groups
+                      for parameter in group["params"] if parameter.requires_grad]
+        snapshot = last_steps.get(id(optimizer))
+        if snapshot is None:
+            # A new optimizer usually means the previous model (e.g. the previous seed) is done;
+            # move earlier copies off the GPU so at most one extra copy of each live model stays there.
+            for other in last_steps.values():
+                other[:] = [tensor.cpu() for tensor in other]
+        if snapshot is None or len(snapshot) != len(parameters) or any(
+                kept.device != parameter.device or kept.shape != parameter.shape
+                for kept, parameter in zip(snapshot, parameters)):
+            last_steps[id(optimizer)] = [parameter.detach().clone() for parameter in parameters]
+        else:
+            with torch.no_grad():
+                for kept, parameter in zip(snapshot, parameters):
+                    kept.copy_(parameter)
 
     handles = [register_optimizer_step_pre_hook(before_step), register_optimizer_step_post_hook(after_step)]
     torch.Tensor.backward = backward
@@ -183,7 +240,8 @@ def main():
                 raise
         checkpoint = Path("outputs/model.pt")
         if checkpoint.is_file() and not checkpoint.is_symlink() and checkpoint.stat().st_size > 0:
-            verify_checkpoints(checkpoint, list(optimizers.values()), evidence)
+            verify_checkpoints(checkpoint, list(optimizers.values()), evidence,
+                               [last_steps.get(key) for key in optimizers])
             evidence["checkpoint_sha256"] = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
         if evidence["cuda_update_observed"]:
             from researchclaw.training.jobs import gpu_evidence
