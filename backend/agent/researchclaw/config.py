@@ -308,6 +308,11 @@ class ExperimentConfig:
     require_training: bool = False
     gpu_uuid: str = ""
     time_budget_sec: int = 3600
+    # Watchdog: kill a run with no new log output or optimizer step, or whose requested
+    # GPU stays idle and unused, for this long (0 disables). Sampled every monitor_interval_sec.
+    stall_timeout_sec: int = 1800
+    gpu_idle_timeout_sec: int = 1800
+    monitor_interval_sec: int = 30
     max_iterations: int = 10
     max_refine_duration_sec: int = 0  # 0 = auto (3× time_budget_sec)
     metric_key: str = "primary_metric"
@@ -643,6 +648,9 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         require_training=bool(data.get("require_training", False)),
         gpu_uuid=str(data.get("gpu_uuid", "")),
         time_budget_sec=int(data.get("time_budget_sec", 3600)),
+        stall_timeout_sec=int(data.get("stall_timeout_sec", 1800)),
+        gpu_idle_timeout_sec=int(data.get("gpu_idle_timeout_sec", 1800)),
+        monitor_interval_sec=int(data.get("monitor_interval_sec", 30)),
         max_iterations=int(data.get("max_iterations", 10)),
         max_refine_duration_sec=int(data.get("max_refine_duration_sec", 0)),
         metric_key=data.get("metric_key", "primary_metric"),
