@@ -359,6 +359,27 @@ def _read_prior_artifact(run_dir: Path, filename: str) -> str | None:
     return None
 
 
+def _newest_stage_files(run_dir: Path, pattern: str) -> list[Path]:
+    """Files matching *pattern* under *run_dir*, newest first.
+
+    The current stage directory (``stage-15``) comes before older loop
+    versions (``stage-15_v2``, then ``stage-15_v1``), and within a directory
+    higher ``attempt-N`` numbers come first.  Plain string order would put
+    ``stage-15_v1`` before ``stage-15`` and ``attempt-2`` before ``attempt-10``.
+    """
+    def key(path: Path) -> tuple[int, ...]:
+        rank: list[int] = []
+        for part in path.relative_to(run_dir).parts[:-1]:
+            base, sep, ver = part.rpartition("_v")
+            if part.startswith("stage-"):
+                rank.append(-int(ver) if sep and ver.isdigit() else 0)
+            elif part.startswith("attempt-") and part[8:].isdigit():
+                rank.append(int(part[8:]))
+        return tuple(rank)
+
+    return sorted(run_dir.glob(pattern), key=key, reverse=True)
+
+
 def _find_prior_file(run_dir: Path, filename: str) -> Path | None:
     """Like ``_read_prior_artifact`` but returns the *Path* instead of content."""
     def _stage_sort_key(p: Path) -> tuple[str, int]:
@@ -5421,8 +5442,8 @@ def _verified_execution_audit(run_dir: Path) -> dict[str, Any]:
 
     candidates: list[Path] = []
     if refine_log.get("adopted", True):
-        candidates += sorted(run_dir.glob("stage-15*/verified_execution/execution_report.json"), reverse=True)
-    candidates += sorted(run_dir.glob("stage-14*/runs/attempt-*/execution_report.json"), reverse=True)
+        candidates += _newest_stage_files(run_dir, "stage-15*/verified_execution/execution_report.json")
+    candidates += _newest_stage_files(run_dir, "stage-14*/runs/attempt-*/execution_report.json")
     report_path = next((c for c in candidates if c.is_file()), None)
     if report_path is None:
         return {}

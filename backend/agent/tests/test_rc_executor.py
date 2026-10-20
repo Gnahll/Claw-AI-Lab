@@ -4045,3 +4045,17 @@ def test_execution_audit_uses_s14_when_s15_not_adopted(run_dir: Path) -> None:
     assert audit["per_run_results"][0]["test"] == {"f1": 0.90}
     assert audit["iterative_refine"]["adopted"] is False
     assert rc_executor._verified_execution_audit(run_dir / "missing") == {}
+
+
+def test_execution_audit_prefers_current_stage_over_refine_versions(run_dir: Path) -> None:
+    _write_execution_report(run_dir / "stage-14/runs/attempt-2/execution_report.json", 0.80)
+    _write_execution_report(run_dir / "stage-14/runs/attempt-10/execution_report.json", 0.85)
+    _write_execution_report(run_dir / "stage-15_v1/verified_execution/execution_report.json", 0.90)
+    _write_execution_report(run_dir / "stage-15/verified_execution/execution_report.json", 0.94)
+
+    assert rc_executor._verified_execution_audit(run_dir)["source"] == (
+        "stage-15/verified_execution/execution_report.json")
+    names = [p.relative_to(run_dir).as_posix() for p in
+             rc_executor._newest_stage_files(run_dir, "stage-14*/runs/attempt-*/execution_report.json")]
+    assert names == ["stage-14/runs/attempt-10/execution_report.json",
+                     "stage-14/runs/attempt-2/execution_report.json"]
