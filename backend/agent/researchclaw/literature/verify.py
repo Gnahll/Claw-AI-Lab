@@ -19,6 +19,7 @@ All network I/O uses stdlib ``urllib`` — zero extra pip dependencies.
 
 from __future__ import annotations
 
+import html
 import json
 import logging
 import re
@@ -61,6 +62,8 @@ class CitationResult:
     details: str = ""
     matched_paper: Paper | None = None
     relevance_score: float | None = None  # 0.0–1.0, set by LLM relevance check
+    bibtex_doi: str = ""  # set when the BibTeX DOI points to another paper
+    corrected_doi: str = ""  # DOI of the paper the title matched, if known
 
     def to_dict(self) -> dict[str, object]:
         d: dict[str, object] = {
@@ -73,6 +76,9 @@ class CitationResult:
         }
         if self.relevance_score is not None:
             d["relevance_score"] = round(self.relevance_score, 2)
+        if self.bibtex_doi:
+            d["bibtex_doi"] = self.bibtex_doi
+            d["corrected_doi"] = self.corrected_doi
         if self.matched_paper:
             d["matched_paper"] = {
                 "title": self.matched_paper.title,
@@ -160,7 +166,9 @@ def title_similarity(a: str, b: str) -> float:
     """
 
     def _words(t: str) -> set[str]:
-        return set(re.sub(r"[^a-z0-9\s]", "", t.lower()).split()) - {""}
+        # BibTeX braces and dashes ("{COVERAGE}---A", "COVERAGE — A") separate words.
+        t = re.sub(r"[{}]|-{2,}|[–—/]", " ", t.lower())
+        return set(re.sub(r"[^a-z0-9\s]", "", t).split()) - {""}
 
     wa, wb = _words(a), _words(b)
     if not wa or not wb:
@@ -453,8 +461,10 @@ def verify_by_openalex(title: str) -> CitationResult | None:
 
     Returns *None* only on network failure (allows fallthrough to S2).
     """
+    # Commas separate OpenAlex filters; braces, "?" and newlines break the query.
+    query = " ".join(re.sub(r"[^\w\s-]+", " ", title).split())
     params = urllib.parse.urlencode({
-        "filter": f"title.search:{title}",
+        "filter": f"title.search:{query}",
         "per_page": "5",
         "mailto": _OPENALEX_EMAIL,
     })
@@ -496,6 +506,7 @@ def verify_by_openalex(title: str) -> CitationResult | None:
                 best_result = r
 
     if best_sim >= 0.80:
+        doi = str(best_result.get("doi") or "").removeprefix("https://doi.org/")
         return CitationResult(
             cite_key="",
             title=title,
@@ -503,6 +514,13 @@ def verify_by_openalex(title: str) -> CitationResult | None:
             confidence=best_sim,
             method="openalex",
             details=f"Confirmed via OpenAlex: '{best_result.get('title', '')}'",
+            matched_paper=Paper(
+                paper_id=str(best_result.get("id", "")),
+                title=str(best_result.get("title", "")),
+                year=int(best_result.get("publication_year") or 0),
+                doi=doi,
+                source="openalex",
+            ),
         )
     elif best_sim >= 0.50:
         return CitationResult(
@@ -551,6 +569,8 @@ def _read_cache(title: str) -> CitationResult | None:
                 confidence=data["confidence"],
                 method=data["method"],
                 details=data.get("details", ""),
+                bibtex_doi=data.get("bibtex_doi", ""),
+                corrected_doi=data.get("corrected_doi", ""),
             )
         except (json.JSONDecodeError, KeyError, ValueError):
             return None
@@ -657,6 +677,52 @@ def verify_by_title_search(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# L4: publisher page check (entries with a url the indexes do not cover yet)
+# ---------------------------------------------------------------------------
+
+_URL_TIMEOUT = 20
+_URL_MAX_BYTES = 2_000_000
+
+
+def _title_words(text: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", text.lower()).split())
+
+
+def verify_by_url(url: str, title: str) -> CitationResult | None:
+    """Fetch the entry's own URL and check that the page shows its title.
+
+    Newly published papers are often missing from OpenAlex/S2.  Returns
+    VERIFIED when the full title appears on the page, otherwise None.
+    """
+    if not url.startswith(("http://", "https://")) or len(_title_words(title).split()) < 4:
+        return None
+    try:
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (ResearchClaw citation check)", "Accept": "text/html,*/*"},
+        )
+        with urllib.request.urlopen(req, timeout=_URL_TIMEOUT) as resp:
+            raw = resp.read(_URL_MAX_BYTES)
+            if resp.headers.get("Content-Encoding", "") == "gzip":
+                import gzip
+                raw = gzip.decompress(raw)
+    except Exception as exc:
+        logger.debug("URL check failed for %s: %s", url, exc)
+        return None
+    page = html.unescape(re.sub(r"<[^>]+>", " ", raw.decode("utf-8", errors="replace")))
+    if _title_words(title) not in _title_words(page):
+        return None
+    return CitationResult(
+        cite_key="",
+        title=title,
+        status=VerifyStatus.VERIFIED,
+        confidence=0.85,
+        method="url",
+        details=f"Title found on the entry's own page: {url}",
+    )
+
+
 def verify_citations(
     bib_text: str,
     *,
@@ -719,6 +785,7 @@ def verify_citations(
         title = entry.get("title", "")
         arxiv_id = entry.get("eprint", "")
         doi = entry.get("doi", "")
+        entry_url = entry.get("url", "")
 
         # Skip entries with no title
         if not title:
@@ -734,9 +801,11 @@ def verify_citations(
             report.results.append(result)
             continue
 
-        # Check cache first
+        # Check cache first.  Only VERIFIED results are reused: a negative
+        # verdict may come from a network failure or a paper that was not
+        # indexed yet, so it is checked again.
         cached = _read_cache(title)
-        if cached is not None:
+        if cached is not None and cached.status == VerifyStatus.VERIFIED:
             cached.cite_key = key
             report.results.append(cached)
             if cached.status == VerifyStatus.VERIFIED:
@@ -772,6 +841,46 @@ def verify_citations(
                     result.status.value,
                     result.confidence,
                 )
+            # The DOI resolves to a different paper: the DOI is wrong, which
+            # says nothing about the title.  Verify the title on its own.
+            if (
+                result is not None
+                and result.status == VerifyStatus.SUSPICIOUS
+                and result.confidence < 0.5
+            ):
+                doi_result = result
+                title_result = verify_by_openalex(title)
+                api_call_count += 1
+                if title_result is None or title_result.status != VerifyStatus.VERIFIED:
+                    title_result = verify_by_title_search(title, s2_api_key=s2_api_key)
+                    api_call_count += 1
+                if title_result is not None and title_result.status == VerifyStatus.VERIFIED:
+                    matched = title_result.matched_paper
+                    result = CitationResult(
+                        cite_key=key,
+                        title=title,
+                        status=VerifyStatus.VERIFIED,
+                        confidence=title_result.confidence,
+                        method=f"{title_result.method}+doi_mismatch",
+                        details=(
+                            f"{title_result.details}. The BibTeX DOI {doi} points to another "
+                            f"paper ({doi_result.details})"
+                        ),
+                        matched_paper=matched,
+                        bibtex_doi=doi,
+                        corrected_doi=matched.doi if matched else "",
+                    )
+                else:
+                    result = CitationResult(
+                        cite_key=key,
+                        title=title,
+                        status=VerifyStatus.SUSPICIOUS,
+                        confidence=doi_result.confidence,
+                        method="doi",
+                        details=f"{doi_result.details}; title not found by title search",
+                        bibtex_doi=doi,
+                    )
+                logger.info("DOI mismatch [%s] title check → %s", key, result.status.value)
 
         # L3a: OpenAlex title search (high rate limits, good coverage)
         if result is None:
@@ -816,6 +925,13 @@ def verify_citations(
                     result.confidence,
                 )
 
+        # L4: the entry's own URL, for papers the indexes do not cover yet
+        if entry_url and (result is None or result.status != VerifyStatus.VERIFIED):
+            url_result = verify_by_url(entry_url, title)
+            if url_result is not None:
+                logger.info("L4 URL [%s] %s → verified", key, entry_url)
+                result = url_result
+
         # Fallback: all layers failed (network issues)
         if result is None:
             result = CitationResult(
@@ -836,6 +952,8 @@ def verify_citations(
             method=result.method,
             details=result.details,
             matched_paper=result.matched_paper,
+            bibtex_doi=result.bibtex_doi,
+            corrected_doi=result.corrected_doi,
         )
 
         # Cache the result (skip SKIPPED — network failures shouldn't be cached)
