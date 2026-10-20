@@ -1401,6 +1401,29 @@ class TestResearchDecisionStructured:
         )
         assert result.decision == "pivot"
 
+    def test_decision_prompt_has_user_choices_and_loops_left(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        import dataclasses
+        import json
+
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        stage_dir = run_dir / "stage-17"
+        stage_dir.mkdir(parents=True)
+        (run_dir / "decision_history.json").write_text(json.dumps([{"decision": "refine"}]))
+        config = dataclasses.replace(
+            rc_config,
+            experiment=dataclasses.replace(rc_config.experiment, optional_experiments=("ablation",)),
+        )
+        fake_llm = FakeLLMClient("## Decision\nPROCEED\n## Justification\nGood.")
+        rc_executor._execute_research_decision(stage_dir, run_dir, config, adapters, llm=fake_llm)
+        prompt = fake_llm.calls[0][-1]["content"]
+        assert "- Required: ablation study" in prompt
+        assert "Not requested: do not plan or run any visualization" in prompt
+        assert "REFINE loops left in this run: 0" in prompt
+        assert "PIVOT is not available" in prompt
+
     def test_no_llm_defaults_to_proceed(
         self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle
     ) -> None:

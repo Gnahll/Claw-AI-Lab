@@ -18,10 +18,11 @@ from researchclaw.config import RCConfig
 from researchclaw.adapters import AdapterBundle
 from researchclaw.pipeline.claw_engine import AgentTurnLoop, StageSession
 from researchclaw.pipeline.iterative_refine.system_prompt import (
+    REFINE_LOOP_RULES,
     build_system_prompt,
     build_user_message,
 )
-from researchclaw.pipeline.stages import Stage, StageStatus
+from researchclaw.pipeline.stages import REFINE_REQUEST_FILE, Stage, StageStatus
 from researchclaw.training.execution import EXECUTION_CONTRACT, run_experiment
 
 logger = logging.getLogger(__name__)
@@ -71,8 +72,15 @@ class IterativeRefineRuntime:
             )
         session.log("INIT", f"Experiment dir: {experiment_dir}")
 
-        # Load baseline results from S14
-        baseline_results = self._load_baseline_results(run_dir)
+        # A REFINE loop from S17 asks for missing experiments to be added.
+        refine_request_path = stage_dir / REFINE_REQUEST_FILE
+        refine_request = refine_request_path.read_text(encoding="utf-8") if refine_request_path.is_file() else ""
+        if refine_request:
+            session.log("INIT", "REFINE loop: adding the experiments requested by S17")
+
+        # Load baseline results from S14 (or the run adopted before this REFINE loop)
+        baseline_results = (self._load_adopted_results(run_dir) if refine_request else "") \
+            or self._load_baseline_results(run_dir)
         session.log("INIT", f"Baseline results: {baseline_results[:200] if baseline_results else 'none'}")
 
         # Config values
@@ -111,6 +119,8 @@ class IterativeRefineRuntime:
         )
 
         system_prompt += "\n\n" + EXECUTION_CONTRACT
+        if refine_request:
+            system_prompt += "\n\n" + REFINE_LOOP_RULES
         user_message = build_user_message(
             experiment_dir=str(workspace),
             experiment_files=exp_files,
@@ -120,6 +130,13 @@ class IterativeRefineRuntime:
             max_iterations=max_iterations,
             exp_plan_summary=exp_plan_summary,
         )
+        if refine_request:
+            user_message += (
+                "\n\n## Experiments requested by the research decision (S17)\n"
+                "Add the missing experiments listed below (Next Actions / missing criteria). "
+                "Re-run every condition, old and new, under the frozen protocol and write "
+                "all of them to results.json.\n\n" + refine_request[:6000]
+            )
 
         # Save system prompt
         (stage_dir / "refine_system_prompt.md").write_text(system_prompt, encoding="utf-8")
@@ -158,7 +175,9 @@ class IterativeRefineRuntime:
         # S15 may only fix bugs. A run that changed the planned protocol
         # (learning rate, epochs, seeds, splits, ...) is kept as exploratory
         # and the initial S14 results stay the adopted ones.
-        protocol_changes = self._protocol_changes(baseline_results, final_results)
+        protocol_changes = self._protocol_changes(
+            baseline_results, final_results, allow_additions=bool(refine_request),
+        )
         rejected = bool(protocol_changes)
         exploratory_metric = None
         if rejected:
@@ -197,6 +216,7 @@ class IterativeRefineRuntime:
             "errors": turn_result.errors,
             "elapsed_sec": round(turn_result.elapsed_sec, 1),
             "adopted": not rejected,
+            "refine_loop": bool(refine_request),
         }
         if rejected:
             log_data.update({
@@ -272,6 +292,23 @@ class IterativeRefineRuntime:
                         return candidate.read_text(encoding="utf-8")
                     except OSError:
                         pass
+        return ""
+
+    @staticmethod
+    def _load_adopted_results(run_dir: Path) -> str:
+        """results.json adopted by the latest earlier S15 run, if any."""
+        versions = sorted(
+            run_dir.glob("stage-15_v*"),
+            key=lambda p: int(p.name.rpartition("_v")[2]) if p.name.rpartition("_v")[2].isdigit() else -1,
+            reverse=True,
+        )
+        for stage_d in versions:
+            try:
+                log = json.loads((stage_d / "refinement_log.json").read_text(encoding="utf-8"))
+                if isinstance(log, dict) and log.get("adopted", True):
+                    return (stage_d / "results.json").read_text(encoding="utf-8")
+            except (OSError, json.JSONDecodeError):
+                continue
         return ""
 
     @staticmethod
@@ -376,12 +413,16 @@ class IterativeRefineRuntime:
             return False
 
     @staticmethod
-    def _protocol_changes(baseline_str: str, final_str: str) -> dict[str, dict[str, Any]]:
+    def _protocol_changes(
+        baseline_str: str, final_str: str, *, allow_additions: bool = False,
+    ) -> dict[str, dict[str, Any]]:
         """Return frozen-protocol fields whose value differs between the runs.
 
         Compares the ``protocol`` dict and ``split_ids`` recorded in
         results.json. Fields the refined run dropped count as changes; fields
         it only added do not. Runs without a recorded protocol are not checked.
+        With *allow_additions* (REFINE loop), a list that keeps every initial
+        item and adds more (e.g. extra seeds) is not a change.
         """
         try:
             baseline = json.loads(baseline_str) if baseline_str else None
@@ -394,7 +435,13 @@ class IterativeRefineRuntime:
         base_protocol, final_protocol = baseline.get("protocol"), final.get("protocol")
         if isinstance(base_protocol, dict) and isinstance(final_protocol, dict):
             for key, value in base_protocol.items():
-                if final_protocol.get(key) != value:
+                refined = final_protocol.get(key)
+                if (
+                    allow_additions and isinstance(value, list) and isinstance(refined, list)
+                    and refined[:len(value)] == value
+                ):
+                    continue
+                if refined != value:
                     changes[f"protocol.{key}"] = {"initial": value, "refined": final_protocol.get(key)}
         if "split_ids" in baseline and "split_ids" in final and baseline["split_ids"] != final["split_ids"]:
             changes["split_ids"] = {"initial": "<changed>", "refined": "<changed>"}

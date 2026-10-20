@@ -3,6 +3,22 @@
 from __future__ import annotations
 
 
+REFINE_LOOP_RULES = """# REFINE loop (requested by the research decision)
+The research decision found experiments missing (for example a second
+baseline, an ablation the user asked for, or more seeds). In this run you
+may ADD them:
+- New conditions (baselines, requested ablations) use the same training
+  budget, data splits, seeds and evaluation as the existing conditions.
+- Extra seeds may be appended to the planned seeds; keep the existing ones.
+- Existing conditions keep their frozen protocol; do not change their
+  hyperparameters or budget, and never tune anything on the test split.
+- Do not add an optional experiment the user did not request.
+- If a requested experiment cannot be run (missing code, weights or
+  compute), leave it out and record the reason under "limitations" in
+  results.json.
+"""
+
+
 def build_system_prompt(
     *,
     python_path: str = "",

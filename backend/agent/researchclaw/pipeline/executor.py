@@ -5066,6 +5066,37 @@ def _parse_decision(text: str) -> str:
     return "proceed"
 
 
+def _decision_context(run_dir: Path, config: RCConfig) -> str:
+    """Facts S17 needs to choose between PROCEED and REFINE."""
+    from researchclaw.pipeline.stages import MAX_DECISION_LOOPS
+
+    lines = ["\n\n## Decision context (from the platform)"]
+    selected = getattr(config.experiment, "optional_experiments", None)
+    if selected is not None:
+        from researchclaw.training.execution import optional_experiments_directive
+
+        lines.append(optional_experiments_directive(selected))
+        lines.append("An optional experiment marked 'Not requested' is never missing and is "
+                     "not a reason for REFINE.")
+    used = 0
+    history_path = run_dir / "decision_history.json"
+    if history_path.is_file():
+        history = _safe_json_loads(history_path.read_text(encoding="utf-8"), [])
+        if isinstance(history, list):
+            used = sum(1 for h in history if isinstance(h, dict) and h.get("decision") == "refine")
+    left = max(MAX_DECISION_LOOPS.get("refine", 0) - used, 0)
+    lines.append(
+        f"REFINE loops left in this run: {left}. A REFINE loop re-runs S15 to add the missing "
+        "experiments under the same frozen protocol; it never re-tunes hyperparameters."
+    )
+    if left == 0:
+        lines.append("No REFINE loop is left: unless results are unusable, choose PROCEED and list "
+                     "the missing experiments as limitations.")
+    if MAX_DECISION_LOOPS.get("pivot", 0) == 0:
+        lines.append("PIVOT is not available in this pipeline; choose REFINE or PROCEED.")
+    return "\n".join(lines) + "\n"
+
+
 def _execute_research_decision(
     stage_dir: Path,
     run_dir: Path,
@@ -5107,7 +5138,7 @@ def _execute_research_decision(
         _pm = prompts or PromptManager()
         _overlay = _get_evolution_overlay(run_dir, "research_decision")
         sp = _pm.for_stage("research_decision", evolution_overlay=_overlay, analysis=analysis)
-        _user = sp.user + _degenerate_hint
+        _user = sp.user + _degenerate_hint + _decision_context(run_dir, config)
         resp = llm.chat(
             [{"role": "user", "content": _user}],
             system=sp.system,

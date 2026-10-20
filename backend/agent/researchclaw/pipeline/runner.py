@@ -20,7 +20,9 @@ from researchclaw.pipeline.executor import (
 )
 from researchclaw.pipeline.stages import (
     DECISION_ROLLBACK,
+    MAX_DECISION_LOOPS,
     MAX_DECISION_PIVOTS,
+    REFINE_REQUEST_FILE,
     NONCRITICAL_STAGES,
     STAGE_SEQUENCE,
     Stage,
@@ -302,7 +304,11 @@ def execute_pipeline(
                 print(
                     f"[{run_id}] Consecutive empty metrics across REFINE cycles — forcing PROCEED"
                 )
-            elif pivot_count < MAX_DECISION_PIVOTS:
+            elif (
+                pivot_count < MAX_DECISION_PIVOTS
+                and _decision_count(run_dir, result.decision)
+                < MAX_DECISION_LOOPS.get(result.decision, 0)
+            ):
                 rollback_target = DECISION_ROLLBACK[result.decision]
                 _record_decision_history(
                     run_dir, result.decision, rollback_target, pivot_count + 1
@@ -323,6 +329,8 @@ def execute_pipeline(
                 _version_rollback_stages(
                     run_dir, rollback_target, pivot_count + 1
                 )
+                if result.decision == "refine":
+                    _write_refine_request(run_dir, rollback_target, pivot_count + 1)
                 # Recurse from rollback target
                 pivot_results = execute_pipeline(
                     run_dir=run_dir,
@@ -835,6 +843,39 @@ def _check_experiment_quality(
         return False, f"Analysis quality score {quality}/10 — below minimum threshold"
 
     return True, "Quality checks passed"
+
+
+def _decision_count(run_dir: Path, decision: str) -> int:
+    """How many loop-backs for *decision* were already taken in this run."""
+    history_path = run_dir / "decision_history.json"
+    try:
+        data = json.loads(history_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return 0
+    if not isinstance(data, list):
+        return 0
+    return sum(1 for item in data if isinstance(item, dict) and item.get("decision") == decision)
+
+
+def _write_refine_request(run_dir: Path, rollback_target: Stage, attempt: int) -> None:
+    """Hand the S17 decision to the re-run of *rollback_target*.
+
+    The decision text (missing baselines, ablations, seeds, ...) is copied
+    from the versioned S17 directory into the new stage directory, where
+    S15 reads it as the list of experiments to add.
+    """
+    decision_path = run_dir / f"stage-{int(Stage.RESEARCH_DECISION):02d}_v{attempt}" / "decision.md"
+    try:
+        decision_md = decision_path.read_text(encoding="utf-8")
+    except OSError:
+        decision_md = ""
+    target_dir = run_dir / f"stage-{int(rollback_target):02d}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    (target_dir / REFINE_REQUEST_FILE).write_text(
+        f"# REFINE request (loop {attempt})\n\n"
+        f"Source: {decision_path.relative_to(run_dir).as_posix()}\n\n{decision_md}",
+        encoding="utf-8",
+    )
 
 
 def _read_pivot_count(run_dir: Path) -> int:
