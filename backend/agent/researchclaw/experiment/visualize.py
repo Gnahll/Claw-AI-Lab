@@ -715,10 +715,20 @@ def plot_learning_curves(results: dict[str, Any], output_path: Path) -> Path | N
 
 
 def _load_adopted_results(run_dir: Path) -> dict[str, Any]:
-    """Return results.json of the adopted run (S15 if present, else S14)."""
+    """Return results.json of the adopted run (S15 if present, else S14).
+
+    The current stage directory wins over older REFINE-loop versions
+    (``stage-15`` before ``stage-15_v2`` before ``stage-15_v1``).
+    """
+    def newest_first(pattern: str) -> list[Path]:
+        def key(path: Path) -> tuple[int, int]:
+            _, sep, ver = path.relative_to(run_dir).parts[0].rpartition("_v")
+            return (0, int(ver)) if sep and ver.isdigit() else (1, 0)
+        return sorted(run_dir.glob(pattern), key=key, reverse=True)
+
     candidates = [
-        *sorted(run_dir.glob("stage-15*/results.json"), reverse=True),
-        *sorted(run_dir.glob("stage-14*/runs/results.json"), reverse=True),
+        *newest_first("stage-15*/results.json"),
+        *newest_first("stage-14*/runs/results.json"),
     ]
     for path in candidates:
         try:

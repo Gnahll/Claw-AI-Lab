@@ -86,6 +86,16 @@ def test_learning_curves_from_adopted_results(tmp_path: Path):
     assert (out / "fig_learning_curves.png").stat().st_size > 1000
 
 
+def test_adopted_results_prefer_current_stage_over_refine_versions(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    for name, epochs in (("stage-15_v1", 1), ("stage-15_v2", 2), ("stage-15", 3)):
+        (run_dir / name).mkdir(parents=True)
+        (run_dir / name / "results.json").write_text(json.dumps(_results(epochs=epochs)))
+    assert visualize._load_adopted_results(run_dir) == _results(epochs=3)
+    (run_dir / "stage-15/results.json").unlink()
+    assert visualize._load_adopted_results(run_dir) == _results(epochs=2)
+
+
 @pytest.mark.skipif(not visualize.HAS_MATPLOTLIB, reason="matplotlib missing")
 def test_learning_curves_need_two_epochs(tmp_path: Path):
     assert visualize.plot_learning_curves(_results(epochs=1), tmp_path / "x.png") is None
