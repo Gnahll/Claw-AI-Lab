@@ -3992,3 +3992,56 @@ def test_search_strategy_uses_llm_sources_when_plan_yaml_is_broken(
         "image tampering localization transformer",
         "copy move forgery detection dual stream",
     ]
+
+
+def _write_execution_report(path: Path, f1: float) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "success": True, "returncode": 0, "elapsed_sec": 900.0, "gpu_id": "GPU-1",
+        "results": {
+            "protocol": {"learning_rate": 1e-05},
+            "runs": [{"condition": "baseline", "seed": 42, "best_epoch": 3,
+                      "epochs": [{"epoch": 1, "train_loss": 0.4}], "test": {"f1": f1, "degenerate_masks": []}}],
+        },
+        "training": {"optimizer_steps": 411, "parameter_update_observed": True, "checkpoint_verified": True,
+                     "losses": [1.0] * 500, "scope": "single_process_pytorch_execution_not_scientific_validation",
+                     "checkpoint_matches": [{"optimizer": 0, "checkpoint": "outputs/final_baseline_42.pt",
+                                             "state": "saved_from_trained_model", "numeric_matches": 0}]},
+        "predictions": {"groups": [{"path": "outputs/pred/*.npy", "checked": 13}], "degenerate": []},
+    }), encoding="utf-8")
+
+
+def test_paper_and_review_evidence_include_verified_execution(
+    run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+) -> None:
+    _write_execution_report(run_dir / "stage-14/runs/attempt-1/execution_report.json", 0.90)
+    _write_execution_report(run_dir / "stage-15/verified_execution/execution_report.json", 0.94)
+    _write_prior_artifact(run_dir, 15, "refinement_log.json", json.dumps({"adopted": True, "iterations": 4}))
+    _write_prior_artifact(run_dir, 16, "experiment_summary.json", json.dumps({"metrics_summary": {"f1": 0.94}}))
+
+    paper_evidence = rc_executor._paper_experiment_evidence(run_dir)
+    assert "stage-15/verified_execution/execution_report.json" in paper_evidence
+    assert "saved_from_trained_model" in paper_evidence and '"f1": 0.94' in paper_evidence
+    assert "train_loss" not in paper_evidence and "losses" not in paper_evidence
+
+    review_evidence = rc_executor._collect_experiment_evidence(run_dir)
+    assert "Verified Execution Audit" in review_evidence and "final_baseline_42.pt" in review_evidence
+
+    _write_prior_artifact(run_dir, 22, "paper_revised.md", "# Abstract\n\nF1 0.94\n")
+    (run_dir / "stage-23").mkdir()
+    llm = FakeLLMClient(json.dumps({"score_1_to_10": 6, "verdict": "accept"}))
+    rc_executor._execute_quality_gate(run_dir / "stage-23", run_dir, rc_config, adapters, llm=llm)
+    assert "Verified execution audit" in llm.calls[0][-1]["content"]
+
+
+def test_execution_audit_uses_s14_when_s15_not_adopted(run_dir: Path) -> None:
+    _write_execution_report(run_dir / "stage-14/runs/attempt-2/execution_report.json", 0.90)
+    _write_execution_report(run_dir / "stage-15/verified_execution/execution_report.json", 0.94)
+    _write_prior_artifact(run_dir, 15, "refinement_log.json", json.dumps({
+        "adopted": False, "protocol_changes": {"protocol.learning_rate": {"initial": 1e-05, "refined": 3e-05}}}))
+
+    audit = rc_executor._verified_execution_audit(run_dir)
+    assert audit["source"] == "stage-14/runs/attempt-2/execution_report.json"
+    assert audit["per_run_results"][0]["test"] == {"f1": 0.90}
+    assert audit["iterative_refine"]["adopted"] is False
+    assert rc_executor._verified_execution_audit(run_dir / "missing") == {}
