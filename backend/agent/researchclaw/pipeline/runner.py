@@ -527,7 +527,12 @@ def _package_deliverables(
             bib_src = candidate
             break
     if bib_src is not None:
-        shutil.copy2(bib_src, dest / "references.bib")
+        from researchclaw.pipeline.executor import _escape_bib_specials
+
+        (dest / "references.bib").write_text(
+            _escape_bib_specials(bib_src.read_text(encoding="utf-8", errors="replace")),
+            encoding="utf-8",
+        )
         packaged.append("references.bib")
 
     # --- 4. Experiment code package ---

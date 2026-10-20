@@ -2949,7 +2949,9 @@ def _execute_literature_collect(
         artifacts.append("web_search_result.json")
     if bibtex_entries:
         bib_content = "\n\n".join(bibtex_entries) + "\n"
-        (stage_dir / "references.bib").write_text(bib_content, encoding="utf-8")
+        (stage_dir / "references.bib").write_text(
+            _escape_bib_specials(bib_content), encoding="utf-8"
+        )
         artifacts.append("references.bib")
         logger.info(
             "Stage 4: Wrote %d BibTeX entries to references.bib", len(bibtex_entries)
@@ -8867,7 +8869,7 @@ def _generate_latex_package(
         )
 
     (pkg_dir / "main.tex").write_text(tex_content, encoding="utf-8")
-    (pkg_dir / "references.bib").write_text(bib_text, encoding="utf-8")
+    (pkg_dir / "references.bib").write_text(_escape_bib_specials(bib_text), encoding="utf-8")
 
     # 4. Copy style files
     try:
@@ -9309,6 +9311,51 @@ def _paper_citation_keys(paper: str) -> set[str]:
     return keys
 
 
+_BIB_TEXT_FIELD_RE = re.compile(
+    r"\b(title|booktitle|journal|publisher|series|note|howpublished|school|"
+    r"institution|organization|address|edition|author|editor)\s*=\s*([{\"])",
+    re.IGNORECASE,
+)
+_BIB_SPECIAL_RE = re.compile(r"(?<!\\)([&%#])")
+
+
+def _escape_bib_specials(bib_text: str) -> str:
+    """Escape bare ``&``, ``%`` and ``#`` in BibTeX text fields.
+
+    A title like ``Detection & Localization`` makes bibtex/LaTeX fail
+    ("Misplaced alignment tab character &").  Already-escaped characters
+    are left alone, and url/doi/eprint fields (where these characters are
+    legal) are not touched.
+    """
+    out: list[str] = []
+    pos = 0
+    for m in _BIB_TEXT_FIELD_RE.finditer(bib_text):
+        if m.start() < pos:
+            continue
+        start = m.end()  # just after the opening delimiter
+        depth, i = 1, start
+        while i < len(bib_text) and depth:
+            ch = bib_text[i]
+            if ch == "\\":
+                i += 2
+                continue
+            if m.group(2) == "{":
+                depth += {"{": 1, "}": -1}.get(ch, 0)
+            elif ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+            elif ch == '"' and depth == 1:
+                depth = 0
+            i += 1
+        end = i - 1 if not depth else len(bib_text)
+        out.append(bib_text[pos:start])
+        out.append(_BIB_SPECIAL_RE.sub(r"\\\1", bib_text[start:end]))
+        pos = end
+    out.append(bib_text[pos:])
+    return "".join(out)
+
+
 def _bibliography_entries(bib_text: str) -> dict[str, str]:
     entries: dict[str, str] = {}
     for match in re.finditer(r"@\w+\s*\{\s*([^,\s]+)\s*,", bib_text):
@@ -9710,7 +9757,9 @@ def _execute_export_publish(
             )
             artifacts.append("paper_final_latex.md")
         # Write final references.bib
-        (stage_dir / "references.bib").write_text(bib_text, encoding="utf-8")
+        (stage_dir / "references.bib").write_text(
+            _escape_bib_specials(bib_text), encoding="utf-8"
+        )
         artifacts.append("references.bib")
         logger.info(
             "Stage 22: Exported references.bib with %d entries",
@@ -10349,7 +10398,9 @@ def _execute_citation_verify(
     (stage_dir / "verification_report.json").write_text(
         json.dumps(report_data, indent=2), encoding="utf-8"
     )
-    (stage_dir / "references_verified.bib").write_text(verified_bib, encoding="utf-8")
+    (stage_dir / "references_verified.bib").write_text(
+        _escape_bib_specials(verified_bib), encoding="utf-8"
+    )
     artifacts = ["verification_report.json", "references_verified.bib"]
     if doi_corrections:
         (stage_dir / "references_original.bib").write_text(bib_text, encoding="utf-8")
