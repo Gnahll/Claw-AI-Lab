@@ -6451,12 +6451,17 @@ def _render_figure_prompts(
         getattr(config.llm, "provider", "openai-compatible"),
         getattr(config.llm, "base_url", ""),
     )
-    api_key = image_api_key or getattr(config.llm, "api_key", "") or ""
+    api_key = (
+        image_api_key
+        or getattr(config.llm, "api_key", "")
+        or os.environ.get(getattr(config.llm, "api_key_env", "") or "", "")
+        or ""
+    )
     if not api_key:
         logger.warning(
-            "NanoBanana render skipped — no llm.api_key"
+            "NanoBanana render skipped — no llm.api_key or llm.api_key_env"
         )
-        return fig_prompts
+        return _fallback_unrendered_figures(fig_prompts, stage_dir / "figures")
 
     image_model = getattr(config.llm, "image_model", "") or ""
     if not image_model:
@@ -6495,7 +6500,7 @@ def _render_figure_prompts(
         })
     except Exception as exc:
         logger.warning("NanoBanana rendering failed: %s", exc)
-        return fig_prompts
+        return _fallback_unrendered_figures(fig_prompts, figures_dir)
 
     gen_map = {
         g["figure_id"]: g for g in result.data.get("generated", [])
@@ -6510,7 +6515,164 @@ def _render_figure_prompts(
         "NanoBanana rendered %d/%d figure prompts → %s",
         success_count, len(fig_prompts), figures_dir,
     )
+    return _fallback_unrendered_figures(fig_prompts, figures_dir)
+
+
+_QUOTED_LABEL_RE = re.compile(r"[“\"]([^”\"\n]{2,60})[”\"]")
+
+
+def _figure_nodes(fp: dict) -> list[str]:
+    """Box labels for a fallback diagram: quoted labels from the prompt."""
+    nodes: list[str] = []
+    for label in _QUOTED_LABEL_RE.findall(fp.get("raw_prompt", "")):
+        label = label.strip().rstrip(".,;:").strip()
+        if 2 <= len(label) <= 48 and label not in nodes:
+            nodes.append(label)
+    if len(nodes) < 2:
+        caption = fp.get("caption", "")
+        nodes = [p.strip() for p in re.split(r"[;,:]| while | and ", caption) if p.strip()][:4]
+    return nodes[:8] or [fp.get("figure_id", "figure")]
+
+
+def _draw_fallback_figure(fp: dict, output_path: Path) -> bool:
+    """Draw a schematic box diagram (caption title + labelled nodes).
+
+    Used when the image model is unavailable so that a FIGURE_PROMPT still
+    becomes a figure instead of leaking its prompt text into the paper.
+    """
+    try:
+        import textwrap
+
+        import matplotlib
+
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from matplotlib.patches import FancyBboxPatch
+    except ImportError:
+        return False
+
+    nodes = _figure_nodes(fp)
+    per_row = min(4, len(nodes))
+    rows = (len(nodes) + per_row - 1) // per_row
+    fig, ax = plt.subplots(figsize=(10, 1.6 + 1.5 * rows))
+    ax.set_xlim(0, per_row)
+    ax.set_ylim(-rows - 0.15, 0.55)
+    ax.axis("off")
+    title = textwrap.fill(fp.get("caption") or fp.get("figure_id", ""), 110)
+    ax.set_title(title, fontsize=10, loc="left")
+    centers: list[tuple[float, float]] = []
+    for i, label in enumerate(nodes):
+        row, col = divmod(i, per_row)
+        x, y = col + 0.5, -row - 0.2
+        centers.append((x, y))
+        ax.add_patch(FancyBboxPatch(
+            (x - 0.4, y - 0.3), 0.8, 0.6,
+            boxstyle="round,pad=0.02", facecolor="#E8F0FA", edgecolor="#4477AA", linewidth=1.2,
+        ))
+        ax.text(x, y, textwrap.fill(label, 18), ha="center", va="center", fontsize=8.5)
+    for (x0, y0), (x1, y1) in zip(centers, centers[1:]):
+        if y0 == y1:
+            start, end = (x0 + 0.4, y0), (x1 - 0.4, y1)
+        else:
+            start, end = (x0, y0 - 0.3), (x1, y1 + 0.3)
+        ax.annotate("", xy=end, xytext=start,
+                    arrowprops={"arrowstyle": "->", "color": "#555555", "lw": 1.2})
+    ax.text(0, -rows - 0.1, "Schematic overview", fontsize=7, color="#888888")
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return output_path.is_file()
+
+
+def _fallback_unrendered_figures(fig_prompts: list[dict], figures_dir: Path) -> list[dict]:
+    """Draw a fallback diagram for every prompt the image model did not render.
+
+    Fallbacks are named ``<figure_id>_fallback.png`` so a later stage still
+    retries the real render (S22 only reuses ``<figure_id>.png``).
+    """
+    for fp in fig_prompts:
+        if fp.get("success") and fp.get("output_path") and Path(fp["output_path"]).is_file():
+            continue
+        out = figures_dir / f"{fp.get('figure_id', 'figure')}_fallback.png"
+        try:
+            ok = _draw_fallback_figure(fp, out)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Fallback figure for %s failed: %s", fp.get("figure_id"), exc)
+            ok = False
+        fp["output_path"] = str(out) if ok else ""
+        fp["success"] = ok
+        fp["fallback"] = ok
     return fig_prompts
+
+
+_FIGURE_CAPTION_LINE_RE = re.compile(r"\s*\n\*Figure\s+\d+[.:]\s*(.+?)\*[ \t]*(?=\n|\Z)")
+
+
+def _figure_prompts_to_markdown(
+    paper: str, run_dir: Path, chart_dir: Path
+) -> tuple[str, list[str]]:
+    """Replace ``<!-- FIGURE_PROMPT -->`` blocks with markdown images.
+
+    Uses the newest rendered figure (S22, then S20); if none exists a
+    fallback diagram is drawn.  The figure is copied into *chart_dir* and
+    the hand-written ``*Figure N. ...*`` line after the block becomes its
+    caption.  Returns the new paper and the copied file names.
+    """
+    import shutil
+
+    meta: dict[str, dict] = {}
+    # Older stages first so the revision (S22) overrides the draft (S20).
+    for path in [
+        *reversed(_newest_stage_files(run_dir, "stage-20*/figure_prompts.json")),
+        *reversed(_newest_stage_files(run_dir, "stage-22*/figure_prompts.json")),
+    ]:
+        try:
+            for fp in json.loads(path.read_text(encoding="utf-8")):
+                if isinstance(fp, dict) and fp.get("figure_id"):
+                    meta[fp["figure_id"]] = fp
+        except (OSError, ValueError):
+            continue
+
+    copied: list[str] = []
+    out: list[str] = []
+    pos = 0
+    for m in _FIGURE_PROMPT_RE.finditer(paper):
+        out.append(paper[pos:m.start()])
+        pos = m.end()
+        parsed = (_extract_figure_prompts(m.group(0)) or [{}])[0]
+        fid = parsed.get("figure_id") or f"figure_{len(copied) + 1}"
+        fp = {**parsed, **meta.get(fid, {})}
+        caption = fp.get("caption", "")
+        cap = _FIGURE_CAPTION_LINE_RE.match(paper, pos)
+        if cap:
+            caption = cap.group(1).strip()
+            pos = cap.end()
+
+        source: Path | None = None
+        candidates = [Path(fp["output_path"])] if fp.get("output_path") else []
+        for name in (f"{fid}.*", f"{fid}_fallback.*"):
+            for stage in ("stage-22*", "stage-20*"):
+                candidates += _newest_stage_files(run_dir, f"{stage}/figures/{name}")
+        for cand in candidates:
+            if cand.is_file() and cand.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf"}:
+                source = cand
+                break
+        target = chart_dir / f"{fid}{source.suffix.lower() if source else '.png'}"
+        try:
+            if source is not None:
+                chart_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, target)
+            elif not _draw_fallback_figure(fp, target):
+                logger.warning("Stage 25: Dropped FIGURE_PROMPT %s (no figure available)", fid)
+                continue
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Stage 25: Dropped FIGURE_PROMPT %s: %s", fid, exc)
+            continue
+        copied.append(target.name)
+        alt = caption.replace("[", "(").replace("]", ")") or fid
+        out.append(f"![{alt}](charts/{target.name})")
+    out.append(paper[pos:])
+    return "".join(out), copied
 
 
 def _read_figure_manifest(run_dir: Path) -> dict[str, dict]:
@@ -9521,6 +9683,17 @@ def _execute_export_publish(
         logger.warning(
             "IMP-24: Numbers repeated >3 times: %s",
             _repeated,
+        )
+
+    # FIGURE_PROMPT blocks are instructions for the image model; turn them
+    # into real figures (rendered or fallback) copied into charts/.
+    final_paper, _prompt_figures = _figure_prompts_to_markdown(
+        final_paper, run_dir, stage_dir / "charts"
+    )
+    if _prompt_figures:
+        logger.info(
+            "Stage 25: Converted %d FIGURE_PROMPT block(s) into figures: %s",
+            len(_prompt_figures), _prompt_figures,
         )
 
     final_paper, _dup_figures = _dedupe_markdown_figures(final_paper)
