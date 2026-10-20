@@ -95,6 +95,16 @@ class TestRenderPreamble:
         assert r"\begin{document}" in tex
         assert r"\maketitle" in tex
 
+    def test_algorithm_packages_accept_both_command_styles(self) -> None:
+        # Converter emits \STATE/\RETURN; papers write \State/\Require (algpseudocode).
+        for template in (NEURIPS_2024, ICLR_2025, ICML_2025):
+            tex = template.render_preamble("Title", "Author", "Abstract")
+            assert r"\usepackage{algpseudocode}" in tex
+            assert r"\usepackage{algorithmic}" not in tex
+            assert r"\usepackage{algcompatible}" not in tex  # breaks \Require
+            assert r"\providecommand{\STATE}{\State}" in tex
+            assert r"\providecommand{\RETURN}{\State \Return}" in tex
+
     def test_iclr_preamble_no_options(self) -> None:
         tex = ICLR_2025.render_preamble("Title", "Author", "Abstract")
         assert r"\documentclass{article}" in tex  # no options
@@ -292,6 +302,14 @@ class TestConvertInline:
         result = _convert_inline("the value $x^2$ is")
         assert "$x^2$" in result
 
+    def test_math_inside_command_argument_restored(self) -> None:
+        # S15 paper: the \For argument was protected after the math inside it,
+        # leaving "\x00PROT0\x00" in paper.tex and breaking compilation.
+        result = _convert_inline(r"\For{each RGB scale \(s\)} and \textbf{\(a\) or $b$}")
+        assert r"\For{each RGB scale \(s\)}" in result
+        assert r"\textbf{\(a\) or $b$}" in result
+        assert "PROT" not in result and "\x00" not in result
+
 
 class TestEscapeLatex:
     """Tests for _escape_latex()."""
@@ -305,6 +323,10 @@ class TestEscapeLatex:
     def test_math_not_escaped(self) -> None:
         result = _escape_latex(r"value \(x_1\) here")
         assert r"\(x_1\)" in result  # underscore inside math preserved
+
+    def test_math_inside_command_argument_restored(self) -> None:
+        result = _escape_latex(r"\emph{rate \(r_1\)} & more")
+        assert result == r"\emph{rate \(r_1\)} \& more"
 
 
 class TestBuildBody:

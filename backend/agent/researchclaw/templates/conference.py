@@ -16,6 +16,15 @@ from pathlib import Path
 # Root directory for bundled style files
 _STYLES_DIR = Path(__file__).parent / "styles"
 
+# Old ``algorithmic`` command names mapped onto ``algpseudocode``.
+_ALGORITHMIC_ALIASES = (
+    ("STATE", "\\State"), ("REQUIRE", "\\Require"), ("ENSURE", "\\Ensure"),
+    ("IF", "\\If"), ("ELSIF", "\\ElsIf"), ("ELSE", "\\Else"), ("ENDIF", "\\EndIf"),
+    ("FOR", "\\For"), ("FORALL", "\\ForAll"), ("ENDFOR", "\\EndFor"),
+    ("WHILE", "\\While"), ("ENDWHILE", "\\EndWhile"), ("REPEAT", "\\Repeat"),
+    ("UNTIL", "\\Until"), ("RETURN", "\\State \\Return"), ("COMMENT", "\\Comment"),
+)
+
 
 @dataclass(frozen=True)
 class ConferenceTemplate:
@@ -43,6 +52,12 @@ class ConferenceTemplate:
         # Style options (e.g. "preprint") go on the style package, not documentclass
         options = f"[{self.style_options}]" if self.style_options else ""
         pkg_lines = "\n".join(f"\\usepackage{{{p}}}" for p in self.extra_packages)
+        if "algpseudocode" in self.extra_packages:
+            # Papers write algpseudocode (\State, \Require); the converter emits the
+            # old algorithmic names (\STATE).  algcompatible would break \Require.
+            pkg_lines += "\n" + "".join(
+                f"\\providecommand{{\\{old}}}{{{new}}}" for old, new in _ALGORITHMIC_ALIASES
+            )
 
         author_block = self._render_authors(authors)
 
@@ -147,7 +162,7 @@ NEURIPS_2024 = ConferenceTemplate(
         "graphicx",
         "natbib",
         "algorithm",
-        "algorithmic",
+        "algpseudocode",
         "adjustbox",
     ),
     author_format="neurips",
@@ -175,7 +190,7 @@ ICLR_2025 = ConferenceTemplate(
         "graphicx",
         "natbib",
         "algorithm",
-        "algorithmic",
+        "algpseudocode",
         "adjustbox",
     ),
     author_format="iclr",
@@ -202,7 +217,7 @@ ICML_2025 = ConferenceTemplate(
         "graphicx",
         "natbib",
         "algorithm",
-        "algorithmic",
+        "algpseudocode",
         "adjustbox",
     ),
     author_format="icml",
@@ -232,7 +247,7 @@ NEURIPS_2025 = ConferenceTemplate(
         "graphicx",
         "natbib",
         "algorithm",
-        "algorithmic",
+        "algpseudocode",
         "adjustbox",
     ),
     author_format="neurips",
@@ -260,7 +275,7 @@ ICLR_2026 = ConferenceTemplate(
         "graphicx",
         "natbib",
         "algorithm",
-        "algorithmic",
+        "algpseudocode",
         "adjustbox",
     ),
     author_format="iclr",
@@ -287,7 +302,7 @@ ICML_2026 = ConferenceTemplate(
         "graphicx",
         "natbib",
         "algorithm",
-        "algorithmic",
+        "algpseudocode",
         "adjustbox",
     ),
     author_format="icml",
