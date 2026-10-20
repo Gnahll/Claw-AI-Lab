@@ -344,6 +344,64 @@ def test_s15_cannot_relabel_stale_baseline_as_success(tmp_path, monkeypatch):
     assert result.status == StageStatus.FAILED
 
 
+def _run_s15_with_edit(tmp_path, monkeypatch, refined_lr):
+    from researchclaw.pipeline.iterative_refine import runtime
+    from researchclaw.pipeline.claw_engine.turn_loop import TurnResult
+
+    script = ("import json\nfrom pathlib import Path\n"
+              "Path('results.json').write_text(json.dumps({'metric': %s, 'protocol': {'learning_rate': %s, 'epochs': 10},"
+              " 'split_ids': {'test': ['a', 'b']}}))\n")
+    experiment = tmp_path / "stage-11/experiment"
+    experiment.mkdir(parents=True)
+    (experiment / "main.py").write_text(script % (0.5, 1e-05))
+    runs = tmp_path / "stage-14/runs"
+    runs.mkdir(parents=True)
+    (runs / "results.json").write_text(json.dumps(
+        {"metric": 0.5, "protocol": {"learning_rate": 1e-05, "epochs": 10}, "split_ids": {"test": ["a", "b"]}}))
+
+    def loop(**kwargs):
+        def run_turn(message):
+            (kwargs["workspace"] / "main.py").write_text(script % (0.4, refined_lr))
+            return TurnResult(final_text="done")
+        return SimpleNamespace(run_turn=run_turn)
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setattr(runtime, "AgentTurnLoop", loop)
+    stage = tmp_path / "stage-15"
+    result = runtime.IterativeRefineRuntime().execute(stage, tmp_path, configuration(), None,
+                                                    llm=SimpleNamespace(config=SimpleNamespace(primary_model="test")))
+    assert result.status == StageStatus.DONE
+    return stage, experiment, json.loads((stage / "refinement_log.json").read_text())
+
+
+def test_s15_rejects_run_that_changes_hyperparameters(tmp_path, monkeypatch):
+    stage, experiment, log = _run_s15_with_edit(tmp_path, monkeypatch, refined_lr=3e-05)
+    assert log["adopted"] is False and log["refinement_rejected"] is True
+    assert log["protocol_changes"] == {"protocol.learning_rate": {"initial": 1e-05, "refined": 3e-05}}
+    assert log["final_metric"] == 0.5 and log["exploratory_metric"] == 0.4 and log["improved"] is False
+    assert json.loads((stage / "results.json").read_text())["metric"] == 0.5
+    assert json.loads((stage / "experiment_final/results.json").read_text())["metric"] == 0.5
+    assert json.loads((stage / "exploratory_results.json").read_text())["metric"] == 0.4
+    assert "1e-05" in (experiment / "main.py").read_text()
+    assert "1e-05" in (stage / "experiment_final/main.py").read_text()
+
+
+def test_s15_adopts_bug_fix_that_keeps_protocol(tmp_path, monkeypatch):
+    stage, experiment, log = _run_s15_with_edit(tmp_path, monkeypatch, refined_lr=1e-05)
+    assert log["adopted"] is True and "refinement_rejected" not in log
+    assert log["final_metric"] == 0.4
+    assert json.loads((stage / "results.json").read_text())["metric"] == 0.4
+    assert "0.4" in (experiment / "main.py").read_text()
+
+
+def test_s15_prompt_forbids_tuning():
+    from researchclaw.pipeline.iterative_refine.system_prompt import build_system_prompt, build_user_message
+
+    prompt = build_system_prompt() + build_user_message(experiment_dir="w", experiment_files=["main.py"])
+    assert "lr tuning" not in prompt and "Hyperparameter tuning" not in prompt
+    assert "NOT a tuning stage" in prompt and "Frozen protocol" in prompt
+
+
 def test_removed_standalone_workflow_is_not_exposed():
     root = Path(__file__).resolve().parents[3]
     assert not (root / "frontend/src/components/TrainingPanel.tsx").exists()

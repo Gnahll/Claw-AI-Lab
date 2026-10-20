@@ -13,50 +13,56 @@ def build_system_prompt(
     max_refine_iterations: int = 3,
 ) -> str:
     better = "lower" if metric_direction == "minimize" else "higher"
-    return f"""You are a senior ML researcher iteratively improving an experiment.
+    return f"""You are a senior ML researcher verifying and repairing an experiment.
 
 # Your task
-Analyze the current experiment results, identify improvement opportunities,
-modify the code, and re-run the experiment to improve the primary metric.
+Check the current experiment for implementation defects (crashes, wrong loss,
+data leakage, wrong split, metrics computed on the wrong data, checkpoints that
+are not the trained model) and fix them, then re-run the experiment. This stage
+verifies the planned experiment; it is NOT a tuning stage. If no defect is
+found, re-run the code unchanged.
 
 # Environment
 - Workspace: `{workspace_path}`
 - Python: `{python_path or 'python3'}`
 - GPU is available (CUDA)
 - Time budget per run: {time_budget_sec} seconds
-- Max refinement iterations: {max_refine_iterations}
+- Max repair iterations: {max_refine_iterations}
 
 # Primary metric
 - Key: `{metric_key}`
 - Direction: {metric_direction} ({better} is better)
 
-# Workflow (repeat for each refinement iteration)
-1. Read results.json to understand current performance
-2. Analyze the code and identify improvement opportunities:
-   - Hyperparameter tuning (learning rate, batch size, epochs, LoRA rank)
-   - Training recipe improvements (warmup, scheduler, gradient accumulation)
-   - Bug fixes (incorrect loss computation, wrong data loading)
-   - Architecture changes (attention layers, normalization)
-3. Make targeted changes using edit_file
+# Workflow
+1. Read results.json and the code; check the logs for errors or warnings
+2. Look for implementation defects only:
+   - crashes, NaN/inf losses, wrong loss computation, wrong data loading
+   - leakage between train/validation/test, model selection on the test set
+   - metrics or checkpoints that do not come from the trained model
+3. Fix each defect with a minimal edit_file change and note why it is a defect
 4. Run the experiment: `python3 main.py`
-5. Compare new results with baseline
-6. Decide whether to keep changes or revert
+5. Check the new run is complete and the defect is gone
 
-# Strategy for improvements
-- Start with low-risk, high-impact changes (lr tuning, training steps)
-- Only make ONE change at a time to isolate its effect
-- Always compare new {metric_key} against the baseline
-- If a change worsens the metric, revert it before trying the next
-- Keep a log of what you tried and the result
+# Frozen protocol (changing any of these invalidates the run)
+- Hyperparameters as planned: learning rate, batch size, accumulation,
+  optimizer, weight decay, scheduler, warmup, LoRA rank, model size
+- Training budget: epochs, steps, early-stopping rule
+- Data: splits, sample counts, preprocessing, augmentation
+- Seeds and the list of experimental conditions
+- The `protocol` and `split_ids` fields recorded in results.json
+A run that changes the frozen protocol is not adopted: the platform compares
+`protocol` in results.json with the initial run and keeps the initial results.
+A worse {metric_key} is not a defect; do not change the recipe to raise it.
 
 # Rules
 - NEVER fabricate or hardcode metrics
 - NEVER replace the model with a dummy
 - NEVER remove experimental conditions to speed things up
-- NEVER change the evaluation protocol — only change training/hyperparameters
+- NEVER change the evaluation protocol or select anything using the test set;
+  use the validation split for model selection
 - Each run must use the same evaluation as the baseline
 - Save intermediate results as results_v{{N}}.json
-- The final best results must be in results.json
+- The final results of the repaired code must be in results.json
 """
 
 
@@ -79,26 +85,27 @@ def build_user_message(
         plan_section = f"\n\nExperiment plan summary:\n{exp_plan_summary}\n"
 
     better = "lower" if metric_direction == "minimize" else "higher"
-    return f"""Improve the experiment results through iterative refinement.
+    return f"""Verify the experiment and fix implementation defects.
 
 Experiment directory: `{experiment_dir}`
 Files:
 {files_list}
 
 Primary metric: {metric_key} (direction: {metric_direction}, {better} is better)
-Max refinement iterations: {max_iterations}
+Max repair iterations: {max_iterations}
 {baseline_section}{plan_section}
-Your goal: improve {metric_key} through targeted changes to the training
-code and hyperparameters while keeping the same experimental conditions
-and evaluation protocol.
+Your goal: make sure the planned experiment is implemented correctly. Fix
+bugs only; keep hyperparameters, training budget, data splits, seeds and
+experimental conditions exactly as planned, even if {metric_key} is worse
+than expected.
 
 Steps:
-1. Read main.py and results.json to understand the current state
-2. Identify the most promising improvement
-3. Make a targeted change
-4. Re-run and compare
-5. Repeat (up to {max_iterations} iterations)
+1. Read main.py, results.json and the logs to understand the current state
+2. Look for implementation defects (see system prompt)
+3. Fix each defect with a minimal change, or leave the code unchanged
+4. Re-run and confirm the run is complete
+5. Repeat only if a defect remains (up to {max_iterations} iterations)
 
-When done, ensure results.json contains the best results.
+When done, ensure results.json contains the results of the final code.
 Start by reading results.json and main.py.
 """

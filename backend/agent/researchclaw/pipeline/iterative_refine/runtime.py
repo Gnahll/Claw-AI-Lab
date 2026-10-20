@@ -155,10 +155,27 @@ class IterativeRefineRuntime:
 
         # Collect final results
         final_results = self._collect_final_results(workspace)
-        improved = self._check_improvement(baseline_results, final_results, metric_key, metric_direction)
-
-        # Copy back
-        self._copy_results_back(workspace, experiment_dir, stage_dir, session)
+        # S15 may only fix bugs. A run that changed the planned protocol
+        # (learning rate, epochs, seeds, splits, ...) is kept as exploratory
+        # and the initial S14 results stay the adopted ones.
+        protocol_changes = self._protocol_changes(baseline_results, final_results)
+        rejected = bool(protocol_changes)
+        exploratory_metric = None
+        if rejected:
+            session.log(
+                "RESULT",
+                f"Refined run changed the frozen protocol ({', '.join(protocol_changes)}); "
+                "keeping initial results",
+            )
+            exploratory_metric = self._extract_metric(final_results, metric_key)
+            (workspace / "results.json").replace(stage_dir / "exploratory_results.json")
+            (stage_dir / "results.json").write_text(baseline_results, encoding="utf-8")
+            final_results = baseline_results
+            improved = False
+        else:
+            improved = self._check_improvement(baseline_results, final_results, metric_key, metric_direction)
+            # Copy back
+            self._copy_results_back(workspace, experiment_dir, stage_dir, session)
 
         session.log(
             "RESULT",
@@ -179,7 +196,17 @@ class IterativeRefineRuntime:
             "tool_calls": turn_result.tool_calls,
             "errors": turn_result.errors,
             "elapsed_sec": round(turn_result.elapsed_sec, 1),
+            "adopted": not rejected,
         }
+        if rejected:
+            log_data.update({
+                "refinement_rejected": True,
+                "rejection_reason": "S15 may only fix bugs; the refined run changed the planned protocol, "
+                                    "so the initial experiment results are kept",
+                "protocol_changes": protocol_changes,
+                "exploratory_metric": exploratory_metric,
+                "exploratory_results": "exploratory_results.json",
+            })
         (stage_dir / "refinement_log.json").write_text(
             json.dumps(log_data, indent=2), encoding="utf-8",
         )
@@ -187,7 +214,11 @@ class IterativeRefineRuntime:
 
         # Write experiment_final/
         final_dir = stage_dir / "experiment_final"
-        self._write_final_experiment(workspace, final_dir, session)
+        if rejected:
+            self._write_final_experiment(experiment_dir, final_dir, session)
+            (final_dir / "results.json").write_text(baseline_results, encoding="utf-8")
+        else:
+            self._write_final_experiment(workspace, final_dir, session)
         session.add_artifact("experiment_final/")
 
         return StageResult(
@@ -343,6 +374,31 @@ class IterativeRefineRuntime:
                 return float(final_val) > float(base_val)
         except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
             return False
+
+    @staticmethod
+    def _protocol_changes(baseline_str: str, final_str: str) -> dict[str, dict[str, Any]]:
+        """Return frozen-protocol fields whose value differs between the runs.
+
+        Compares the ``protocol`` dict and ``split_ids`` recorded in
+        results.json. Fields the refined run dropped count as changes; fields
+        it only added do not. Runs without a recorded protocol are not checked.
+        """
+        try:
+            baseline = json.loads(baseline_str) if baseline_str else None
+            final = json.loads(final_str) if final_str else None
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        if not isinstance(baseline, dict) or not isinstance(final, dict):
+            return {}
+        changes: dict[str, dict[str, Any]] = {}
+        base_protocol, final_protocol = baseline.get("protocol"), final.get("protocol")
+        if isinstance(base_protocol, dict) and isinstance(final_protocol, dict):
+            for key, value in base_protocol.items():
+                if final_protocol.get(key) != value:
+                    changes[f"protocol.{key}"] = {"initial": value, "refined": final_protocol.get(key)}
+        if "split_ids" in baseline and "split_ids" in final and baseline["split_ids"] != final["split_ids"]:
+            changes["split_ids"] = {"initial": "<changed>", "refined": "<changed>"}
+        return changes
 
     @staticmethod
     def _copy_results_back(
