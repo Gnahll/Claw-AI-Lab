@@ -1194,6 +1194,9 @@ def _render_code_block(lang: str, code: str) -> str:
     IMP-28: Detects pseudocode blocks (language hint 'algorithm' /
     'pseudocode', or 3+ algorithm keywords) and renders them inside an
     ``algorithm`` + ``algorithmic`` environment instead of verbatim.
+    Templates load ``algpseudocode`` with ``algcompatible``, so both the
+    ``\\STATE`` commands emitted here and ``\\State``-style pseudocode
+    written directly in the paper compile.
 
     Replaces Unicode characters (Greek letters, arrows, math symbols)
     with ASCII equivalents so pdflatex can compile the block.
@@ -1373,8 +1376,9 @@ def _convert_inline(text: str) -> str:
         text,
     )
 
-    # Restore protected segments
-    for idx, val in enumerate(protected):
+    # Restore protected segments, newest first: a later segment such as
+    # ``\For{scale \(s\)}`` can contain the placeholder of an earlier one.
+    for idx, val in reversed(list(enumerate(protected))):
         text = text.replace(f"\x00PROT{idx}\x00", val)
 
     return text
@@ -1607,7 +1611,7 @@ def _escape_latex(text: str) -> str:
 
     text = _LATEX_SPECIAL.sub(r"\\\1", text)
 
-    for idx, val in enumerate(protected):
+    for idx, val in reversed(list(enumerate(protected))):
         text = text.replace(f"\x00PROT{idx}\x00", val)
 
     return text
