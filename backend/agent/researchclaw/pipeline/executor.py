@@ -8690,19 +8690,18 @@ def _generate_latex_package(
     # 3. Use LLM to convert markdown to LaTeX
     if llm is not None:
         _system_prompt = (
-            "You are an expert academic LaTeX typesetter. You have TWO tasks:\n"
-            "Task 1: Convert the markdown paper into a complete .tex file.\n"
-            "Task 2: Generate a matching references.bib file.\n\n"
-            "Output format: First output the complete .tex inside ```latex ... ```, "
-            "then output the complete .bib inside ```bib ... ```.\n\n"
+            "You are an expert academic LaTeX typesetter. Convert the markdown paper "
+            "into a complete .tex file. The references.bib file already exists and is "
+            "used as is; do not write a .bib file.\n\n"
+            "Output format: output the complete .tex inside ```latex ... ```.\n\n"
             "STRICT RULES:\n"
             "1. The .tex must be complete and compilable. No explanations outside code blocks.\n"
             "2. Use \\usepackage[preprint]{neurips_2025} as the style package.\n"
-            "3. All citations [cite_xxx] in the markdown MUST become \\cite{xxx} in LaTeX. "
-            "The key 'xxx' must match an entry in your generated .bib file.\n"
-            "4. Generate the .bib file with REAL, accurate bibliography entries for every "
-            "\\cite{} used in the paper. Use the citation context to identify the correct "
-            "paper (author, title, year, venue). Do NOT fabricate — use real papers.\n"
+            "3. All citations [cite_xxx] in the markdown MUST become \\cite{xxx} in LaTeX, "
+            "keeping the key 'xxx' unchanged.\n"
+            "4. Cite only keys from the list of available BibTeX keys. Never add a new "
+            "citation or invent a key; keep a citation whose key is missing unchanged so "
+            "it can be reviewed.\n"
             "5. References section: Do NOT include a hand-written reference list in the .tex. "
             "Use \\bibliographystyle{plainnat} and \\bibliography{references} at the end.\n"
             "5. Section hierarchy: Use \\section{} for main sections (Introduction, "
@@ -8795,9 +8794,10 @@ def _generate_latex_package(
             elif "```bibtex" in raw_output:
                 _llm_bib = raw_output.split("```bibtex", 1)[1].split("```", 1)[0].strip()
             if _llm_bib and "@" in _llm_bib:
-                bib_text = _llm_bib
-                logger.info("LaTeX package: Using LLM-generated bib (%d entries)",
-                            _llm_bib.count("@"))
+                # Entries written by the LLM are not from a literature source;
+                # the collected bibliography is kept as is.
+                logger.info("LaTeX package: Ignored LLM-generated bib (%d entries); "
+                            "keeping the collected references.bib", _llm_bib.count("@"))
 
             # Validate
             if "\\documentclass" not in tex_content:
@@ -10181,6 +10181,23 @@ def _remove_citations_from_text(text: str, keys_to_remove: set[str]) -> str:
     return text
 
 
+def _correct_bibtex_dois(bib_text: str, corrections: dict[str, str]) -> str:
+    """Replace or drop the doi field of entries whose DOI points elsewhere.
+
+    *corrections* maps cite key -> DOI of the matched paper ("" = drop).
+    """
+    doi_field = re.compile(r"^[ \t]*doi\s*=\s*(\{[^{}]*\}|\"[^\"]*\")[ \t]*,?[ \t]*\n?", re.IGNORECASE | re.MULTILINE)
+    entries = _bibliography_entries(bib_text)
+    for key, new_doi in corrections.items():
+        entry = entries.get(key)
+        if not entry:
+            continue
+        line = f"  doi = {{{new_doi}}},\n" if new_doi else ""
+        fixed = doi_field.sub(lambda _m: line, entry, count=1)
+        bib_text = bib_text.replace(entry, fixed, 1)
+    return bib_text
+
+
 def _execute_citation_verify(
     stage_dir: Path,
     run_dir: Path,
@@ -10283,12 +10300,29 @@ def _execute_citation_verify(
         "unresolved_citation_keys": sorted(missing_keys),
         "low_relevance_citation_keys": sorted(low_relevance_keys),
     })
-    report_data["note"] = "Original citations and bibliography are preserved. Pending and low-relevance entries require review; no references were removed."
+    # A DOI that resolves to a different paper is metadata, not a citation:
+    # point it at the matched paper, or drop it when no DOI is known.
+    doi_corrections = {
+        result.cite_key: result.corrected_doi
+        for result in report.results
+        if result.bibtex_doi and result.status == VerifyStatus.VERIFIED
+    }
+    verified_bib = _correct_bibtex_dois(bib_text, doi_corrections) if doi_corrections else bib_text
+    report_data["summary"]["corrected_doi_keys"] = sorted(doi_corrections)
+    report_data["note"] = (
+        "Original citations and bibliography are preserved. Pending and low-relevance entries "
+        "require review; no references were removed."
+        + (" DOIs that pointed to a different paper were corrected in references_verified.bib "
+           "(original kept as references_original.bib)." if doi_corrections else "")
+    )
     (stage_dir / "verification_report.json").write_text(
         json.dumps(report_data, indent=2), encoding="utf-8"
     )
-    (stage_dir / "references_verified.bib").write_text(bib_text, encoding="utf-8")
+    (stage_dir / "references_verified.bib").write_text(verified_bib, encoding="utf-8")
     artifacts = ["verification_report.json", "references_verified.bib"]
+    if doi_corrections:
+        (stage_dir / "references_original.bib").write_text(bib_text, encoding="utf-8")
+        artifacts.append("references_original.bib")
     if paper_text.strip():
         annotated = paper_text
         if pending_keys or missing_keys or low_relevance_keys:
