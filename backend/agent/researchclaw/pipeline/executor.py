@@ -7580,7 +7580,8 @@ def _execute_paper_draft(
                 _charts_path = _chart_stage_dir / "charts"
                 if _charts_path.is_dir():
                     for _cf in sorted(_charts_path.glob("*.png")):
-                        _chart_files.append(_cf.name)
+                        if _cf.name not in _chart_files:
+                            _chart_files.append(_cf.name)
         if _chart_files:
             _manifest = _read_figure_manifest(run_dir)
             _n = len(_chart_files)
@@ -8353,6 +8354,9 @@ def _execute_paper_revision(
             "selected_source": "original_draft_no_llm",
             "remaining_conflicts": draft_conflicts,
         }
+    revised, _dup_figures = _dedupe_markdown_figures(revised)
+    if _dup_figures:
+        logger.info("Stage 22: Removed %d repeated figure reference(s)", _dup_figures)
     (stage_dir / "paper_revised.md").write_text(revised, encoding="utf-8")
 
     _revision_artifacts = ["paper_revised.md"]
@@ -8453,6 +8457,52 @@ def _execute_paper_revision(
     )
 
 
+_MD_IMAGE_LINE_RE = re.compile(r"^[ \t]*!\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)[ \t]*$", re.MULTILINE)
+_TEX_FIGURE_RE = re.compile(r"\\begin\{figure\*?\}.*?\\end\{figure\*?\}\n?", re.DOTALL)
+_TEX_GRAPHIC_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}")
+
+
+def _figure_key(path: str) -> str:
+    return Path(path.strip().replace("\\", "/")).name.lower()
+
+
+def _dedupe_markdown_figures(paper: str) -> tuple[str, int]:
+    """Drop repeated image lines that show an already embedded figure file."""
+    seen: set[str] = set()
+    removed = 0
+
+    def _keep_first(match: re.Match[str]) -> str:
+        nonlocal removed
+        key = _figure_key(match.group(1))
+        if key in seen:
+            removed += 1
+            return ""
+        seen.add(key)
+        return match.group(0)
+
+    deduped = _MD_IMAGE_LINE_RE.sub(_keep_first, paper)
+    if removed:
+        deduped = re.sub(r"\n{3,}", "\n\n", deduped)
+    return deduped, removed
+
+
+def _dedupe_latex_figures(tex: str) -> tuple[str, int]:
+    """Drop figure environments whose graphics were all included earlier."""
+    seen: set[str] = set()
+    removed = 0
+
+    def _keep_first(match: re.Match[str]) -> str:
+        nonlocal removed
+        keys = {_figure_key(g) for g in _TEX_GRAPHIC_RE.findall(match.group(0))}
+        if keys and keys <= seen:
+            removed += 1
+            return ""
+        seen.update(keys)
+        return match.group(0)
+
+    return _TEX_FIGURE_RE.sub(_keep_first, tex), removed
+
+
 def _generate_latex_package(
     stage_dir: Path,
     run_dir: Path,
@@ -8483,8 +8533,9 @@ def _generate_latex_package(
         run_dir / "stage-14" / "charts",
     ]:
         if _fig_src.is_dir():
-            for _fig_file in _fig_src.iterdir():
-                if _fig_file.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps"}:
+            for _fig_file in sorted(_fig_src.iterdir()):
+                if (_fig_file.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps"}
+                        and _fig_file.name not in _fig_files):
                     _shutil_lp.copy2(_fig_file, fig_dir / _fig_file.name)
                     _fig_files.append(_fig_file.name)
 
@@ -8531,7 +8582,8 @@ def _generate_latex_package(
             "7. Convert <!-- FIGURE_PROMPT --> comment blocks into \\begin{figure} "
             "environments. Match figure prompts to available figure files by their "
             "content/description.\n"
-            "8. Include ALL available figures in appropriate locations in the paper.\n"
+            "8. Include each figure the paper references exactly once; never repeat a "
+            "figure file in a second figure environment.\n"
             "9. Preserve all math equations (both inline $...$ and display $$...$$).\n"
             "10. Convert markdown tables to LaTeX \\begin{table}...\\end{table} with "
             "\\begin{tabular}, \\toprule, \\midrule, \\bottomrule.\n"
@@ -8619,6 +8671,9 @@ def _generate_latex_package(
                 raise ValueError("LLM output missing \\documentclass")
             if "\\end{document}" not in tex_content:
                 tex_content += "\n\n\\end{document}\n"
+            tex_content, _dup_figures = _dedupe_latex_figures(tex_content)
+            if _dup_figures:
+                logger.info("LaTeX package: Removed %d repeated figure environment(s)", _dup_figures)
 
             logger.info("LaTeX package: LLM conversion successful (%d chars)", len(tex_content))
         except Exception as e:
@@ -9303,6 +9358,9 @@ def _execute_export_publish(
             _repeated,
         )
 
+    final_paper, _dup_figures = _dedupe_markdown_figures(final_paper)
+    if _dup_figures:
+        logger.info("Stage 25: Removed %d repeated figure reference(s)", _dup_figures)
     (stage_dir / "paper_final.md").write_text(final_paper, encoding="utf-8")
 
     # Initialize artifacts list

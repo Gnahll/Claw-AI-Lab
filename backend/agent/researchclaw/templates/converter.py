@@ -29,6 +29,8 @@ def _reset_render_counters() -> None:
     """Reset per-render figure and table counters for the current thread."""
     _render_counters.table = 0
     _render_counters.figure = 0
+    _render_counters.figure_paths = set()
+    _render_counters.figure_paths = set()
 
 
 def _next_table_num() -> int:
@@ -966,7 +968,14 @@ def _convert_block(text: str) -> str:
         # Markdown image: ![caption](path)
         img_match = _IMAGE_RE.match(line.strip())
         if img_match:
-            output.append(_render_figure(img_match.group(1), img_match.group(2)))
+            # The same image is rendered once; later references are dropped.
+            seen = getattr(_render_counters, "figure_paths", None)
+            if seen is None:
+                seen = _render_counters.figure_paths = set()
+            key = img_match.group(2).strip().replace(" ", "_").lstrip("./")
+            if key not in seen:
+                seen.add(key)
+                output.append(_render_figure(img_match.group(1), img_match.group(2)))
             i += 1
             continue
 

@@ -97,6 +97,9 @@ Generate publication-quality charts in `charts/` using matplotlib. Include at mi
    If there are multiple metrics, show a grouped bar chart or radar chart.
 3. **Statistical significance** (`charts/fig_paired_comparison.png`):
    If paired comparisons exist, show a heatmap or forest plot of effect sizes / p-values.
+The platform adds `charts/fig_learning_curves.png` (per-epoch training loss and
+validation metric) from results.json; do not draw another learning-curve chart, and
+do not save the same chart under two names.
 
 Chart style guidelines:
 - Use `plt.style.use('seaborn-v0_8-whitegrid')` or similar clean style
