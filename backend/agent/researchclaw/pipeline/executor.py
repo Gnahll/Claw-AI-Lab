@@ -359,6 +359,27 @@ def _read_prior_artifact(run_dir: Path, filename: str) -> str | None:
     return None
 
 
+def _newest_stage_files(run_dir: Path, pattern: str) -> list[Path]:
+    """Files matching *pattern* under *run_dir*, newest first.
+
+    The current stage directory (``stage-15``) comes before older loop
+    versions (``stage-15_v2``, then ``stage-15_v1``), and within a directory
+    higher ``attempt-N`` numbers come first.  Plain string order would put
+    ``stage-15_v1`` before ``stage-15`` and ``attempt-2`` before ``attempt-10``.
+    """
+    def key(path: Path) -> tuple[int, ...]:
+        rank: list[int] = []
+        for part in path.relative_to(run_dir).parts[:-1]:
+            _, sep, ver = part.rpartition("_v")
+            if part.startswith("stage-"):
+                rank += (0, int(ver)) if sep and ver.isdigit() else (1, 0)
+            elif part.startswith("attempt-") and part[8:].isdigit():
+                rank.append(int(part[8:]))
+        return tuple(rank)
+
+    return sorted(run_dir.glob(pattern), key=key, reverse=True)
+
+
 def _find_prior_file(run_dir: Path, filename: str) -> Path | None:
     """Like ``_read_prior_artifact`` but returns the *Path* instead of content."""
     def _stage_sort_key(p: Path) -> tuple[str, int]:
@@ -5394,11 +5415,112 @@ def _load_experiment_summary(run_dir: Path) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
+def _compact_run_record(record: dict[str, Any]) -> dict[str, Any]:
+    """Keep the scalar fields of one per-seed run (drop per-epoch arrays)."""
+    compact: dict[str, Any] = {}
+    for key, value in record.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            compact[key] = value
+        elif isinstance(value, dict):
+            scalars = {k: v for k, v in value.items() if isinstance(v, (str, int, float, bool))}
+            if scalars:
+                compact[key] = scalars
+    return compact
+
+
+def _verified_execution_audit(run_dir: Path) -> dict[str, Any]:
+    """Summarise the platform's own check of the adopted experiment run.
+
+    Reads the execution_report.json written by ``run_experiment`` for S15
+    (``verified_execution/``) or, when S15 did not run or its result was not
+    adopted, the last S14 attempt.  Returns {} when no report exists.
+    """
+    refine_log_path = _find_prior_file(run_dir, "refinement_log.json")
+    refine_log = _safe_json_loads(refine_log_path.read_text(encoding="utf-8"), {}) if refine_log_path else {}
+    if not isinstance(refine_log, dict):
+        refine_log = {}
+
+    candidates: list[Path] = []
+    if refine_log.get("adopted", True):
+        candidates += _newest_stage_files(run_dir, "stage-15*/verified_execution/execution_report.json")
+    candidates += _newest_stage_files(run_dir, "stage-14*/runs/attempt-*/execution_report.json")
+    report_path = next((c for c in candidates if c.is_file()), None)
+    if report_path is None:
+        return {}
+    report = _safe_json_loads(report_path.read_text(encoding="utf-8"), {})
+    if not isinstance(report, dict):
+        return {}
+
+    audit: dict[str, Any] = {
+        "source": report_path.relative_to(run_dir).as_posix(),
+        "verified_by": "platform run_experiment (re-executed main.py under supervision)",
+    }
+    for key in ("success", "returncode", "elapsed_sec", "gpu_id", "source_sha256", "results_sha256", "errors"):
+        if key in report:
+            audit[key] = report[key]
+    training = report.get("training")
+    if isinstance(training, dict):
+        audit["training"] = {
+            key: training[key]
+            for key in (
+                "optimizer_steps", "parameter_update_observed", "cuda_update_observed",
+                "checkpoint_verified", "trained_optimizers", "last_loss", "scope", "loss_semantics",
+            )
+            if key in training
+        }
+        matches = training.get("checkpoint_matches")
+        if isinstance(matches, list):
+            audit["training"]["checkpoints"] = [
+                {k: m[k] for k in ("checkpoint", "state") if k in m}
+                for m in matches if isinstance(m, dict)
+            ]
+        gpu = training.get("gpu_process")
+        if isinstance(gpu, dict):
+            audit["training"]["gpu_process_memory_mib"] = gpu.get("memory_mib")
+    predictions = report.get("predictions")
+    if isinstance(predictions, dict):
+        groups = [g for g in predictions.get("groups") or [] if isinstance(g, dict)]
+        audit["predictions"] = {
+            "groups": len(groups),
+            "files_checked": sum(g.get("checked", 0) for g in groups),
+            "degenerate": len(predictions.get("degenerate") or []),
+        }
+    results = report.get("results")
+    if isinstance(results, dict):
+        runs = results.get("runs")
+        if isinstance(runs, list):
+            audit["per_run_results"] = [_compact_run_record(r) for r in runs if isinstance(r, dict)]
+        if isinstance(results.get("protocol"), dict):
+            audit["protocol"] = results["protocol"]
+    if refine_log:
+        audit["iterative_refine"] = {
+            key: refine_log[key]
+            for key in ("adopted", "improved", "baseline_metric", "final_metric",
+                        "protocol_changes", "exploratory_metric", "rejection_reason")
+            if key in refine_log
+        }
+    return audit
+
+
+def _execution_audit_section(run_dir: Path, heading: str) -> str:
+    audit = _verified_execution_audit(run_dir)
+    if not audit:
+        return ""
+    return (
+        f"\n\n{heading}\n"
+        "The platform re-executed the adopted experiment and recorded the checks below "
+        "(parameter updates, saved checkpoints, test-set predictions, per-seed results). "
+        "Treat them as verified; do not call training, checkpoints or per-seed results "
+        "unverified when they are listed here. `scope` states what was NOT verified.\n"
+        f"```json\n{json.dumps(audit, indent=2, ensure_ascii=False, default=str)[:8000]}\n```\n"
+    )
+
+
 def _paper_experiment_evidence(run_dir: Path) -> str:
     """Build a compact, auditable experiment snapshot for paper writing."""
     summary = _load_experiment_summary(run_dir)
     if not summary:
-        return ""
+        return _execution_audit_section(run_dir, "## VERIFIED EXECUTION AUDIT")
 
     snapshot: dict[str, Any] = {
         key: summary[key]
@@ -5462,6 +5584,9 @@ def _paper_experiment_evidence(run_dir: Path) -> str:
             compact_runs.append(compact_record)
     if compact_runs:
         snapshot["per_seed_results"] = compact_runs
+    audit = _verified_execution_audit(run_dir)
+    if audit:
+        snapshot["verified_execution"] = audit
 
     summary_path = _find_prior_file(run_dir, "experiment_summary.json")
     source = str(summary_path.relative_to(run_dir)) if summary_path else "experiment_summary.json"
@@ -5486,6 +5611,9 @@ def _paper_experiment_evidence(run_dir: Path) -> str:
         "metric reproduction.\n"
         "- If the draft conflicts with this snapshot, revise the draft and retain the supported "
         "scientific boundary.\n"
+        "- `verified_execution` is the platform's own re-execution of the adopted run; report its "
+        "per-run results and checkpoint checks, and if `iterative_refine.adopted` is false, do not "
+        "report the exploratory S15 metric as a result.\n"
     )
 
 
@@ -7095,12 +7223,13 @@ def _execute_paper_draft(
             "and post-discussion data provided in the research context.\n"
         )
 
-    # R21-1: Read BEST experiment_summary across all stage-14 versions.
+    # R21-1: Read BEST experiment_summary across all stage-16 (current) and
+    # stage-14 (older layout) versions.
     # Refinement can regress — the final (non-versioned) stage-14 may have
     # worse data than an earlier version. Pick the richest one.
     exp_summary_text = None
     _best_metric_count = 0
-    for _s14_dir in sorted(run_dir.glob("stage-14*")):
+    for _s14_dir in sorted([*run_dir.glob("stage-14*"), *run_dir.glob("stage-16*")]):
         _candidate = _s14_dir / "experiment_summary.json"
         if _candidate.is_file():
             _text = _candidate.read_text(encoding="utf-8")
@@ -8039,6 +8168,10 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
                 + "If the paper claims a different number of trials, this is a CRITICAL discrepancy."
             )
 
+    audit_section = _execution_audit_section(run_dir, "### Verified Execution Audit").strip()
+    if audit_section:
+        evidence_parts.append(audit_section)
+
     if not evidence_parts:
         return ""
 
@@ -8716,6 +8849,7 @@ def _execute_quality_gate(
                 "empty metrics, any numerical results in tables constitute "
                 "fabrication. Penalize severely.\n"
             )
+        _exp_context += _execution_audit_section(run_dir, "Verified execution audit:")
 
         _overlay = _get_evolution_overlay(run_dir, "quality_gate")
         sp = _pm.for_stage(
