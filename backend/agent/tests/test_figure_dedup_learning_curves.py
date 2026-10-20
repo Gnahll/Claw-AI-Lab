@@ -103,3 +103,73 @@ def test_learning_curves_need_two_epochs(tmp_path: Path):
     flat = {"runs": [{"condition": "a", "epochs": [{"mean_loss": 1.0, "val_acc": 0.5},
                                                    {"mean_loss": 0.5, "val_acc": 0.6}]}]}
     assert visualize.plot_learning_curves(flat, tmp_path / "flat.png") == tmp_path / "flat.png"
+
+
+def _condition_results(epochs=10):
+    """results.json layout of the d9f4 run: conditions.<cond>.runs[i].epochs[j]."""
+    def run(seed, offset):
+        return {
+            "seed": seed, "status": "completed", "best_epoch": epochs,
+            "epochs": [
+                {"epoch": e, "training_loss": 0.5 / e + offset, "edge_dice": 0.3,
+                 "validation_f1": 0.80 + 0.005 * e, "validation_iou": 0.7,
+                 "validation": {"f1": 0.80 + 0.005 * e, "iou": 0.7, "n": 13,
+                                "per_image": [{"id": "1", "f1": 0.8}], "regimes": {}}}
+                for e in range(1, epochs + 1)
+            ],
+            "test": {"f1": 0.81}, "primary_metric": 0.81,
+        }
+    return {
+        "status": "completed",
+        "conditions": {
+            "baseline_pretrained": {"name": "baseline_pretrained", "status": "evaluated",
+                                    "seeds": [], "test": {"f1": 0.7}},
+            "baseline": {"name": "baseline", "runs": [run(s, 0.0) for s in (42, 123, 456)]},
+            "proposed": {"name": "proposed", "runs": [run(s, 0.01) for s in (42, 123, 456)]},
+        },
+    }
+
+
+def test_result_runs_flattens_condition_runs():
+    runs = visualize._result_runs(_condition_results(epochs=2))
+    assert [(r["condition"], r["seed"]) for r in runs] == [
+        ("baseline", 42), ("baseline", 123), ("baseline", 456),
+        ("proposed", 42), ("proposed", 123), ("proposed", 456),
+    ]
+
+
+@pytest.mark.skipif(not visualize.HAS_MATPLOTLIB, reason="matplotlib missing")
+def test_learning_curves_from_condition_runs(tmp_path: Path):
+    run_dir = tmp_path / "run"
+    (run_dir / "stage-15_v1").mkdir(parents=True)
+    (run_dir / "stage-15_v1/results.json").write_text(json.dumps(_condition_results(epochs=1)))
+    (run_dir / "stage-15").mkdir()
+    (run_dir / "stage-15/results.json").write_text(json.dumps(_condition_results()))
+    assert visualize._load_adopted_results(run_dir) == _condition_results()
+
+    out = tmp_path / "charts"
+    generated = visualize.generate_all_charts(run_dir, out)
+    assert out / "fig_learning_curves.png" in generated
+    assert (out / "fig_learning_curves.png").stat().st_size > 1000
+
+
+@pytest.mark.skipif(not visualize.HAS_MATPLOTLIB, reason="matplotlib missing")
+def test_learning_curve_series_use_training_loss_and_validation_f1(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    lines = []
+    real_plot = visualize.plt.Axes.plot
+
+    def record(ax, x, y, *args, **kwargs):
+        lines.append((ax.get_ylabel(), kwargs.get("label"), list(x), [round(v, 4) for v in y]))
+        return real_plot(ax, x, y, *args, **kwargs)
+
+    monkeypatch.setattr(visualize.plt.Axes, "plot", record)
+    path = visualize.plot_learning_curves(_condition_results(epochs=3), tmp_path / "lc.png")
+    assert path == tmp_path / "lc.png"
+    labels = {label for _, label, _, _ in lines}
+    assert labels == {"Baseline (n=3)", "Proposed (n=3)"}
+    baseline_loss = next(y for _, label, _, y in lines if label == "Baseline (n=3)")
+    assert baseline_loss == [0.5, 0.25, round(0.5 / 3, 4)]
+    proposed_f1 = [y for _, label, _, y in lines if label == "Proposed (n=3)"][1]
+    assert proposed_f1 == [0.805, 0.81, 0.815]

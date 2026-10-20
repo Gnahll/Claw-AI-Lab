@@ -612,7 +612,7 @@ def plot_iteration_scores(
 # Learning curves — per-epoch training loss and validation metric
 # ---------------------------------------------------------------------------
 
-_LOSS_KEYS = ("train_loss", "mean_loss", "loss")
+_LOSS_KEYS = ("train_loss", "training_loss", "mean_loss", "loss")
 _PREFERRED_VAL_KEYS = ("f1", "accuracy", "acc", "iou", "auc", "loss")
 _VAL_SKIP_KEYS = {"samples", "sample_count", "n", "count"}
 
@@ -638,16 +638,36 @@ def _epoch_validation(epoch: dict[str, Any]) -> dict[str, float]:
     return values
 
 
+def _result_runs(results: Any) -> list[dict[str, Any]]:
+    """Per-seed run records of results.json, each with a ``condition``.
+
+    Accepts both layouts: a flat ``runs`` list and the nested
+    ``conditions.<name>.runs`` list (the condition name is filled in).
+    """
+    if not isinstance(results, dict):
+        return []
+    flat = results.get("runs")
+    runs = [r for r in flat if isinstance(r, dict)] if isinstance(flat, list) else []
+    conditions = results.get("conditions")
+    if isinstance(conditions, dict):
+        for name, cond in conditions.items():
+            nested = cond.get("runs") if isinstance(cond, dict) else None
+            if isinstance(nested, list):
+                runs += [{"condition": name, **r} for r in nested if isinstance(r, dict)]
+    return runs
+
+
 def plot_learning_curves(results: dict[str, Any], output_path: Path) -> Path | None:
     """Plot mean ± std training loss and validation metric per epoch.
 
-    Reads ``runs`` from results.json: one record per condition and seed with
-    an ``epochs`` list.  Returns None unless some run has at least 2 epochs.
+    Reads the per-seed runs of results.json (flat ``runs`` or
+    ``conditions.<name>.runs``), each with an ``epochs`` list.  Returns None
+    unless some run has at least 2 epochs.
     """
     if not HAS_MATPLOTLIB:
         return None
-    runs = results.get("runs") if isinstance(results, dict) else None
-    if not isinstance(runs, list):
+    runs = _result_runs(results)
+    if not runs:
         return None
 
     val_key = ""
@@ -735,7 +755,7 @@ def _load_adopted_results(run_dir: Path) -> dict[str, Any]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (json.JSONDecodeError, OSError):
             continue
-        if isinstance(data, dict) and isinstance(data.get("runs"), list):
+        if any(isinstance(r.get("epochs"), list) for r in _result_runs(data)):
             return data
     return {}
 
