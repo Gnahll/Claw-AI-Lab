@@ -78,3 +78,16 @@ def test_no_automatic_retry_where_a_human_or_peer_owns_recovery(bridge_state, ca
         failed = None
     assert bridge._queue_auto_retry(state, agent, failed, 1) == []
     assert queued(state) == []
+
+
+def test_pause_removes_project_tasks_from_queue_file(bridge_state):
+    bridge, state, _, failed, _ = bridge_state
+    queue = state.queues[bridge._queue_for_layer("execution")]
+    other = bridge.Task(id="task-2", project_id="other", run_dir="", config_path="c.yaml",
+                        source_layer="coding", target_layer="execution", topic="t")
+    queue.push(failed)
+    queue.push(other)
+    bridge._pause_project(state, "proj")
+    reloaded = bridge.TaskQueue(queue.name, queue.path)
+    reloaded.load()
+    assert [task.id for task in reloaded.tasks] == ["task-2"]
