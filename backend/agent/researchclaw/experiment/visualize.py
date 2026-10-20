@@ -608,6 +608,138 @@ def plot_iteration_scores(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Learning curves — per-epoch training loss and validation metric
+# ---------------------------------------------------------------------------
+
+_LOSS_KEYS = ("train_loss", "mean_loss", "loss")
+_PREFERRED_VAL_KEYS = ("f1", "accuracy", "acc", "iou", "auc", "loss")
+_VAL_SKIP_KEYS = {"samples", "sample_count", "n", "count"}
+
+
+def _number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    value = float(value)
+    return value if np.isfinite(value) else None
+
+
+def _epoch_validation(epoch: dict[str, Any]) -> dict[str, float]:
+    validation = epoch.get("validation")
+    if isinstance(validation, dict):
+        source = validation
+    else:
+        source = {k[4:]: v for k, v in epoch.items() if k.startswith("val_")}
+    values = {}
+    for key, value in source.items():
+        number = _number(value)
+        if number is not None and key not in _VAL_SKIP_KEYS:
+            values[key] = number
+    return values
+
+
+def plot_learning_curves(results: dict[str, Any], output_path: Path) -> Path | None:
+    """Plot mean ± std training loss and validation metric per epoch.
+
+    Reads ``runs`` from results.json: one record per condition and seed with
+    an ``epochs`` list.  Returns None unless some run has at least 2 epochs.
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    runs = results.get("runs") if isinstance(results, dict) else None
+    if not isinstance(runs, list):
+        return None
+
+    val_key = ""
+    available: set[str] = set()
+    for run in runs:
+        for epoch in run.get("epochs") or [] if isinstance(run, dict) else []:
+            if isinstance(epoch, dict):
+                available |= set(_epoch_validation(epoch))
+    for key in (*_PREFERRED_VAL_KEYS, *sorted(available)):
+        if key in available:
+            val_key = key
+            break
+
+    # condition -> {"loss": {epoch: [values]}, "val": {epoch: [values]}}
+    curves: dict[str, dict[str, dict[int, list[float]]]] = {}
+    for run in runs:
+        if not isinstance(run, dict) or not isinstance(run.get("epochs"), list):
+            continue
+        condition = str(run.get("condition") or run.get("method") or "run")
+        series = curves.setdefault(condition, {"loss": {}, "val": {}})
+        for index, epoch in enumerate(run["epochs"], start=1):
+            if not isinstance(epoch, dict):
+                continue
+            number = _number(epoch.get("epoch"))
+            step = int(number) if number is not None else index
+            loss = next((_number(epoch.get(k)) for k in _LOSS_KEYS if _number(epoch.get(k)) is not None), None)
+            if loss is not None:
+                series["loss"].setdefault(step, []).append(loss)
+            val = _epoch_validation(epoch).get(val_key) if val_key else None
+            if val is not None:
+                series["val"].setdefault(step, []).append(val)
+
+    panels = [("loss", "Training loss")]
+    if val_key:
+        panels.append(("val", f"Validation {val_key}"))
+    if not any(len(c[name]) >= 2 for c in curves.values() for name, _ in panels):
+        return None
+
+    _setup_academic_style()
+    fig, axes = plt.subplots(1, len(panels), figsize=(6 * len(panels), 4.2), squeeze=False)
+    for ax, (name, label) in zip(axes[0], panels):
+        for i, (condition, series) in enumerate(sorted(curves.items())):
+            points = sorted(series[name].items())
+            if not points:
+                continue
+            x = [step for step, _ in points]
+            mean = np.array([np.mean(v) for _, v in points])
+            std = np.array([np.std(v) for _, v in points])
+            seeds = max(len(v) for _, v in points)
+            color = _PAUL_TOL_EXTENDED[i % len(_PAUL_TOL_EXTENDED)]
+            ax.plot(x, mean, "o-", color=color, linewidth=2, markersize=4,
+                    label=f"{_format_cond_name(condition)} (n={seeds})")
+            if seeds > 1:
+                ax.fill_between(x, mean - std, mean + std, color=color, alpha=0.15)
+        ax.set_xlabel("Epoch")
+        ax.set_ylabel(label)
+        ax.set_title(label)
+        ax.legend(fontsize=9)
+    fig.suptitle("Learning curves (mean ± std across seeds)")
+    fig.tight_layout()
+    fig.savefig(_ensure_dir(output_path), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Saved learning curves: %s", output_path)
+    return output_path
+
+
+def _load_adopted_results(run_dir: Path) -> dict[str, Any]:
+    """Return results.json of the adopted run (S15 if present, else S14).
+
+    The current stage directory wins over older REFINE-loop versions
+    (``stage-15`` before ``stage-15_v2`` before ``stage-15_v1``).
+    """
+    def newest_first(pattern: str) -> list[Path]:
+        def key(path: Path) -> tuple[int, int]:
+            _, sep, ver = path.relative_to(run_dir).parts[0].rpartition("_v")
+            return (0, int(ver)) if sep and ver.isdigit() else (1, 0)
+        return sorted(run_dir.glob(pattern), key=key, reverse=True)
+
+    candidates = [
+        *newest_first("stage-15*/results.json"),
+        *newest_first("stage-14*/runs/results.json"),
+    ]
+    for path in candidates:
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("runs"), list):
+            return data
+    return {}
+
+
 def generate_all_charts(
     run_dir: Path,
     output_dir: Path | None = None,
@@ -692,7 +824,12 @@ def generate_all_charts(
         except (json.JSONDecodeError, OSError):
             pass
 
-    # 3. Iteration scores
+    # 3. Learning curves from the adopted run's per-epoch records
+    path = plot_learning_curves(_load_adopted_results(run_dir), output_dir / "fig_learning_curves.png")
+    if path:
+        generated.append(path)
+
+    # 4. Iteration scores
     iter_path = run_dir / "iteration_summary.json"
     if iter_path.exists():
         try:
