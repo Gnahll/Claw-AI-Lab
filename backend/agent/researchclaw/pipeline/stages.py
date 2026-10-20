@@ -133,7 +133,18 @@ DECISION_ROLLBACK: dict[str, Stage] = {
     "refine": Stage.ITERATIVE_REFINE,    # Keep hypotheses, re-run experiments
 }
 
-MAX_DECISION_PIVOTS: int = 0  # Disable pivot/refine loops
+MAX_DECISION_PIVOTS: int = 1  # Total PIVOT/REFINE loop-backs per run
+
+# Loop-backs allowed per decision.  REFINE re-runs S15-S17 inside the
+# execution layer to add the experiments S17 found missing.  PIVOT would
+# restart from S8 (idea layer, discussion and new code) and stays disabled.
+MAX_DECISION_LOOPS: dict[str, int] = {
+    "refine": 1,
+    "pivot": 0,
+}
+
+# Written into the new S15 directory when S17 asks for REFINE.
+REFINE_REQUEST_FILE = "refine_request.md"
 
 # ---------------------------------------------------------------------------
 # Noncritical stages — can be skipped on failure without aborting pipeline

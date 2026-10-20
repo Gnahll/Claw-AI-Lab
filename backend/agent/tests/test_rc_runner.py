@@ -462,40 +462,31 @@ def _refine_result(stage: Stage) -> StageResult:
     )
 
 
-def test_pivot_decision_triggers_rollback_to_hypothesis_gen(
+def test_pivot_decision_does_not_roll_back(
     monkeypatch: pytest.MonkeyPatch,
     run_dir: Path,
     rc_config: RCConfig,
     adapters: AdapterBundle,
 ) -> None:
     seen: list[Stage] = []
-    pivot_count = 0
 
     def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
         _ = kwargs
         seen.append(stage)
-        nonlocal pivot_count
-        if stage == Stage.RESEARCH_DECISION and pivot_count == 0:
-            pivot_count += 1
+        if stage == Stage.RESEARCH_DECISION:
             return _pivot_result(stage)
         return _done(stage)
 
     monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
-    results = rc_runner.execute_pipeline(
+    rc_runner.execute_pipeline(
         run_dir=run_dir,
         run_id="run-pivot",
         config=rc_config,
         adapters=adapters,
     )
-    # Should have seen HYPOTHESIS_GEN at least twice (original + rollback)
-    hyp_gen_count = sum(1 for s in seen if s == Stage.HYPOTHESIS_GEN)
-    assert hyp_gen_count >= 2
-    # Decision history should be recorded
-    history_path = run_dir / "decision_history.json"
-    assert history_path.exists()
-    history = json.loads(history_path.read_text())
-    assert len(history) == 1
-    assert history[0]["decision"] == "pivot"
+    # PIVOT loop-backs are disabled (MAX_DECISION_LOOPS["pivot"] == 0)
+    assert sum(1 for s in seen if s == Stage.HYPOTHESIS_GEN) == 1
+    assert not (run_dir / "decision_history.json").exists()
 
 
 def test_refine_decision_triggers_rollback_to_iterative_refine(
@@ -526,6 +517,53 @@ def test_refine_decision_triggers_rollback_to_iterative_refine(
     # Should have seen ITERATIVE_REFINE at least twice
     refine_stage_count = sum(1 for s in seen if s == Stage.ITERATIVE_REFINE)
     assert refine_stage_count >= 2
+
+
+def test_refine_loops_once_and_hands_decision_to_s15(
+    monkeypatch: pytest.MonkeyPatch,
+    run_dir: Path,
+    rc_config: RCConfig,
+    adapters: AdapterBundle,
+) -> None:
+    seen: list[Stage] = []
+    requests: list[str] = []
+
+    def mock_execute_stage(stage: Stage, **kwargs) -> StageResult:
+        _ = kwargs
+        seen.append(stage)
+        stage_dir = run_dir / f"stage-{int(stage):02d}"
+        if stage == Stage.ITERATIVE_REFINE:
+            request = stage_dir / "refine_request.md"
+            requests.append(request.read_text(encoding="utf-8") if request.exists() else "")
+        if stage == Stage.RESEARCH_DECISION:
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            (stage_dir / "decision.md").write_text("## Decision\nREFINE\nAdd a second baseline.")
+            return _refine_result(stage)
+        return _done(stage)
+
+    monkeypatch.setattr(rc_runner, "execute_stage", mock_execute_stage)
+    rc_runner.execute_pipeline(
+        run_dir=run_dir,
+        run_id="run-refine-once",
+        config=rc_config,
+        adapters=adapters,
+    )
+    # Always REFINE: one loop-back, then the second REFINE proceeds
+    assert sum(1 for s in seen if s == Stage.ITERATIVE_REFINE) == 2
+    assert sum(1 for s in seen if s == Stage.RESEARCH_DECISION) == 2
+    assert requests[0] == ""
+    assert "Add a second baseline." in requests[1]
+    assert "stage-17_v1/decision.md" in requests[1]
+    history = json.loads((run_dir / "decision_history.json").read_text())
+    assert [h["decision"] for h in history] == ["refine"]
+    assert seen[-1] == max(Stage)
+
+
+def test_decision_count_reads_history(run_dir: Path) -> None:
+    assert rc_runner._decision_count(run_dir, "refine") == 0
+    rc_runner._record_decision_history(run_dir, "refine", Stage.ITERATIVE_REFINE, 1)
+    assert rc_runner._decision_count(run_dir, "refine") == 1
+    assert rc_runner._decision_count(run_dir, "pivot") == 0
 
 
 def test_max_pivot_count_prevents_infinite_loop(

@@ -655,3 +655,66 @@ def test_supervisor_accepts_non_failure_status(tmp_path, status):
     result = run_experiment(tmp_path, tmp_path / "evidence", configuration(), smoke=True)
 
     assert result["success"], result["errors"]
+
+
+def _run_s15_refine_loop(tmp_path, monkeypatch, refined_protocol):
+    from researchclaw.pipeline.iterative_refine import runtime
+    from researchclaw.pipeline.claw_engine.turn_loop import TurnResult
+
+    script = "import json\nfrom pathlib import Path\nPath('results.json').write_text(json.dumps(%r))\n"
+    initial = {"metric": 0.5, "protocol": {"learning_rate": 1e-05, "seeds": [1, 2, 3]}}
+    experiment = tmp_path / "stage-11/experiment"
+    experiment.mkdir(parents=True)
+    (experiment / "main.py").write_text(script % initial)
+    runs = tmp_path / "stage-14/runs"
+    runs.mkdir(parents=True)
+    (runs / "results.json").write_text(json.dumps({"metric": 0.9, "protocol": {"learning_rate": 1e-05}}))
+    adopted = tmp_path / "stage-15_v1"
+    adopted.mkdir()
+    (adopted / "results.json").write_text(json.dumps(initial))
+    (adopted / "refinement_log.json").write_text(json.dumps({"adopted": True}))
+    stage = tmp_path / "stage-15"
+    stage.mkdir()
+    (stage / "refine_request.md").write_text("# REFINE request\nAdd seeds 4 and 5.")
+    messages = []
+
+    def loop(**kwargs):
+        def run_turn(message):
+            messages.append(message)
+            (kwargs["workspace"] / "main.py").write_text(script % dict(initial, metric=0.4, protocol=refined_protocol))
+            return TurnResult(final_text="done")
+        return SimpleNamespace(run_turn=run_turn)
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+    monkeypatch.setattr(runtime, "AgentTurnLoop", loop)
+    result = runtime.IterativeRefineRuntime().execute(stage, tmp_path, configuration(), None,
+                                                    llm=SimpleNamespace(config=SimpleNamespace(primary_model="test")))
+    assert result.status == StageStatus.DONE
+    return stage, messages, json.loads((stage / "refinement_log.json").read_text())
+
+
+def test_s15_refine_loop_may_add_seeds(tmp_path, monkeypatch):
+    stage, messages, log = _run_s15_refine_loop(
+        tmp_path, monkeypatch, {"learning_rate": 1e-05, "seeds": [1, 2, 3, 4, 5]})
+    assert "Add seeds 4 and 5." in messages[0]
+    assert "REFINE loop" in (stage / "refine_system_prompt.md").read_text()
+    assert log["refine_loop"] is True
+    assert not log.get("protocol_changes") and log["adopted"] is True
+
+
+def test_s15_refine_loop_still_rejects_retuning(tmp_path, monkeypatch):
+    _, _, log = _run_s15_refine_loop(
+        tmp_path, monkeypatch, {"learning_rate": 3e-05, "seeds": [1, 2, 3]})
+    assert log["adopted"] is False
+    assert list(log["protocol_changes"]) == ["protocol.learning_rate"]
+
+
+def test_protocol_changes_allow_added_seeds_only_in_refine_loop():
+    from researchclaw.pipeline.iterative_refine.runtime import IterativeRefineRuntime
+
+    base = json.dumps({"protocol": {"seeds": [1, 2, 3]}})
+    grown = json.dumps({"protocol": {"seeds": [1, 2, 3, 4]}})
+    dropped = json.dumps({"protocol": {"seeds": [1, 2]}})
+    assert IterativeRefineRuntime._protocol_changes(base, grown)
+    assert IterativeRefineRuntime._protocol_changes(base, grown, allow_additions=True) == {}
+    assert IterativeRefineRuntime._protocol_changes(base, dropped, allow_additions=True)
