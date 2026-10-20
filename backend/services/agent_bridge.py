@@ -377,6 +377,10 @@ def _pause_project(state: "BridgeState", project_id: str) -> list[dict]:
     for q in state.queues.values():
         before = len(q.tasks)
         q.tasks = [t for t in q.tasks if t.project_id != project_id]
+        if len(q.tasks) != before:
+            # Persist, or the paused project's pending/assigned tasks return on restart
+            # and block git_deploy's idle check.
+            q.save()
         removed += before - len(q.tasks)
 
     released = state.gpu_allocator.release(project_id)
