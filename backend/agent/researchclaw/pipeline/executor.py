@@ -370,9 +370,9 @@ def _newest_stage_files(run_dir: Path, pattern: str) -> list[Path]:
     def key(path: Path) -> tuple[int, ...]:
         rank: list[int] = []
         for part in path.relative_to(run_dir).parts[:-1]:
-            base, sep, ver = part.rpartition("_v")
+            _, sep, ver = part.rpartition("_v")
             if part.startswith("stage-"):
-                rank.append(-int(ver) if sep and ver.isdigit() else 0)
+                rank += (0, int(ver)) if sep and ver.isdigit() else (1, 0)
             elif part.startswith("attempt-") and part[8:].isdigit():
                 rank.append(int(part[8:]))
         return tuple(rank)

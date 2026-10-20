@@ -4059,3 +4059,7 @@ def test_execution_audit_prefers_current_stage_over_refine_versions(run_dir: Pat
              rc_executor._newest_stage_files(run_dir, "stage-14*/runs/attempt-*/execution_report.json")]
     assert names == ["stage-14/runs/attempt-10/execution_report.json",
                      "stage-14/runs/attempt-2/execution_report.json"]
+    _write_execution_report(run_dir / "stage-15_v2/verified_execution/execution_report.json", 0.92)
+    names = [p.parts[-3] for p in
+             rc_executor._newest_stage_files(run_dir, "stage-15*/verified_execution/execution_report.json")]
+    assert names == ["stage-15", "stage-15_v2", "stage-15_v1"]
