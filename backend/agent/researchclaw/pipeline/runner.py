@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import importlib
 import logging
+import math
 import os
 import shutil
 import tempfile
@@ -422,6 +423,107 @@ def execute_pipeline(
     return results
 
 
+_TRAINING_LOG_NAMES = ("steps.jsonl", "training.jsonl")
+_EXECUTION_LOG_NAMES = (
+    "execution.log",
+    "training_observation.jsonl",
+    "training_monitor.jsonl",
+)
+_LOG_MAX_BYTES = 20 * 1024 * 1024
+
+
+def _package_training_logs(run_dir: Path, dest: Path) -> list[str]:
+    """Copy the adopted run's training logs into ``deliverables/logs/``.
+
+    Sources (newest stage directory first, so a REFINE loop's current
+    ``stage-15`` wins over ``stage-15_v1``):
+    - ``experiment_final/outputs/logs/**/{steps,training}.jsonl``
+    - ``verified_execution/{execution.log,training_observation.jsonl,training_monitor.jsonl}``
+
+    Also draws ``charts/fig_training_loss_steps.png`` from the steps.jsonl
+    files.  Returns the packaged entries.
+    """
+    from researchclaw.pipeline.executor import _read_prior_artifact
+
+    exp_final = _read_prior_artifact(run_dir, "experiment_final/")
+    verified = _read_prior_artifact(run_dir, "verified_execution/")
+    logs_dest = dest / "logs"
+    if logs_dest.exists():
+        shutil.rmtree(logs_dest)
+    copied: list[str] = []
+    step_series: dict[str, list[float]] = {}
+
+    logs_src = Path(exp_final) / "outputs" / "logs" if exp_final else None
+    if logs_src is not None and logs_src.is_dir():
+        for name in _TRAINING_LOG_NAMES:
+            for path in sorted(logs_src.rglob(name)):
+                if path.stat().st_size > _LOG_MAX_BYTES:
+                    continue
+                rel = path.relative_to(logs_src)
+                target = logs_dest / rel
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+                copied.append(rel.as_posix())
+                if name == "steps.jsonl":
+                    losses = _read_step_losses(path)
+                    if losses:
+                        step_series[rel.parent.as_posix() or "run"] = losses
+    if verified and Path(verified).is_dir():
+        for name in _EXECUTION_LOG_NAMES:
+            path = Path(verified) / name
+            if path.is_file() and path.stat().st_size <= _LOG_MAX_BYTES:
+                target = logs_dest / "verified_execution" / name
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(path, target)
+                copied.append(f"verified_execution/{name}")
+    if not copied:
+        return []
+
+    packaged = ["logs/"]
+    chart_name = ""
+    if step_series:
+        from researchclaw.experiment.visualize import plot_step_losses
+
+        chart = plot_step_losses(step_series, dest / "charts" / "fig_training_loss_steps.png")
+        if chart is not None:
+            chart_name = chart.name
+            packaged.append(f"charts/{chart_name}")
+
+    descriptions = {
+        "steps.jsonl": "one record per training step (epoch, microbatch, sample_id, loss, ...)",
+        "training.jsonl": "one record per epoch (training_loss, validation metrics)",
+        "execution.log": "stdout/stderr of the verified experiment execution",
+        "training_observation.jsonl": "loss and parameter-update observations captured by the platform",
+        "training_monitor.jsonl": "periodic GPU/process monitoring samples",
+    }
+    lines = [
+        "# Training Logs",
+        "",
+        "Logs of the experiment run adopted for the paper.",
+        "",
+        "| File | Content |",
+        "| --- | --- |",
+    ]
+    for rel in copied:
+        lines.append(f"| `{rel}` | {descriptions.get(Path(rel).name, '')} |")
+    if chart_name:
+        lines += ["", f"Per-step loss curve: `../charts/{chart_name}` (drawn from the steps.jsonl files)."]
+    (logs_dest / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return packaged
+
+
+def _read_step_losses(path: Path) -> list[float]:
+    losses: list[float] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            loss = json.loads(line).get("loss")
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(loss, (int, float)) and not isinstance(loss, bool) and math.isfinite(loss):
+            losses.append(float(loss))
+    return losses
+
+
 def _package_deliverables(
     run_dir: Path,
     run_id: str,
@@ -559,6 +661,12 @@ def _package_deliverables(
             shutil.rmtree(charts_dest)
         shutil.copytree(charts_src, charts_dest)
         packaged.append("charts/")
+
+    # --- 6b. Training logs and per-step loss curve ---
+    try:
+        packaged.extend(_package_training_logs(run_dir, dest))
+    except Exception:  # noqa: BLE001
+        logger.warning("Training log packaging failed (non-blocking)", exc_info=True)
 
     # --- 7. Conference style files (.sty, .bst) ---
     try:
@@ -703,6 +811,7 @@ def _package_deliverables(
             "experiment_evidence.md": "Authoritative experiment facts supplied to paper revision",
             "experiment_sync_report.json": "Detected evidence conflicts and selected revision source",
             "charts/": "Result visualizations",
+            "logs/": "Training logs (steps.jsonl, training.jsonl) and verified execution logs",
         },
     }
     (dest / "manifest.json").write_text(

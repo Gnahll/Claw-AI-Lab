@@ -714,6 +714,41 @@ def plot_learning_curves(results: dict[str, Any], output_path: Path) -> Path | N
     return output_path
 
 
+def plot_step_losses(
+    series: dict[str, list[float]], output_path: Path, *, window: int = 25
+) -> Path | None:
+    """Plot per-step training loss, one line per run (e.g. ``proposed/seed_42``).
+
+    Raw losses are drawn faintly with a moving average on top.  Returns None
+    unless some series has at least 2 steps.
+    """
+    if not HAS_MATPLOTLIB:
+        return None
+    series = {k: v for k, v in series.items() if len(v) >= 2}
+    if not series:
+        return None
+
+    _setup_academic_style()
+    fig, ax = plt.subplots(figsize=(7, 4.2))
+    for i, (name, losses) in enumerate(sorted(series.items())):
+        color = _PAUL_TOL_EXTENDED[i % len(_PAUL_TOL_EXTENDED)]
+        y = np.asarray(losses, dtype=float)
+        x = np.arange(1, len(y) + 1)
+        ax.plot(x, y, color=color, alpha=0.2, linewidth=0.8)
+        w = max(1, min(window, len(y) // 5))
+        smooth = np.convolve(y, np.ones(w) / w, mode="valid")
+        ax.plot(x[w - 1:], smooth, color=color, linewidth=1.8, label=_shorten_label(name, 30))
+    ax.set_xlabel("Training step")
+    ax.set_ylabel("Loss")
+    ax.set_title("Per-step training loss")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    fig.savefig(_ensure_dir(output_path), dpi=300, bbox_inches="tight")
+    plt.close(fig)
+    logger.info("Saved per-step loss curve: %s", output_path)
+    return output_path
+
+
 def _load_adopted_results(run_dir: Path) -> dict[str, Any]:
     """Return results.json of the adopted run (S15 if present, else S14).
 

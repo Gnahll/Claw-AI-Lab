@@ -983,3 +983,64 @@ def test_read_quality_score_reads_quality_gate_stage(run_dir: Path) -> None:
     )
 
     assert rc_runner._read_quality_score(run_dir) == 7.5
+
+
+def _write_training_logs(stage_dir: Path, marker: float) -> None:
+    exp = stage_dir / "experiment_final"
+    for cond in ("baseline", "proposed"):
+        log_dir = exp / "outputs" / "logs" / cond / "seed_42"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "steps.jsonl").write_text(
+            "\n".join(
+                json.dumps({"epoch": 1 + i // 10, "microbatch": i, "loss": marker / (i + 1)})
+                for i in range(30)
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (log_dir / "training.jsonl").write_text(
+            json.dumps({"epoch": 1, "training_loss": marker, "validation_f1": 0.5}) + "\n",
+            encoding="utf-8",
+        )
+    verified = stage_dir / "verified_execution"
+    verified.mkdir(parents=True, exist_ok=True)
+    (verified / "execution.log").write_text(f"marker {marker}\n", encoding="utf-8")
+    (verified / "training_observation.jsonl").write_text('{"step":1,"loss":1.0}\n', encoding="utf-8")
+    (verified / "training_monitor.jsonl").write_text('{"gpu":0}\n', encoding="utf-8")
+    (verified / "execution_report.json").write_text("{}", encoding="utf-8")
+
+
+def test_package_deliverables_includes_training_logs_and_step_loss_chart(
+    run_dir: Path, rc_config: RCConfig
+) -> None:
+    pytest.importorskip("matplotlib")
+    _setup_stage_artifacts(run_dir)
+    _write_training_logs(run_dir / "stage-15_v1", 9.0)
+    _write_training_logs(run_dir / "stage-15", 2.0)
+
+    dest = rc_runner._package_deliverables(run_dir, "run-logs", rc_config)
+
+    assert dest is not None
+    logs = dest / "logs"
+    for cond in ("baseline", "proposed"):
+        assert (logs / cond / "seed_42" / "steps.jsonl").exists()
+        assert (logs / cond / "seed_42" / "training.jsonl").exists()
+    # The current stage-15 wins over the older REFINE version.
+    assert "marker 2.0" in (logs / "verified_execution" / "execution.log").read_text(encoding="utf-8")
+    assert (logs / "verified_execution" / "training_observation.jsonl").exists()
+    assert (logs / "verified_execution" / "training_monitor.jsonl").exists()
+    assert not (logs / "verified_execution" / "execution_report.json").exists()
+    readme = (logs / "README.md").read_text(encoding="utf-8")
+    assert "`proposed/seed_42/steps.jsonl`" in readme
+    assert "fig_training_loss_steps.png" in readme
+    assert (dest / "charts" / "fig_training_loss_steps.png").stat().st_size > 0
+    manifest = json.loads((dest / "manifest.json").read_text(encoding="utf-8"))
+    assert "logs/" in manifest["files"]
+    assert "charts/fig_training_loss_steps.png" in manifest["files"]
+
+
+def test_package_training_logs_without_logs_is_noop(run_dir: Path) -> None:
+    dest = run_dir / "deliverables"
+    dest.mkdir()
+    assert rc_runner._package_training_logs(run_dir, dest) == []
+    assert not (dest / "logs").exists()
