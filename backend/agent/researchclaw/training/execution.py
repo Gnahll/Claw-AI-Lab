@@ -181,10 +181,15 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
         finally:
             if process is not None:
                 if os.name != "nt":
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    # torchrun starts every rank in its own session; find them before the
+                    # launcher dies, or they would be orphaned on their GPUs.
+                    descendants = sorted(_descendants(process.pid))
+                    for kill, target in [(os.killpg, process.pid), *[(os.killpg, pid) for pid in descendants],
+                                         *[(os.kill, pid) for pid in descendants]]:
+                        try:
+                            kill(target, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
                 elif process.poll() is None:
                     process.kill()
                 process.wait()
@@ -216,12 +221,30 @@ def _check_ranks(evidence_path, gpus):
     return ranks
 
 
+def _descendants(pid):
+    """All live descendants of pid (Linux /proc), including those in their own sessions."""
+    children = {}
+    for entry in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            stat = entry.read_text()
+            children.setdefault(int(stat[stat.rfind(")") + 2:].split()[1]), []).append(int(entry.parent.name))
+        except (OSError, ValueError, IndexError):
+            continue
+    found, pending = set(), [pid]
+    while pending:
+        for child in children.get(pending.pop(), ()):
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
 def _in_group(pid, group):
-    """True for the experiment process or any process it started (same new session/process group)."""
+    """True for the experiment process or any process it started (torchrun ranks have their own sessions)."""
     try:
-        return pid == group or os.getpgid(pid) == group
+        return pid == group or os.getpgid(pid) == group or pid in _descendants(group)
     except (OSError, AttributeError):
-        return False
+        return pid in _descendants(group)
 
 
 def _gpu_sample(gpu_uuid, pid):
