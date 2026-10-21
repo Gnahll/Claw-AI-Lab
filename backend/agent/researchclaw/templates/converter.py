@@ -341,6 +341,10 @@ def _preprocess_markdown(md: str) -> str:
     text = text.replace("&mdash;", "---")
     text = text.replace("&ndash;", "--")
 
+    # 2a'. Drop HTML comments (e.g. leftover <!-- FIGURE_PROMPT ... --> image
+    #      prompts); escaped, they would print as body text in the PDF.
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL)
+
     # 2b. Note: stray code fences are handled in _sanitize_latex_output
     #     after conversion, not here (to avoid breaking real code blocks).
 
