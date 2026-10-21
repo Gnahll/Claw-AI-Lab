@@ -10010,6 +10010,7 @@ def _execute_export_publish(
             encoding="utf-8",
         )
 
+        source_summary = _copy_experiment_source(Path(exp_final_dir_path), code_dir)
         paper_title = _extract_paper_title(final_paper)
         file_list_md = "\n".join(f"- `{f}`" for f in code_file_names)
         readme = (
@@ -10018,6 +10019,7 @@ def _execute_export_publish(
             "This directory contains the experiment project used for the paper.\n\n"
             "## Project Files\n"
             f"{file_list_md}\n\n"
+            f"{_source_readme_section(source_summary)}"
             "## How to Run\n"
             "`python main.py`\n\n"
             "## Dependencies\n"
@@ -10114,6 +10116,97 @@ def _execute_export_publish(
         artifacts=tuple(artifacts),
         evidence_refs=tuple(f"stage-22/{a}" for a in artifacts),
     )
+
+
+_SOURCE_SKIP_DIRS = {"ckpt", "pretrained", "__pycache__", ".git"}
+_SOURCE_SKIP_SUFFIXES = {".pth", ".pt", ".ckpt", ".safetensors", ".bin", ".pyc"}
+_SOURCE_MAX_BYTES = 20 * 1024 * 1024
+_CODE_DIFFS = ("model_diff.patch", "full_code_diff.patch")
+
+
+def _copy_experiment_source(exp_final: Path, code_dir: Path) -> dict[str, list[str]]:
+    """Copy the modified codebase copy (``source/``) and its diffs into *code_dir*.
+
+    ``main.py`` imports the model from ``source/``, so without it the package
+    hides every network change.  Weights and files above 20 MB are skipped.
+    Returns the new, modified and skipped relative paths.
+    """
+    import shutil
+
+    summary: dict[str, list[str]] = {"new": [], "modified": [], "skipped": [], "diffs": []}
+    source = exp_final / "source"
+    if source.is_dir():
+        for path in sorted(source.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(source)
+            if (
+                any(part in _SOURCE_SKIP_DIRS for part in rel.parts[:-1])
+                or path.suffix.lower() in _SOURCE_SKIP_SUFFIXES
+                or path.stat().st_size > _SOURCE_MAX_BYTES
+            ):
+                summary["skipped"].append(rel.as_posix())
+                continue
+            target = code_dir / "source" / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, target)
+    for name in _CODE_DIFFS:
+        patch = exp_final / "outputs" / name
+        if patch.is_file():
+            shutil.copy2(patch, code_dir / name)
+            summary["diffs"].append(name)
+
+    original: set[str] = set()
+    try:
+        manifest = json.loads((source / "_manifest.json").read_text(encoding="utf-8"))
+        original = {str(p) for p in manifest.get("file_tree", [])}
+    except (OSError, ValueError, AttributeError):
+        pass
+    patch = next((code_dir / n for n in reversed(_CODE_DIFFS) if (code_dir / n).is_file()), None)
+    if patch is not None:
+        def strip(name: str) -> str:
+            name = name.split("\t")[0].strip()
+            for prefix in ("original/", "source/", "a/", "b/"):
+                if name.startswith(prefix):
+                    return name[len(prefix):]
+            return name
+
+        old = None
+        for line in patch.read_text(encoding="utf-8", errors="replace").splitlines():
+            if line.startswith("--- "):
+                old = line[4:]
+            elif line.startswith("+++ ") and old is not None:
+                new, before = strip(line[4:]), strip(old)
+                is_new = before == "/dev/null" or (original and before not in original)
+                bucket = summary["new" if is_new else "modified"]
+                if new not in bucket:
+                    bucket.append(new)
+                old = None
+    return summary
+
+
+def _source_readme_section(summary: dict[str, list[str]]) -> str:
+    if not any(summary.get(k) for k in ("new", "modified", "diffs")):
+        return ""
+    lines = [
+        "## Modified Codebase",
+        "`source/` is the experiment's copy of the original codebase, including",
+        "every model change; `main.py` imports the model from it.",
+        "",
+    ]
+    for key, label in (("new", "New files"), ("modified", "Modified files")):
+        if summary.get(key):
+            lines += [f"{label}:"] + [f"- `{p}`" for p in summary[key]] + [""]
+    if summary.get("diffs"):
+        lines += ["Diffs against the original codebase:"]
+        lines += [f"- `{p}`" for p in summary["diffs"]] + [""]
+    if summary.get("skipped"):
+        lines += [
+            f"Not included (weights or files over 20 MB): {len(summary['skipped'])} file(s),",
+            "e.g. " + ", ".join(f"`{p}`" for p in summary["skipped"][:5]),
+            "",
+        ]
+    return "\n".join(lines) + "\n"
 
 
 def _check_citation_relevance(

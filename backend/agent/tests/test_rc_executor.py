@@ -1157,6 +1157,75 @@ class TestExportPublishCodePackage:
         req_text = (stage_dir / "code" / "requirements.txt").read_text(encoding="utf-8")
         assert "numpy" in req_text
 
+    def test_export_packages_modified_source_and_diffs(
+        self,
+        tmp_path: Path,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md", "# Test Paper\n\nSome content..."
+        )
+        exp = run_dir / "stage-15" / "experiment_final"
+        (exp / "source" / "models").mkdir(parents=True)
+        (exp / "source" / "ckpt").mkdir()
+        (exp / "source" / "__pycache__").mkdir()
+        (exp / "outputs").mkdir()
+        (exp / "main.py").write_text("import torch\n", encoding="utf-8")
+        (exp / "source" / "cotransformer.py").write_text("x = 1\n", encoding="utf-8")
+        (exp / "source" / "models" / "new_block.py").write_text("y = 2\n", encoding="utf-8")
+        (exp / "source" / "ckpt" / "_manifest.json").write_text("{}", encoding="utf-8")
+        (exp / "source" / "weights.pth").write_bytes(b"0" * 16)
+        (exp / "source" / "__pycache__" / "a.pyc").write_bytes(b"0")
+        (exp / "source" / "_manifest.json").write_text(
+            json.dumps({"file_tree": ["cotransformer.py", "train.py"]}), encoding="utf-8"
+        )
+        (exp / "outputs" / "model_diff.patch").write_text("diff\n", encoding="utf-8")
+        (exp / "outputs" / "full_code_diff.patch").write_text(
+            "--- original/cotransformer.py\n+++ source/cotransformer.py\n@@\n-x = 0\n+x = 1\n"
+            "--- original/models/new_block.py\n+++ source/models/new_block.py\n@@\n+y = 2\n"
+            "--- /dev/null\n+++ main.py\n@@\n+import torch\n",
+            encoding="utf-8",
+        )
+        stage_dir = tmp_path / "run" / "stage-25"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        rc_executor._execute_export_publish(
+            stage_dir, run_dir, rc_config, adapters, llm=None
+        )
+
+        code = stage_dir / "code"
+        assert (code / "main.py").exists()
+        assert (code / "source" / "cotransformer.py").exists()
+        assert (code / "source" / "models" / "new_block.py").exists()
+        assert not (code / "source" / "weights.pth").exists()
+        assert not (code / "source" / "ckpt").exists()
+        assert not (code / "source" / "__pycache__").exists()
+        assert (code / "model_diff.patch").exists()
+        assert (code / "full_code_diff.patch").exists()
+        readme = (code / "README.md").read_text(encoding="utf-8")
+        new_part, modified_part = readme.split("Modified files:")
+        assert "`models/new_block.py`" in new_part.split("New files:")[1]
+        assert "`main.py`" in new_part.split("New files:")[1]
+        assert "`cotransformer.py`" in modified_part.split("Diffs")[0]
+        assert "full_code_diff.patch" in readme
+
+    def test_copy_experiment_source_skips_large_files(self, tmp_path: Path) -> None:
+        exp = tmp_path / "experiment_final"
+        (exp / "source").mkdir(parents=True)
+        (exp / "source" / "small.py").write_text("a = 1\n", encoding="utf-8")
+        big = exp / "source" / "data.npy"
+        with big.open("wb") as fh:
+            fh.seek(rc_executor._SOURCE_MAX_BYTES)
+            fh.write(b"0")
+        code = tmp_path / "code"
+        code.mkdir()
+        summary = rc_executor._copy_experiment_source(exp, code)
+        assert (code / "source" / "small.py").exists()
+        assert not (code / "source" / "data.npy").exists()
+        assert summary["skipped"] == ["data.npy"]
+
     def test_export_falls_back_to_experiment_py(
         self,
         tmp_path: Path,

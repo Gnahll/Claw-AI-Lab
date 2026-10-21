@@ -698,7 +698,7 @@ def _package_deliverables(
             "paper_final.md": "Manuscript draft; consult quality and citation reports",
             "paper.tex": f"LaTeX draft ({config.export.target_conference}); formatting does not establish publication readiness",
             "references.bib": "Preserved bibliography; may include references requiring verification",
-            "code/": "Experiment source code with requirements.txt",
+            "code/": "Experiment code, modified codebase copy (source/), diffs and requirements.txt",
             "verification_report.json": "Citation integrity & relevance verification",
             "experiment_evidence.md": "Authoritative experiment facts supplied to paper revision",
             "experiment_sync_report.json": "Detected evidence conflicts and selected revision source",
