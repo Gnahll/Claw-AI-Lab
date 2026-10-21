@@ -811,6 +811,32 @@ def _extract_paper_title(md_text: str) -> str:
     return "Untitled Paper"
 
 
+# Generic title frames that hide the method name (checked on the whole title
+# and on the subtitle after a "MethodName:" prefix).
+_GENERIC_TITLE_FRAME_RE = re.compile(
+    r"^\s*(?:"
+    r"an?\s+(?:empirical|exploratory|systematic|comparative|preliminary)\s+"
+    r"(?:study|analysis|investigation|evaluation)\b"
+    r"|towards?\b|investigating\b|exploring\b|on\s+the\b"
+    r"|when\b.*\bfalls?\s+short\b"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _generic_title_frame(title: str) -> str:
+    """Return the generic frame matched by *title* (or its subtitle), else ''."""
+    title = (title or "").strip().strip("*#").strip()
+    parts = [title]
+    if ":" in title:
+        parts.append(title.split(":", 1)[1])
+    for part in parts:
+        m = _GENERIC_TITLE_FRAME_RE.match(part)
+        if m:
+            return m.group(0).strip()
+    return ""
+
+
 def _generate_framework_diagram_prompt(
     paper_text: str,
     config: "RCConfig",
@@ -6956,6 +6982,22 @@ def _validate_draft_quality(
             "Fix duplicate adjacent words (likely typos)."
         )
 
+    # --- Generic title frame check ---
+    _title = _extract_paper_title(draft)
+    _frame = _generic_title_frame(_title)
+    if _frame:
+        overall_warnings.append(
+            f"Generic title frame '{_frame}' in title: {_title!r}"
+        )
+        revision_directives.append(
+            "RETITLE the paper: name the method or mechanism, e.g. "
+            "'XXX: A Cross-Branch Gating Mechanism for Forgery Localization'. "
+            "Do not use 'An Empirical Study of...', 'Towards...', "
+            "'Investigating...', 'On the...' or 'When X Falls Short'. "
+            "Negative or partial results are stated honestly in the abstract, "
+            "results and conclusion, not in the title."
+        )
+
     # --- AI-slop / boilerplate detection ---
     _BOILERPLATE_PHRASES = [
         "delves into", "delve into", "it is worth noting",
@@ -7319,8 +7361,11 @@ def _detect_result_contradictions(
                 f"NEGATIVE RESULT: Baseline '{baseline_name}' ({baseline_val:.4f}) "
                 f"outperforms proposed method '{proposed_name}' ({proposed_val:.4f}). "
                 "This is a NEGATIVE result. Do NOT claim the proposed method is superior. "
-                "Frame as 'An Empirical Study of...' or 'When X Falls Short'. "
-                "Discuss why the baseline won and what this implies for future work."
+                "Keep a method/mechanism title (e.g. 'XXX: A ... Mechanism for ...'); "
+                "never 'An Empirical Study of...', 'Towards...', 'Investigating...', "
+                "'On the...' or 'When X Falls Short'. State the negative result "
+                "honestly in the abstract, results and conclusion, and discuss why "
+                "the baseline won and what this implies for future work."
             )
 
     return advisories
