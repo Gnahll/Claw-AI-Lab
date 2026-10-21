@@ -1996,8 +1996,13 @@ def _generate_config_from_template(
     full_topic = f"{role_prompt}\n\n研究主题: {topic}" if role_prompt else topic
     if type(require_training) is not bool:
         raise ValueError("requireTraining 必须是布尔值")
-    if not isinstance(gpu_uuid, str) or (gpu_uuid and not re.fullmatch(r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", gpu_uuid)):
+    if not isinstance(gpu_uuid, str):
         raise ValueError("请填写已获授权的完整 GPU UUID；留空仅使用 CPU")
+    gpu_items = [item.strip() for item in gpu_uuid.split(",")] if gpu_uuid.strip() else []
+    if (any(not re.fullmatch(r"GPU-[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", item) for item in gpu_items)
+            or len(set(gpu_items)) != len(gpu_items)):
+        raise ValueError("请填写已获授权的完整 GPU UUID（多卡用英文逗号分隔，不能重复）；留空仅使用 CPU")
+    gpu_uuid = ",".join(gpu_items)
     if optional_experiments is not None and (
             not isinstance(optional_experiments, list)
             or not set(optional_experiments) <= {"ablation", "visualization", "analysis"}):
