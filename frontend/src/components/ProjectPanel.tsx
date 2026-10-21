@@ -352,9 +352,9 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
                 ))}
               </div>
               <label className="path-field">
-                <span className="path-label">{locale === 'zh' ? '已授权的 GPU UUID（留空仅用 CPU）' : 'Authorized GPU UUID (empty = CPU only)'}</span>
-                <input className="path-input" value={gpuUuid} onChange={e => setGpuUuid(e.target.value)} placeholder="GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" disabled={!connected} />
-                <span className="path-label">{locale === 'zh' ? '提交即允许此任务使用所填 GPU；占用中会停止，不会抢占。训练仍需有效的数据划分和完整实验方案。' : 'Submitting authorizes this task on the specified GPU; busy devices block execution. A valid data split and complete experiment plan are still required.'}</span>
+                <span className="path-label">{locale === 'zh' ? '已授权的 GPU UUID（多卡用英文逗号分隔，同一实验 DDP 多卡训练；留空仅用 CPU）' : 'Authorized GPU UUID(s) (comma-separated for multi-GPU DDP training of one experiment; empty = CPU only)'}</span>
+                <input className="path-input" value={gpuUuid} onChange={e => setGpuUuid(e.target.value)} placeholder="GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx,GPU-…" disabled={!connected} />
+                <span className="path-label">{locale === 'zh' ? '提交即允许此任务使用所填的全部 GPU；任一张占用中都会停止，不会抢占。训练仍需有效的数据划分和完整实验方案。' : 'Submitting authorizes this task on the specified GPU; busy devices block execution. A valid data split and complete experiment plan are still required.'}</span>
               </label>
               <button
                 className={`project-go-btn ${mode === 'lab' ? 'lab-mode' : 'reproduce-mode'}`}

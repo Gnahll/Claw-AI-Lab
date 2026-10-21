@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 
+from researchclaw.training.observed import rank_evidence_path
 from researchclaw.training.predictions import check_predictions
 
 
@@ -48,8 +49,8 @@ main.py itself must write workspace-root results.json on every execution, contai
 finite numeric measurements from the actual evaluation. A nested results file or
 one manually written by an agent after the process exits does not satisfy this contract.
 Never copy smoke/prior metrics into a full run. Keep full and SMOKE_TEST=1 paths separate.
-For a training task: use real PyTorch optimizer updates in this process (not a subprocess
-or distributed launcher), loss.backward(), and save the FINAL trained model state_dict
+For a training task: use real PyTorch optimizer updates in this process (do not start your own
+subprocess or distributed launcher), loss.backward(), and save the FINAL trained model state_dict
 to outputs/model.pt using torch.save. When several models are trained independently
 (e.g. one per seed), also save each one's final state_dict under outputs/ (e.g.
 outputs/final_<seed>.pt) before training the next; outputs/model.pt holds the delivered one.
@@ -64,6 +65,14 @@ metrics, planned/completed epochs and steps, data split, sample counts, seed, ev
 protocol and limitations in results.json; do not change test splits or reduce planned
 training just to pass the gate. Parameter updates alone do not prove scientific validity.
 Do not override CUDA_VISIBLE_DEVICES; an empty value means CPU only.
+Multi-GPU: when CUDA_VISIBLE_DEVICES lists several GPUs, the runtime itself starts the full
+training run with torchrun, one process per GPU (WORLD_SIZE, RANK, LOCAL_RANK are set). Then
+use DistributedDataParallel: dist.init_process_group("nccl"), torch.cuda.set_device(LOCAL_RANK),
+a DistributedSampler for training data, and sampler.set_epoch(epoch). The global batch is the
+per-GPU batch times WORLD_SIZE; report both. Only rank 0 evaluates or gathers results, saves
+checkpoints (model.module.state_dict()), predictions and results.json; other ranks wait at
+dist.barrier() and must not write them. Every GPU must take part in training. When WORLD_SIZE
+is unset (smoke test, single GPU, CPU), run as one ordinary process with no process group.
 """
 
 
@@ -89,7 +98,12 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
     training = bool(config.experiment.require_training) and not smoke
     if not (workspace / "outputs").resolve().is_relative_to(workspace):
         raise ValueError("outputs directory must remain inside the experiment workspace")
+    gpus = [item for item in os.environ.get("CUDA_VISIBLE_DEVICES", "").split(",") if item]
+    world_size = len(gpus) if training and len(gpus) > 1 else 1
     stale_paths = [result_path, evidence_path, evidence_path.with_suffix(".jsonl")]
+    for rank in range(1, len(gpus)):
+        rank_path = rank_evidence_path(evidence_path, rank)
+        stale_paths += [rank_path, rank_path.with_suffix(".jsonl")]
     if training:
         stale_paths.append(workspace / "outputs" / "model.pt")
     for stale in stale_paths:
@@ -107,9 +121,12 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
     else:
         env.pop("SMOKE_TEST", None)
     cmd = [python, "-m", "researchclaw.training.observed", str(evidence_path)] if training else [python, "main.py"]
+    if world_size > 1:
+        cmd = [python, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={world_size}",
+               "-m", "researchclaw.training.observed", str(evidence_path)]
     budget = timeout if timeout is not None else config.experiment.time_budget_sec
     report = {"success": False, "smoke": smoke, "require_training": training, "command": cmd,
-              "gpu_id": env.get("CUDA_VISIBLE_DEVICES", ""), "results": {}, "errors": []}
+              "gpu_id": env.get("CUDA_VISIBLE_DEVICES", ""), "world_size": world_size, "results": {}, "errors": []}
     start = time.monotonic()
     started_at = time.time() - 2  # coarse filesystem mtime resolution
     process = None
@@ -148,6 +165,8 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
                     raise ValueError(f"Missing checkpoint matching trained parameters: {problem}")
                 if report["gpu_id"] and not observation.get("gpu_process"):
                     raise ValueError("GPU requested but no GPU training process observed")
+                if world_size > 1:
+                    report["training_ranks"] = _check_ranks(evidence_path, gpus)
                 predictions = report["predictions"] = check_predictions(workspace / "outputs", started_at)
                 if not predictions["groups"]:
                     raise ValueError("No saved test-set predictions found under outputs/ (path containing 'pred')")
@@ -162,16 +181,70 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
         finally:
             if process is not None:
                 if os.name != "nt":
-                    try:
-                        os.killpg(process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
+                    # torchrun starts every rank in its own session; find them before the
+                    # launcher dies, or they would be orphaned on their GPUs.
+                    descendants = sorted(_descendants(process.pid))
+                    for kill, target in [(os.killpg, process.pid), *[(os.killpg, pid) for pid in descendants],
+                                         *[(os.kill, pid) for pid in descendants]]:
+                        try:
+                            kill(target, signal.SIGKILL)
+                        except (ProcessLookupError, PermissionError):
+                            pass
                 elif process.poll() is None:
                     process.kill()
                 process.wait()
             report["elapsed_sec"] = round(time.monotonic() - start, 2)
             (output_dir / "execution_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
+
+
+def _check_ranks(evidence_path, gpus):
+    """Every torchrun rank must have trained on its own allocated GPU."""
+    ranks = []
+    used = [(json.loads(evidence_path.read_text(encoding="utf-8")).get("gpu_process") or {}).get("gpu_uuid")]
+    for rank in range(1, len(gpus)):
+        path = rank_evidence_path(evidence_path, rank)
+        if not path.is_file():
+            raise ValueError(f"Missing training evidence of rank {rank}; every GPU must train")
+        observation = json.loads(path.read_text(encoding="utf-8"))
+        if observation.get("error"):
+            raise ValueError(f"Rank {rank} failed: {observation['error']}")
+        if not observation.get("cuda_update_observed") or observation.get("optimizer_steps", 0) < 1:
+            raise ValueError(f"Rank {rank} made no GPU parameter update; every GPU must train")
+        gpu = observation.get("gpu_process") or {}
+        if gpu.get("memory_mib", 0) <= 0:
+            raise ValueError(f"Rank {rank} has no process-attributed GPU evidence")
+        used.append(gpu.get("gpu_uuid"))
+        ranks.append({key: observation.get(key) for key in ("rank", "optimizer_steps", "last_loss", "gpu_process")})
+    if sorted(used) != sorted(gpus):
+        raise ValueError("Training ranks did not cover every allocated GPU exactly once")
+    return ranks
+
+
+def _descendants(pid):
+    """All live descendants of pid (Linux /proc), including those in their own sessions."""
+    children = {}
+    for entry in Path("/proc").glob("[0-9]*/stat"):
+        try:
+            stat = entry.read_text()
+            children.setdefault(int(stat[stat.rfind(")") + 2:].split()[1]), []).append(int(entry.parent.name))
+        except (OSError, ValueError, IndexError):
+            continue
+    found, pending = set(), [pid]
+    while pending:
+        for child in children.get(pending.pop(), ()):
+            if child not in found:
+                found.add(child)
+                pending.append(child)
+    return found
+
+
+def _in_group(pid, group):
+    """True for the experiment process or any process it started (torchrun ranks have their own sessions)."""
+    try:
+        return pid == group or os.getpgid(pid) == group or pid in _descendants(group)
+    except (OSError, AttributeError):
+        return pid in _descendants(group)
 
 
 def _gpu_sample(gpu_uuid, pid):
@@ -184,7 +257,7 @@ def _gpu_sample(gpu_uuid, pid):
         return {"error": str(exc)[:200]}
     if len(inventory) != 1:
         return {"error": "Allocated GPU UUID is absent or ambiguous"}
-    own = [row for row in processes if row[0] == gpu_uuid and row[1] == str(pid)]
+    own = [row for row in processes if row[0] == gpu_uuid and row[1].isdigit() and _in_group(int(row[1]), pid)]
     return {"utilization": float(inventory[0][1]), "memory_mib": float(inventory[0][2]),
             "process_memory_mib": float(own[0][2]) if own else 0.0, "process_on_gpu": bool(own)}
 
@@ -193,15 +266,16 @@ def _supervise(process, budget, experiment, output_dir, steps_path, report):
     """Wait for the experiment while checking that it is alive, progressing and using its GPU.
 
     Progress means new execution.log output or new optimizer steps. A hung run (deadlock,
-    stuck data loader) or a run that silently never touches its allocated GPU is killed
-    instead of occupying the budget.
+    stuck data loader) or a run that silently never touches one of its allocated GPUs is
+    killed instead of occupying the budget.
     """
     stall_timeout = int(getattr(experiment, "stall_timeout_sec", 1800) or 0)
     gpu_timeout = int(getattr(experiment, "gpu_idle_timeout_sec", 1800) or 0)
     interval = max(1, int(getattr(experiment, "monitor_interval_sec", 30) or 30))
-    gpu_uuid = report["gpu_id"] if report["gpu_id"].startswith("GPU-") else ""
+    gpu_uuids = [item for item in report["gpu_id"].split(",") if item.startswith("GPU-")]
     log_path = output_dir / "execution.log"
-    start = last_progress = gpu_last_used = time.monotonic()
+    start = last_progress = time.monotonic()
+    gpu_last_used = dict.fromkeys(gpu_uuids, start)
     last_marker = None
     monitor = report["monitor"] = {"samples": 0, "gpu_seen": False, "max_steps": 0}
     with (output_dir / "training_monitor.jsonl").open("w", encoding="utf-8") as samples:
@@ -224,10 +298,14 @@ def _supervise(process, budget, experiment, output_dir, steps_path, report):
             sample = {"elapsed_sec": round(now - start, 1), "alive": process.poll() is None,
                       "log_bytes": marker[0], "optimizer_steps": steps,
                       "since_progress_sec": round(now - last_progress, 1)}
-            if gpu_uuid:
-                sample["gpu"] = gpu = _gpu_sample(gpu_uuid, process.pid)
+            for gpu_uuid in gpu_uuids:
+                gpu = _gpu_sample(gpu_uuid, process.pid)
+                if len(gpu_uuids) == 1:
+                    sample["gpu"] = gpu
+                else:
+                    sample.setdefault("gpus", {})[gpu_uuid] = gpu
                 if "error" in gpu or gpu["process_on_gpu"] or gpu["utilization"] > 0:
-                    gpu_last_used = now  # Do not kill on a monitoring failure.
+                    gpu_last_used[gpu_uuid] = now  # Do not kill on a monitoring failure.
                 monitor["gpu_seen"] = monitor["gpu_seen"] or bool(gpu.get("process_on_gpu"))
             samples.write(json.dumps(sample) + "\n")
             samples.flush()
@@ -235,9 +313,10 @@ def _supervise(process, budget, experiment, output_dir, steps_path, report):
             if stall_timeout and now - last_progress > stall_timeout:
                 raise ValueError(f"Training stalled: no new log output or optimizer step for "
                                  f"{int(now - last_progress)}s; see training_monitor.jsonl")
-            if gpu_timeout and now - gpu_last_used > gpu_timeout:
-                raise ValueError(f"GPU {gpu_uuid} requested but idle and unused by the experiment for "
-                                 f"{int(now - gpu_last_used)}s; see training_monitor.jsonl")
+            for gpu_uuid, last_used in gpu_last_used.items():
+                if gpu_timeout and now - last_used > gpu_timeout:
+                    raise ValueError(f"GPU {gpu_uuid} requested but idle and unused by the experiment for "
+                                     f"{int(now - last_used)}s; see training_monitor.jsonl")
 
 
 def _reject_nonfinite(value):

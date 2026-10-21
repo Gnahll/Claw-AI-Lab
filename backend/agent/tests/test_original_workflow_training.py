@@ -199,6 +199,107 @@ def test_watchdog_kills_a_run_that_never_uses_its_gpu(tmp_path, monkeypatch, sam
         assert "idle and unused" in result["errors"][0]
 
 
+GPU_UUID_2 = "GPU-66666666-7777-8888-9999-000000000000"
+
+
+@pytest.mark.parametrize("value,expected", [
+    (f"{GPU_UUID}, {GPU_UUID_2}", f"{GPU_UUID},{GPU_UUID_2}"),
+    (f"{GPU_UUID},{GPU_UUID}", None),       # a GPU listed twice
+    (f"{GPU_UUID},", None),                 # empty item
+])
+def test_one_experiment_may_use_several_gpus(value, expected):
+    if expected is None:
+        with pytest.raises(ValueError):
+            validate_gpu_uuid(value)
+    else:
+        assert validate_gpu_uuid(value) == expected
+
+
+def test_multi_gpu_execution_locks_and_checks_every_gpu(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    from researchclaw.training import resources
+
+    locked, checked, observed = [], [], []
+
+    @contextmanager
+    def lock(path):
+        locked.append(path.stem)
+        yield
+
+    monkeypatch.setattr(resources, "job_lock", lock)
+    monkeypatch.setattr(resources, "require_idle_gpu", checked.append)
+
+    @with_execution_resources(Stage.EXPERIMENT_RUN)
+    def execute(*args, **kwargs):
+        observed.append(os.environ["CUDA_VISIBLE_DEVICES"])
+
+    execute(tmp_path, tmp_path, configuration(gpu=f"{GPU_UUID_2},{GPU_UUID}"), None)
+    assert locked == checked == sorted([GPU_UUID, GPU_UUID_2])
+    assert observed == [f"{GPU_UUID_2},{GPU_UUID}"]
+
+
+@pytest.mark.parametrize("training,expected", [(True, "torch.distributed.run"), (False, "main.py")])
+def test_multi_gpu_training_starts_one_process_per_gpu(tmp_path, monkeypatch, training, expected):
+    from researchclaw.training import execution
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", f"{GPU_UUID},{GPU_UUID_2}")
+    (tmp_path / "main.py").write_text("")
+
+    def popen(cmd, **kwargs):
+        raise OSError("not started in this test")
+
+    monkeypatch.setattr(execution.subprocess, "Popen", popen)
+    result = run_experiment(tmp_path, tmp_path / "evidence", configuration(training=training))
+    assert expected in result["command"]
+    if training:
+        assert "--nproc_per_node=2" in result["command"] and result["world_size"] == 2
+        assert result["command"][-2:] == ["researchclaw.training.observed",
+                                          str((tmp_path / "evidence/training_observation.json").resolve())]
+
+
+def _rank_file(path, gpu, steps=3, error=None):
+    payload = {"optimizer_steps": steps, "cuda_update_observed": steps > 0, "last_loss": 0.5,
+               "gpu_process": {"gpu_uuid": gpu, "pid": 1, "memory_mib": 900.0} if steps else None}
+    if error:
+        payload["error"] = error
+    path.write_text(json.dumps(payload))
+
+
+@pytest.mark.parametrize("ranks,problem", [
+    ([GPU_UUID_2], None),
+    ([], "Missing training evidence of rank 1"),
+    ([(GPU_UUID_2, 0)], "no GPU parameter update"),
+    ([GPU_UUID], "cover every allocated GPU"),          # both ranks on the same GPU
+    ([(GPU_UUID_2, 3, "NCCL timeout")], "Rank 1 failed"),
+])
+def test_every_rank_must_train_on_its_own_gpu(tmp_path, ranks, problem):
+    from researchclaw.training.execution import _check_ranks
+    from researchclaw.training.observed import rank_evidence_path
+
+    evidence = tmp_path / "training_observation.json"
+    _rank_file(evidence, GPU_UUID)
+    for rank, item in enumerate(ranks, start=1):
+        _rank_file(rank_evidence_path(evidence, rank), *(item if isinstance(item, tuple) else (item,)))
+    if problem is None:
+        assert _check_ranks(evidence, [GPU_UUID, GPU_UUID_2])[0]["gpu_process"]["gpu_uuid"] == GPU_UUID_2
+    else:
+        with pytest.raises(ValueError, match=problem):
+            _check_ranks(evidence, [GPU_UUID, GPU_UUID_2])
+
+
+def test_watchdog_kills_a_multi_gpu_run_that_leaves_one_gpu_idle(tmp_path, monkeypatch):
+    from researchclaw.training import execution
+
+    busy = {"utilization": 90.0, "memory_mib": 9000.0, "process_memory_mib": 9000.0, "process_on_gpu": True}
+    idle = {"utilization": 0.0, "memory_mib": 0.0, "process_memory_mib": 0.0, "process_on_gpu": False}
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", f"{GPU_UUID},{GPU_UUID_2}")
+    monkeypatch.setattr(execution, "_gpu_sample", lambda uuid, pid: dict(busy if uuid == GPU_UUID else idle))
+    (tmp_path / "main.py").write_text("import json,time\nfor epoch in range(8):\n print(epoch, flush=True)\n"
+                                      " time.sleep(0.5)\nopen('results.json','w').write(json.dumps({'metric': 1.0}))\n")
+    result = run_experiment(tmp_path, tmp_path / "evidence", watched(gpu_idle=2))
+    assert not result["success"] and GPU_UUID_2 in result["errors"][0]
+
+
 @pytest.mark.parametrize("drift,tensors,accepted", [
     ("1+1e-6", "weight", True),        # in-place renormalisation (BayarConv2d) after saving: float rounding
     ("1+1e-3", "weight", False),       # a real change is not rounding

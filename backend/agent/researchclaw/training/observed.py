@@ -1,4 +1,7 @@
-"""Observe a single-process PyTorch experiment, not an LLM-written report."""
+"""Observe a PyTorch experiment process, not an LLM-written report.
+
+Multi-GPU runs are launched by torchrun with one copy of this wrapper per GPU (DDP). Each
+rank records its own evidence; rank 0 owns outputs/model.pt and its checkpoint check."""
 
 from __future__ import annotations
 
@@ -158,14 +161,27 @@ def verify_checkpoints(final_checkpoint, optimizers, evidence, saved_live=()):
     evidence["checkpoint_verified"] = bool(trained) and final_matched and not missing
 
 
+def rank_evidence_path(evidence_path, rank):
+    """Rank 0 writes the main evidence file; rank r > 0 writes <stem>.rank<r>.json next to it."""
+    evidence_path = Path(evidence_path)
+    return evidence_path if rank == 0 else evidence_path.with_name(f"{evidence_path.stem}.rank{rank}{evidence_path.suffix}")
+
+
 def main():
     import torch
     from torch.optim.optimizer import register_optimizer_step_post_hook, register_optimizer_step_pre_hook
 
-    evidence_path = Path(sys.argv[1]).resolve()
+    rank = int(os.environ.get("RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    devices = [item for item in visible.split(",") if item]
+    evidence_path = rank_evidence_path(Path(sys.argv[1]).resolve(), rank)
     evidence = {"optimizer_steps": 0, "parameter_update_observed": False, "cuda_update_observed": False,
-                "losses": [], "pid": os.getpid(), "cuda_visible_devices": os.environ.get("CUDA_VISIBLE_DEVICES", ""),
-                "checkpoint_verified": False, "scope": "single_process_pytorch_execution_not_scientific_validation",
+                "losses": [], "pid": os.getpid(), "cuda_visible_devices": visible,
+                "rank": rank, "world_size": world_size,
+                "gpu_uuid": devices[local_rank] if world_size > 1 and local_rank < len(devices) else visible,
+                "checkpoint_verified": False, "scope": "pytorch_execution_not_scientific_validation",
                 "loss_semantics": "Scalars passed to Tensor.backward; may be AMP-scaled. See experiment logs for unscaled losses."}
     snapshots = {}
     optimizers = {}
@@ -245,13 +261,15 @@ def main():
             if exc.code not in (None, 0):
                 raise
         checkpoint = Path("outputs/model.pt")
-        if checkpoint.is_file() and not checkpoint.is_symlink() and checkpoint.stat().st_size > 0:
+        if rank != 0:
+            evidence["checkpoint_verified"] = None  # rank 0 saves and verifies the shared model
+        elif checkpoint.is_file() and not checkpoint.is_symlink() and checkpoint.stat().st_size > 0:
             verify_checkpoints(checkpoint, list(optimizers.values()), evidence,
                                [saved_live(key) for key in optimizers])
             evidence["checkpoint_sha256"] = hashlib.sha256(checkpoint.read_bytes()).hexdigest()
         if evidence["cuda_update_observed"]:
             from researchclaw.training.jobs import gpu_evidence
-            evidence["gpu_process"] = gpu_evidence(evidence["cuda_visible_devices"])
+            evidence["gpu_process"] = gpu_evidence(evidence["gpu_uuid"])
     except BaseException as exc:
         evidence["error"] = str(exc)
         traceback.print_exc()
