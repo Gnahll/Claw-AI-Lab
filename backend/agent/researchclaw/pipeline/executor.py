@@ -380,6 +380,26 @@ def _newest_stage_files(run_dir: Path, pattern: str) -> list[Path]:
     return sorted(run_dir.glob(pattern), key=key, reverse=True)
 
 
+def _latest_experiment_summary_text(run_dir: Path) -> str | None:
+    """Text of the newest experiment_summary.json (latest round only).
+
+    Looks at stage-16 (RESULT_ANALYSIS) first, then the older stage-14
+    layout, each ordered by ``_newest_stage_files``.  Older loop rounds
+    (``stage-16_v1``...) are never preferred over the current round, even
+    if they report more metrics: the paper must describe the latest run.
+    """
+    for pattern in ("stage-16*/experiment_summary.json", "stage-14*/experiment_summary.json"):
+        for path in _newest_stage_files(run_dir, pattern):
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            if isinstance(_safe_json_loads(text, None), dict):
+                logger.info("S20: Using %s", path.relative_to(run_dir).as_posix())
+                return text
+    return None
+
+
 def _find_prior_file(run_dir: Path, filename: str) -> Path | None:
     """Like ``_read_prior_artifact`` but returns the *Path* instead of content."""
     def _stage_sort_key(p: Path) -> tuple[str, int]:
@@ -7254,30 +7274,7 @@ def _execute_paper_draft(
             "and post-discussion data provided in the research context.\n"
         )
 
-    # R21-1: Read BEST experiment_summary across all stage-16 (current) and
-    # stage-14 (older layout) versions.
-    # Refinement can regress — the final (non-versioned) stage-14 may have
-    # worse data than an earlier version. Pick the richest one.
-    exp_summary_text = None
-    _best_metric_count = 0
-    for _s14_dir in sorted([*run_dir.glob("stage-14*"), *run_dir.glob("stage-16*")]):
-        _candidate = _s14_dir / "experiment_summary.json"
-        if _candidate.is_file():
-            _text = _candidate.read_text(encoding="utf-8")
-            _parsed = _safe_json_loads(_text, {})
-            if isinstance(_parsed, dict):
-                _mcount = _parsed.get("total_metric_keys", 0) or len(
-                    _parsed.get("metrics_summary", {})
-                )
-                _paired_count = len(_parsed.get("paired_comparisons", []))
-                _score = _mcount + _paired_count * 10  # Prefer paired data
-                if _score > _best_metric_count:
-                    _best_metric_count = _score
-                    exp_summary_text = _text
-                    logger.info(
-                        "R21-1: Selected %s (metric_keys=%d, paired=%d, score=%d)",
-                        _s14_dir.name, _mcount, _paired_count, _score,
-                    )
+    exp_summary_text = _latest_experiment_summary_text(run_dir)
     # Fallback to standard artifact read
     if exp_summary_text is None:
         exp_summary_text = _read_prior_artifact(run_dir, "experiment_summary.json")
