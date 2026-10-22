@@ -23,6 +23,7 @@ from researchclaw.pipeline.codegen.system_prompt import build_system_prompt, bui
 from researchclaw.pipeline.codegen.turn_loop import ClawTurnLoop
 from researchclaw.pipeline.codegen.types import CodegenContext, CodegenPhase, CodegenResult
 from researchclaw.resources.intake import render_resource_manifest
+from researchclaw import single_run
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +75,7 @@ class ClawAgentStrategy:
         # Build system prompt (set workspace path so LLM knows the correct cwd)
         from researchclaw.pipeline.codegen.system_prompt import set_workspace_path
         set_workspace_path(str(workspace))
-        system_prompt = build_system_prompt(ctx)
+        system_prompt = single_run.apply(build_system_prompt(ctx), single_run.is_single_run(config), append_policy=True)
         session.log(
             CodegenPhase.GENERATE,
             f"System prompt: {len(system_prompt)} chars",
@@ -95,7 +96,7 @@ class ClawAgentStrategy:
         )
 
         # Build user message
-        user_message = build_user_message(ctx)
+        user_message = single_run.apply(build_user_message(ctx), single_run.is_single_run(config))
 
         # Resolve python_path from config (experiment.sandbox.python_path)
         python_path = getattr(config.experiment.sandbox, "python_path", "") or ""

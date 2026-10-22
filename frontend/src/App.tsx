@@ -372,6 +372,7 @@ export default function App() {
                   requireTraining: paths.requireTraining,
                   gpuUuid: paths.gpuUuid,
                   optionalExperiments: paths.optionalExperiments,
+                  runsPerCondition: paths.runsPerCondition,
                 }));
               }
             }}
