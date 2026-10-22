@@ -308,6 +308,8 @@ class ExperimentConfig:
     require_training: bool = False
     gpu_uuid: str = ""
     time_budget_sec: int = 3600
+    # Independent runs (seeds) per condition; 1 = single-run protocol (see single_run.py).
+    runs_per_condition: int = 3
     # Watchdog: kill a run with no new log output or optimizer step, or whose requested
     # GPU stays idle and unused, for this long (0 disables). Sampled every monitor_interval_sec.
     stall_timeout_sec: int = 1800
@@ -598,6 +600,10 @@ def validate_config(
     if not _is_blank(exp_direction) and exp_direction not in ("minimize", "maximize"):
         errors.append(f"Invalid experiment.metric_direction: {exp_direction}")
 
+    exp_runs = _get_by_path(data, "experiment.runs_per_condition")
+    if not _is_blank(exp_runs) and (type(exp_runs) is not int or not (exp_runs == 1 or 3 <= exp_runs <= 10)):
+        errors.append(f"Invalid experiment.runs_per_condition: {exp_runs} (1, or 3-10)")
+
     kb_root_raw = _get_by_path(data, "knowledge_base.root")
     if check_paths and not _is_blank(kb_root_raw) and project_root is not None:
         kb_root = project_root / str(kb_root_raw)
@@ -650,6 +656,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         require_training=bool(data.get("require_training", False)),
         gpu_uuid=str(data.get("gpu_uuid", "")),
         time_budget_sec=int(data.get("time_budget_sec", 3600)),
+        runs_per_condition=int(data.get("runs_per_condition", 3)),
         stall_timeout_sec=int(data.get("stall_timeout_sec", 1800)),
         gpu_idle_timeout_sec=int(data.get("gpu_idle_timeout_sec", 1800)),
         monitor_interval_sec=int(data.get("monitor_interval_sec", 30)),

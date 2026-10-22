@@ -24,6 +24,7 @@ from researchclaw.pipeline.iterative_refine.system_prompt import (
 )
 from researchclaw.pipeline.stages import REFINE_REQUEST_FILE, Stage, StageStatus
 from researchclaw.training.execution import EXECUTION_CONTRACT, run_experiment
+from researchclaw import single_run
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +139,9 @@ class IterativeRefineRuntime:
                 "all of them to results.json.\n\n" + refine_request[:6000]
             )
 
+        _single = single_run.is_single_run(config)
+        system_prompt = single_run.apply(system_prompt, _single, append_policy=True)
+        user_message = single_run.apply(user_message, _single)
         # Save system prompt
         (stage_dir / "refine_system_prompt.md").write_text(system_prompt, encoding="utf-8")
         session.add_artifact("refine_system_prompt.md")

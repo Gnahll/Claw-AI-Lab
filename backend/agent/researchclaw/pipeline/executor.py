@@ -20,6 +20,7 @@ from researchclaw.hardware import HardwareProfile, detect_hardware, ensure_torch
 from researchclaw.llm import create_llm_client
 from researchclaw.llm.client import LLMClient
 from researchclaw.prompts import PromptManager
+from researchclaw import single_run
 from researchclaw.pipeline.stages import (
     NEXT_STAGE,
     Stage,
@@ -6186,7 +6187,7 @@ def _write_paper_sections(
 
     # T3.5: Retry once on failure, use placeholder if still fails
     try:
-        resp1 = _chat_with_prompt(llm, system, call1_user, max_tokens=_paper_max_tokens, retries=1)
+        resp1 = _chat_with_prompt(llm, system, pm.adapt(call1_user), max_tokens=_paper_max_tokens, retries=1)
         part1 = resp1.content.strip()
     except Exception:  # noqa: BLE001
         logger.error("Stage 17: Part 1 LLM call failed after retry — using placeholder")
@@ -6235,7 +6236,7 @@ def _write_paper_sections(
         "Output markdown with ## headers. Continue from where Part 1 ended."
     )
     try:
-        resp2 = _chat_with_prompt(llm, system, call2_user, max_tokens=_paper_max_tokens, retries=1)
+        resp2 = _chat_with_prompt(llm, system, pm.adapt(call2_user), max_tokens=_paper_max_tokens, retries=1)
         part2 = resp2.content.strip()
     except Exception:  # noqa: BLE001
         logger.error("Stage 17: Part 2 LLM call failed after retry — using placeholder")
@@ -6294,7 +6295,7 @@ def _write_paper_sections(
         "Output markdown with ## headers. Do NOT include a References section."
     )
     try:
-        resp3 = _chat_with_prompt(llm, system, call3_user, max_tokens=_paper_max_tokens, retries=1)
+        resp3 = _chat_with_prompt(llm, system, pm.adapt(call3_user), max_tokens=_paper_max_tokens, retries=1)
         part3 = resp3.content.strip()
     except Exception:  # noqa: BLE001
         logger.error("Stage 17: Part 3 LLM call failed after retry — using placeholder")
@@ -6764,6 +6765,7 @@ _BALANCE_SECTIONS = frozenset({
 def _validate_draft_quality(
     draft: str,
     stage_dir: Path | None = None,
+    single_run_mode: bool = False,
 ) -> dict[str, Any]:
     """Validate a paper draft for section balance and prose quality.
 
@@ -7105,7 +7107,8 @@ def _validate_draft_quality(
     for sec in sections_data:
         if sec["heading_lower"] in _results_headings and sec["level"] <= 2:
             results_body += sec["body"] + "\n"
-    if results_body and len(results_body.split()) > 100:
+    # One run per condition (user decision) has no variance to report.
+    if results_body and len(results_body.split()) > 100 and not single_run_mode:
         has_std = bool(re.search(r"±|\\pm|\bstd\b|\\std\b|standard deviation", results_body, re.IGNORECASE))
         has_ci = bool(re.search(r"confidence interval|\bCI\b|95%|p-value|p\s*<", results_body, re.IGNORECASE))
         has_seeds = bool(re.search(r"(?:seed|run|trial)s?\s*[:=]\s*\d|averaged?\s+over\s+\d+\s+(?:seed|run|trial)", results_body, re.IGNORECASE))
@@ -7526,10 +7529,6 @@ def _execute_paper_draft(
                     scale_block += f"- Total conditions tested: {_total_conds}\n"
                 if _total_mkeys:
                     scale_block += f"- Total metric keys collected: {_total_mkeys}\n"
-                scale_block += (
-                    "- This is a MULTI-SEED experiment. Report mean +/- std across seeds.\n"
-                    "- Do NOT describe results as 'single run' or 'preliminary'.\n"
-                )
                 exp_metrics_instruction += scale_block
 
             # R19-6 + R33: Inject condition summaries with CIs
@@ -7658,7 +7657,7 @@ def _execute_paper_draft(
                 (cond_summaries.get(c) or {}).get("n_seed_metrics", 0) > 1
                 for c in _cond_names
             ) if _cond_names else False
-            if _any_seeds:
+            if _any_seeds and not single_run.is_single_run(config):
                 exp_metrics_instruction += (
                     "\n\n## MULTI-SEED EXPERIMENT FRAMING (CRITICAL)\n"
                     "This experiment uses MULTIPLE independent random seeds per condition.\n"
@@ -8279,7 +8278,7 @@ Generated: {_utcnow_iso()}
         )
 
     # Validate draft quality (section balance + bullet density)
-    _validate_draft_quality(draft, stage_dir=stage_dir)
+    _validate_draft_quality(draft, stage_dir=stage_dir, single_run_mode=single_run.is_single_run(config))
 
     return StageResult(
         stage=Stage.PAPER_DRAFT,
@@ -10828,6 +10827,7 @@ def execute_stage(
         _ = advance(stage, StageStatus.PENDING, TransitionEvent.START)
         executor = _STAGE_EXECUTORS[stage]
         prompts = PromptManager(config.prompts.custom_file or None)  # type: ignore[attr-defined]
+        prompts.set_runs_per_condition(single_run.runs_per_condition(config))
 
         human_fb = _load_human_feedback(run_dir, stage)
         if human_fb:

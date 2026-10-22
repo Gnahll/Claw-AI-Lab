@@ -1973,6 +1973,7 @@ def _generate_config_from_template(
     codebases_dir: str = "", datasets_dir: str = "", checkpoints_dir: str = "",
     require_training: bool = True, gpu_uuid: str = "",
     optional_experiments: list[str] | None = None,
+    runs_per_condition: int = 3,
 ) -> str:
     """Generate a project-specific YAML config from the default template.
 
@@ -2007,8 +2008,12 @@ def _generate_config_from_template(
             not isinstance(optional_experiments, list)
             or not set(optional_experiments) <= {"ablation", "visualization", "analysis"}):
         raise ValueError("可选实验只能是 ablation、visualization、analysis 中的若干项")
+    if type(runs_per_condition) is not int or runs_per_condition not in (1, 3, 5):
+        raise ValueError("每个条件的运行次数只能是 1、3 或 5")
     if require_training:
         full_topic += " 要求：在原有流程内完成真实模型训练和独立评估，保存训练损失、验证指标、模型权重和实验记录；不能以仅推理、计划或短测冒充完成训练。数据划分与完整训练预算须在实验方案中明确，资源不足时报告阻碍。"
+    if runs_per_condition == 1:
+        full_topic += " 每个实验条件只运行一次（所有条件用同一个固定随机种子），不做多种子重复、均值±标准差、置信区间或显著性检验，论文如实写明单次运行。"
 
     import yaml
 
@@ -2017,7 +2022,8 @@ def _generate_config_from_template(
     research = parsed.setdefault("research", {})
     research.update(topic=full_topic, reference_papers=reference_papers or [])
     experiment = parsed.setdefault("experiment", {})
-    experiment.update(require_training=require_training, gpu_uuid=gpu_uuid, training_job_dir="")
+    experiment.update(require_training=require_training, gpu_uuid=gpu_uuid, training_job_dir="",
+                      runs_per_condition=runs_per_condition)
     if optional_experiments is not None:
         experiment["optional_experiments"] = sorted(set(optional_experiments))
     for key, value in (("codebases_dir", codebases_dir), ("datasets_dir", datasets_dir), ("checkpoints_dir", checkpoints_dir)):
@@ -2167,6 +2173,7 @@ def quick_submit_project(
                 require_training=_po.get("require_training", True),
                 gpu_uuid=_po.get("gpu_uuid", ""),
                 optional_experiments=_po.get("optional_experiments"),
+                runs_per_condition=_po.get("runs_per_condition", 3),
             )
         except Exception as e:
             messages.append(msg_log(sys_agent, f"配置生成失败: {e}", "error"))
@@ -2208,6 +2215,7 @@ def quick_submit_project(
             require_training=_po.get("require_training", True),
             gpu_uuid=_po.get("gpu_uuid", ""),
             optional_experiments=_po.get("optional_experiments"),
+            runs_per_condition=_po.get("runs_per_condition", 3),
         )
     except Exception as e:
         messages.append(msg_log(sys_agent, f"配置生成失败: {e}", "error"))
@@ -2244,6 +2252,7 @@ def quick_submit_project(
                 require_training=_po.get("require_training", True),
                 gpu_uuid=_po.get("gpu_uuid", ""),
                 optional_experiments=_po.get("optional_experiments"),
+                runs_per_condition=_po.get("runs_per_condition", 3),
             )
         except Exception as e:
             messages.append(msg_log(sys_agent, f"配置生成失败 [{name}]: {e}", "error"))
@@ -3133,6 +3142,7 @@ async def handle_command(state: BridgeState, data: dict) -> list[dict]:
             "require_training": data.get("requireTraining", True),
             "gpu_uuid": data.get("gpuUuid", ""),
             "optional_experiments": data.get("optionalExperiments"),
+            "runs_per_condition": data.get("runsPerCondition", 3),
         }
         messages.extend(quick_submit_project(state, topic, project_id, mode, angles, ref_papers, reference_files, path_overrides))
         messages.extend(schedule_idle_agents(state))

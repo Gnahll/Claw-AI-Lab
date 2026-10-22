@@ -23,6 +23,7 @@ from researchclaw.pipeline.sanity_check.system_prompt import (
     build_user_message,
 )
 from researchclaw.pipeline.stages import Stage, StageStatus
+from researchclaw import single_run
 
 logger = logging.getLogger(__name__)
 
@@ -115,6 +116,9 @@ class SanityCheckRuntime:
             python_path=python_path,
         )
 
+        _single = single_run.is_single_run(config)
+        system_prompt = single_run.apply(system_prompt, _single, append_policy=True)
+        user_message = single_run.apply(user_message, _single)
         # Save system prompt for debugging
         (stage_dir / "sanity_system_prompt.md").write_text(system_prompt, encoding="utf-8")
         session.add_artifact("sanity_system_prompt.md")

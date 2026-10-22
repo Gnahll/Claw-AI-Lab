@@ -26,6 +26,7 @@ from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.resources.intake import build_resource_manifest, render_resource_manifest
 from researchclaw.training.execution import EXECUTION_CONTRACT, run_experiment
 from researchclaw.pipeline.claw_engine.turn_loop import TurnResult
+from researchclaw import single_run
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,9 @@ class ExperimentRunRuntime:
             prior_results=prior_results,
         )
 
+        _single = single_run.is_single_run(config)
+        system_prompt = single_run.apply(system_prompt, _single, append_policy=True)
+        user_message = single_run.apply(user_message, _single)
         # Save system prompt
         (stage_dir / "experiment_run_system_prompt.md").write_text(
             system_prompt, encoding="utf-8",

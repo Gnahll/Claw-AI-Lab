@@ -41,6 +41,8 @@ from typing import Any
 
 import yaml
 
+from researchclaw import single_run
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -97,12 +99,25 @@ class PromptManager:
             k: dict(v) for k, v in _DEFAULT_SUB_PROMPTS.items()
         }
         self._human_feedback: str = ""
+        self._single_run = False
         if overrides_path:
             self._load_overrides(Path(overrides_path))
 
     def set_human_feedback(self, feedback: str) -> None:
         """Set accumulated human feedback to inject into all subsequent prompts."""
         self._human_feedback = feedback
+
+    def set_runs_per_condition(self, runs: int) -> None:
+        """runs == 1 rewrites the multi-seed rules (see researchclaw.single_run)."""
+        self._single_run = int(runs) == 1
+
+    @property
+    def single_run(self) -> bool:
+        return self._single_run
+
+    def adapt(self, text: str, *, append_policy: bool = False) -> str:
+        """Apply the runs-per-condition policy to prompt text built outside this class."""
+        return single_run.apply(text, self._single_run, append_policy=append_policy)
 
     # -- loading ----------------------------------------------------------
 
@@ -148,7 +163,7 @@ class PromptManager:
         """
         entry = self._stages[stage]
         kw = {k: str(v) for k, v in kwargs.items()}
-        user_text = _render(entry["user"], kw)
+        user_text = self.adapt(_render(entry["user"], kw), append_policy=True)
         if evolution_overlay:
             user_text = f"{user_text}\n\n{evolution_overlay}"
         if self._human_feedback:
@@ -161,7 +176,7 @@ class PromptManager:
                 f"{self._human_feedback}"
             )
         return RenderedPrompt(
-            system=_render(entry["system"], kw),
+            system=self.adapt(_render(entry["system"], kw)),
             user=user_text,
             json_mode=entry.get("json_mode", False),
             max_tokens=entry.get("max_tokens"),
@@ -173,10 +188,10 @@ class PromptManager:
 
     def user(self, stage: str, **kwargs: Any) -> str:
         """Return the rendered user prompt for *stage*."""
-        return _render(
+        return self.adapt(_render(
             self._stages[stage]["user"],
             {k: str(v) for k, v in kwargs.items()},
-        )
+        ))
 
     def json_mode(self, stage: str) -> bool:
         return self._stages[stage].get("json_mode", False)
@@ -188,10 +203,10 @@ class PromptManager:
 
     def block(self, name: str, **kwargs: Any) -> str:
         """Render a reusable prompt block."""
-        return _render(
+        return self.adapt(_render(
             self._blocks[name],
             {k: str(v) for k, v in kwargs.items()},
-        )
+        ))
 
     # -- sub-prompts (code repair, etc.) ----------------------------------
 
@@ -200,8 +215,8 @@ class PromptManager:
         entry = self._sub_prompts[name]
         kw = {k: str(v) for k, v in kwargs.items()}
         return RenderedPrompt(
-            system=_render(entry["system"], kw),
-            user=_render(entry["user"], kw),
+            system=self.adapt(_render(entry["system"], kw)),
+            user=self.adapt(_render(entry["user"], kw)),
         )
 
     # -- introspection ----------------------------------------------------

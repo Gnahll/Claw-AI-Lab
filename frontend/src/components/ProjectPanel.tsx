@@ -12,7 +12,7 @@ const STATUS_ICONS: Record<string, { color: string; icon: string }> = {
 
 type SubmitMode = 'lab' | 'reproduce';
 type ReferencePdfUpload = { name: string; contentBase64: string };
-type ProjectResources = { codebases?: string; datasets?: string; checkpoints?: string; requireTraining: boolean; gpuUuid: string; optionalExperiments: string[] };
+type ProjectResources = { codebases?: string; datasets?: string; checkpoints?: string; requireTraining: boolean; gpuUuid: string; optionalExperiments: string[]; runsPerCondition: number };
 
 const OPTIONAL_EXPERIMENTS = [
   { key: 'ablation', zh: '消融实验', en: 'Ablation study' },
@@ -64,6 +64,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
   const [requireTraining, setRequireTraining] = useState(true);
   const [gpuUuid, setGpuUuid] = useState('');
   const [optionalExperiments, setOptionalExperiments] = useState<string[]>([]);
+  const [runsPerCondition, setRunsPerCondition] = useState(1);
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
   const { t, locale } = useLocale();
 
@@ -124,7 +125,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
     const angles = mode === 'lab'
       ? anglesInput.split(/[,，、;；]/).map(s => s.trim()).filter(Boolean)
       : [];
-    const paths: ProjectResources = { requireTraining, gpuUuid: gpuUuid.trim(), optionalExperiments };
+    const paths: ProjectResources = { requireTraining, gpuUuid: gpuUuid.trim(), optionalExperiments, runsPerCondition };
     if (codebasesPath.trim()) paths.codebases = codebasesPath.trim();
     if (datasetsPath.trim()) paths.datasets = datasetsPath.trim();
     if (checkpointsPath.trim()) paths.checkpoints = checkpointsPath.trim();
@@ -351,6 +352,12 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
                   </label>
                 ))}
               </div>
+              <label className="path-field">
+                <span className="path-label">{locale === 'zh' ? '每个实验条件运行次数（1 = 只跑一次，不做多种子均值±标准差）' : 'Runs per condition (1 = single run, no multi-seed mean ± std)'}</span>
+                <select className="path-input" value={runsPerCondition} onChange={e => setRunsPerCondition(Number(e.target.value))} disabled={!connected}>
+                  {[1, 3, 5].map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
               <label className="path-field">
                 <span className="path-label">{locale === 'zh' ? '已授权的 GPU UUID（多卡用英文逗号分隔，同一实验 DDP 多卡训练；留空仅用 CPU）' : 'Authorized GPU UUID(s) (comma-separated for multi-GPU DDP training of one experiment; empty = CPU only)'}</span>
                 <input className="path-input" value={gpuUuid} onChange={e => setGpuUuid(e.target.value)} placeholder="GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx,GPU-…" disabled={!connected} />
