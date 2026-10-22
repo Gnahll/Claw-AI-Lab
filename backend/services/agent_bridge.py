@@ -1967,6 +1967,10 @@ def _slugify(text: str, max_len: int = 40) -> str:
     return text
 
 
+# Allowed experiment wall-clock limits in hours; 0 keeps the template's time_budget_sec.
+TIME_BUDGET_HOURS = (0, 2, 4, 8, 12, 24)
+
+
 def _generate_config_from_template(
     state: BridgeState, project_id: str, topic: str, role_prompt: str = "",
     reference_papers: list[str] | None = None,
@@ -1974,6 +1978,7 @@ def _generate_config_from_template(
     require_training: bool = True, gpu_uuid: str = "",
     optional_experiments: list[str] | None = None,
     runs_per_condition: int = 3,
+    time_budget_hours: int = 0,
 ) -> str:
     """Generate a project-specific YAML config from the default template.
 
@@ -2010,6 +2015,8 @@ def _generate_config_from_template(
         raise ValueError("可选实验只能是 ablation、visualization、analysis 中的若干项")
     if type(runs_per_condition) is not int or runs_per_condition not in (1, 3, 5):
         raise ValueError("每个条件的运行次数只能是 1、3 或 5")
+    if type(time_budget_hours) is not int or time_budget_hours not in TIME_BUDGET_HOURS:
+        raise ValueError("实验时间上限只能是 0（平台默认）或 " + "、".join(map(str, TIME_BUDGET_HOURS[1:])) + " 小时")
     if require_training:
         full_topic += " 要求：在原有流程内完成真实模型训练和独立评估，保存训练损失、验证指标、模型权重和实验记录；不能以仅推理、计划或短测冒充完成训练。数据划分与完整训练预算须在实验方案中明确，资源不足时报告阻碍。"
     if runs_per_condition == 1:
@@ -2024,6 +2031,8 @@ def _generate_config_from_template(
     experiment = parsed.setdefault("experiment", {})
     experiment.update(require_training=require_training, gpu_uuid=gpu_uuid, training_job_dir="",
                       runs_per_condition=runs_per_condition)
+    if time_budget_hours:
+        experiment["time_budget_sec"] = time_budget_hours * 3600
     if optional_experiments is not None:
         experiment["optional_experiments"] = sorted(set(optional_experiments))
     for key, value in (("codebases_dir", codebases_dir), ("datasets_dir", datasets_dir), ("checkpoints_dir", checkpoints_dir)):
@@ -2174,6 +2183,7 @@ def quick_submit_project(
                 gpu_uuid=_po.get("gpu_uuid", ""),
                 optional_experiments=_po.get("optional_experiments"),
                 runs_per_condition=_po.get("runs_per_condition", 3),
+                time_budget_hours=_po.get("time_budget_hours", 0),
             )
         except Exception as e:
             messages.append(msg_log(sys_agent, f"配置生成失败: {e}", "error"))
@@ -2216,6 +2226,7 @@ def quick_submit_project(
             gpu_uuid=_po.get("gpu_uuid", ""),
             optional_experiments=_po.get("optional_experiments"),
             runs_per_condition=_po.get("runs_per_condition", 3),
+            time_budget_hours=_po.get("time_budget_hours", 0),
         )
     except Exception as e:
         messages.append(msg_log(sys_agent, f"配置生成失败: {e}", "error"))
@@ -2253,6 +2264,7 @@ def quick_submit_project(
                 gpu_uuid=_po.get("gpu_uuid", ""),
                 optional_experiments=_po.get("optional_experiments"),
                 runs_per_condition=_po.get("runs_per_condition", 3),
+                time_budget_hours=_po.get("time_budget_hours", 0),
             )
         except Exception as e:
             messages.append(msg_log(sys_agent, f"配置生成失败 [{name}]: {e}", "error"))
@@ -3143,6 +3155,7 @@ async def handle_command(state: BridgeState, data: dict) -> list[dict]:
             "gpu_uuid": data.get("gpuUuid", ""),
             "optional_experiments": data.get("optionalExperiments"),
             "runs_per_condition": data.get("runsPerCondition", 3),
+            "time_budget_hours": data.get("timeBudgetHours", 0),
         }
         messages.extend(quick_submit_project(state, topic, project_id, mode, angles, ref_papers, reference_files, path_overrides))
         messages.extend(schedule_idle_agents(state))

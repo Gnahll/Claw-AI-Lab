@@ -12,7 +12,7 @@ const STATUS_ICONS: Record<string, { color: string; icon: string }> = {
 
 type SubmitMode = 'lab' | 'reproduce';
 type ReferencePdfUpload = { name: string; contentBase64: string };
-type ProjectResources = { codebases?: string; datasets?: string; checkpoints?: string; requireTraining: boolean; gpuUuid: string; optionalExperiments: string[]; runsPerCondition: number };
+type ProjectResources = { codebases?: string; datasets?: string; checkpoints?: string; requireTraining: boolean; gpuUuid: string; optionalExperiments: string[]; runsPerCondition: number; timeBudgetHours: number };
 
 const OPTIONAL_EXPERIMENTS = [
   { key: 'ablation', zh: '消融实验', en: 'Ablation study' },
@@ -65,6 +65,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
   const [gpuUuid, setGpuUuid] = useState('');
   const [optionalExperiments, setOptionalExperiments] = useState<string[]>([]);
   const [runsPerCondition, setRunsPerCondition] = useState(1);
+  const [timeBudgetHours, setTimeBudgetHours] = useState(0);
   const referenceFileInputRef = useRef<HTMLInputElement | null>(null);
   const { t, locale } = useLocale();
 
@@ -125,7 +126,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
     const angles = mode === 'lab'
       ? anglesInput.split(/[,，、;；]/).map(s => s.trim()).filter(Boolean)
       : [];
-    const paths: ProjectResources = { requireTraining, gpuUuid: gpuUuid.trim(), optionalExperiments, runsPerCondition };
+    const paths: ProjectResources = { requireTraining, gpuUuid: gpuUuid.trim(), optionalExperiments, runsPerCondition, timeBudgetHours };
     if (codebasesPath.trim()) paths.codebases = codebasesPath.trim();
     if (datasetsPath.trim()) paths.datasets = datasetsPath.trim();
     if (checkpointsPath.trim()) paths.checkpoints = checkpointsPath.trim();
@@ -356,6 +357,13 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
                 <span className="path-label">{locale === 'zh' ? '每个实验条件运行次数（1 = 只跑一次，不做多种子均值±标准差）' : 'Runs per condition (1 = single run, no multi-seed mean ± std)'}</span>
                 <select className="path-input" value={runsPerCondition} onChange={e => setRunsPerCondition(Number(e.target.value))} disabled={!connected}>
                   {[1, 3, 5].map(n => <option key={n} value={n}>{n}</option>)}
+                </select>
+              </label>
+              <label className="path-field">
+                <span className="path-label">{locale === 'zh' ? '实验运行时间上限（整个实验程序，含全部条件的训练和评估）' : 'Experiment time limit (whole experiment program, all conditions incl. training and evaluation)'}</span>
+                <select className="path-input" value={timeBudgetHours} onChange={e => setTimeBudgetHours(Number(e.target.value))} disabled={!connected}>
+                  <option value={0}>{locale === 'zh' ? '平台默认' : 'Platform default'}</option>
+                  {[2, 4, 8, 12, 24].map(n => <option key={n} value={n}>{locale === 'zh' ? `${n} 小时` : `${n} h`}</option>)}
                 </select>
               </label>
               <label className="path-field">
