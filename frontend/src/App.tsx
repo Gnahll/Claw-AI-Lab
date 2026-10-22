@@ -373,6 +373,7 @@ export default function App() {
                   gpuUuid: paths.gpuUuid,
                   optionalExperiments: paths.optionalExperiments,
                   runsPerCondition: paths.runsPerCondition,
+                  timeBudgetHours: paths.timeBudgetHours,
                 }));
               }
             }}
