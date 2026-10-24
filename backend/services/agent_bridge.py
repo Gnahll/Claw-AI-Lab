@@ -1968,7 +1968,7 @@ def _slugify(text: str, max_len: int = 40) -> str:
 
 
 # Allowed experiment wall-clock limits in hours; 0 keeps the template's time_budget_sec.
-TIME_BUDGET_HOURS = (0, 2, 4, 8, 12, 24)
+TIME_BUDGET_HOURS = (0, 2, 4, 8, 12, 24, 48, 72)
 
 
 def _generate_config_from_template(

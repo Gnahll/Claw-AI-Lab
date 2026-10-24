@@ -35,6 +35,9 @@ def test_bridge_writes_time_budget(tmp_path):
     ten = _experiment(bridge, state, "p8", time_budget_hours=8)
     assert ten["experiment"]["time_budget_sec"] == 8 * 3600
     assert RCConfig.from_dict(ten, check_paths=False).experiment.time_budget_sec == 8 * 3600
-    for bad in (3, -1, 100, "8", 8.0, True):
+    # Long options for full-length reproductions (e.g. 200 epochs on large balanced datasets).
+    for hours in (48, 72):
+        assert _experiment(bridge, state, f"p{hours}", time_budget_hours=hours)["experiment"]["time_budget_sec"] == hours * 3600
+    for bad in (3, -1, 36, 100, "8", 8.0, True):
         with pytest.raises(ValueError, match="实验时间上限"):
             bridge._generate_config_from_template(state, "bad", "topic", time_budget_hours=bad)
