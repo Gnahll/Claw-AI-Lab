@@ -363,7 +363,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
                 <span className="path-label">{locale === 'zh' ? '实验运行时间上限（整个实验程序，含全部条件的训练和评估）' : 'Experiment time limit (whole experiment program, all conditions incl. training and evaluation)'}</span>
                 <select className="path-input" value={timeBudgetHours} onChange={e => setTimeBudgetHours(Number(e.target.value))} disabled={!connected}>
                   <option value={0}>{locale === 'zh' ? '平台默认' : 'Platform default'}</option>
-                  {[2, 4, 8, 12, 24].map(n => <option key={n} value={n}>{locale === 'zh' ? `${n} 小时` : `${n} h`}</option>)}
+                  {[2, 4, 8, 12, 24, 48, 72].map(n => <option key={n} value={n}>{locale === 'zh' ? `${n} 小时` : `${n} h`}</option>)}
                 </select>
               </label>
               <label className="path-field">
