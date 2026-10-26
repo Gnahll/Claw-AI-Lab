@@ -110,6 +110,9 @@ class ExperimentRunRuntime:
         (workspace / "PROJECT_CONTEXT.json").write_text(json.dumps(resource_manifest, indent=2), encoding="utf-8")
         (workspace / "DATA_CONTRACT.md").write_text(render_resource_manifest(resource_manifest), encoding="utf-8")
         session.log("INIT", f"Workspace: {workspace}; resource contract written")
+        carried = workspace / "outputs" / "CARRIED_OVER_FROM.txt"
+        if carried.is_file():
+            session.log("INIT", f"Resuming from prior outputs: {carried.read_text(encoding='utf-8').strip()}")
 
         # List files
         exp_files = self._list_experiment_files(workspace)
@@ -318,7 +321,49 @@ class ExperimentRunRuntime:
                         pass
 
         (ws / "outputs").mkdir(exist_ok=True)
+        ExperimentRunRuntime._carry_over_outputs(stage_dir, ws)
         return ws
+
+    # Files whose presence means a workspace holds resumable progress.
+    _PROGRESS_PATTERNS = ("*.pth", "*.pt", "*.ckpt", "*.safetensors", "results.json")
+
+    @staticmethod
+    def _carry_over_outputs(stage_dir: Path, ws: Path) -> Path | None:
+        """Copy outputs/ from the previous workspace with saved progress.
+
+        Each S14 launch creates a fresh workspace, so a resumed project
+        would otherwise retrain from epoch 0 although checkpoints and
+        finished results sit in an older run_workspace_*.  The source is
+        the workspace whose newest checkpoint/results file is newest; a
+        workspace with only logs (a run that just started) is skipped.
+        The source is copied, never moved, so it stays as a backup.
+        """
+        best: tuple[float, Path] | None = None
+        for old in stage_dir.glob("run_workspace_*"):
+            outputs = old / "outputs"
+            if old == ws or not outputs.is_dir():
+                continue
+            newest = 0.0
+            for pattern in ExperimentRunRuntime._PROGRESS_PATTERNS:
+                for f in outputs.rglob(pattern):
+                    try:
+                        if f.is_file():
+                            newest = max(newest, f.stat().st_mtime)
+                    except OSError:
+                        pass
+            if newest and (best is None or newest > best[0]):
+                best = (newest, old)
+        if best is None:
+            return None
+        src = best[1] / "outputs"
+        try:
+            shutil.copytree(src, ws / "outputs", symlinks=True, dirs_exist_ok=True)
+        except (OSError, shutil.Error) as exc:
+            logger.warning("Could not carry over %s: %s", src, exc)
+            return None
+        (ws / "outputs" / "CARRIED_OVER_FROM.txt").write_text(str(src) + "\n", encoding="utf-8")
+        logger.info("Carried over outputs from %s", src)
+        return src
 
     @staticmethod
     def _list_experiment_files(workspace: Path) -> list[str]:
