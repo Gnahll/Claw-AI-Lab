@@ -729,6 +729,9 @@ def _extract_abstract(sections: list[_Section]) -> str:
 # ---------------------------------------------------------------------------
 
 _SKIP_HEADINGS = {"title", "abstract"}
+# The template footer always emits \bibliography; a Markdown reference list
+# would print a second, hand-formatted copy with \cite numbers as labels.
+_BIBLIOGRAPHY_HEADINGS = {"references", "bibliography"}
 
 
 def _build_body(sections: list[_Section], *, title: str = "") -> str:
@@ -770,6 +773,8 @@ def _build_body(sections: list[_Section], *, title: str = "") -> str:
     for sec in sections:
         # Skip title-only and abstract sections
         if sec.heading_lower in _SKIP_HEADINGS:
+            continue
+        if re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", sec.heading_lower) in _BIBLIOGRAPHY_HEADINGS:
             continue
         # Skip the H1 heading that was used as the paper title
         if (

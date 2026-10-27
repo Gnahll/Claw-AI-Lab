@@ -5642,6 +5642,10 @@ def _execution_audit_section(run_dir: Path, heading: str) -> str:
     )
 
 
+_EVIDENCE_SKIP_KEYS = {"per_seed_results", "epoch_series", "latex_table", "generated_charts"}
+_EVIDENCE_FIELD_MAX_CHARS = 6000
+
+
 def _paper_experiment_evidence(run_dir: Path) -> str:
     """Build a compact, auditable experiment snapshot for paper writing."""
     summary = _load_experiment_summary(run_dir)
@@ -5671,6 +5675,13 @@ def _paper_experiment_evidence(run_dir: Path) -> str:
     condition_summaries = summary.get("condition_summaries")
     if isinstance(condition_summaries, dict):
         snapshot["condition_summaries"] = condition_summaries
+    # Project-specific results (robustness grids, reference checkpoints, ...)
+    # have no fixed key; keep every compact field, skip bulky series.
+    for key, value in summary.items():
+        if key in snapshot or key in _EVIDENCE_SKIP_KEYS:
+            continue
+        if len(json.dumps(value, ensure_ascii=False, default=str)) <= _EVIDENCE_FIELD_MAX_CHARS:
+            snapshot[key] = value
 
     compact_runs: list[dict[str, Any]] = []
     per_seed_results = summary.get("per_seed_results")
@@ -5740,6 +5751,11 @@ def _paper_experiment_evidence(run_dir: Path) -> str:
         "- `verified_execution` is the platform's own re-execution of the adopted run; report its "
         "per-run results and checkpoint checks, and if `iterative_refine.adopted` is false, do not "
         "report the exploratory S15 metric as a result.\n"
+        "- Fill every table cell whose value is in the snapshot (robustness, reference or "
+        "public-checkpoint rows included); use a dash only for values the snapshot lacks.\n"
+        "- Round reported metrics to at most 4 decimal places.\n"
+        "- Do not call a difference statistically significant or not significant unless the "
+        "snapshot contains that test; with single runs, say no significance test was possible.\n"
     )
 
 
@@ -8910,6 +8926,19 @@ def _dedupe_markdown_figures(paper: str) -> tuple[str, int]:
         return match.group(0)
 
     deduped = _MD_IMAGE_LINE_RE.sub(_keep_first, paper)
+    embedded = set(re.findall(r"!\[\s*(?:Figure|Fig\.)\s*(\d+)", deduped))
+
+    def _drop_orphan(match: re.Match[str]) -> str:
+        nonlocal removed
+        if embedded and match.group(1) not in embedded:
+            removed += 1
+            return ""
+        return match.group(0)
+
+    deduped = re.sub(
+        r"^[ \t]*\*(?:Figure|Fig\.)\s*(\d+)[.:][^\n]*\*[ \t]*$",
+        _drop_orphan, deduped, flags=re.MULTILINE,
+    )
     if removed:
         deduped = re.sub(r"\n{3,}", "\n\n", deduped)
     return deduped, removed
@@ -9668,7 +9697,52 @@ def _export_bibliography(run_dir: Path, paper: str) -> str:
         for key, entry in _bibliography_entries(source).items():
             if first_bibliography or key in cited_keys:
                 entries.setdefault(key, entry)
+    # Keys the writer cited from its own reference list (e.g. when literature
+    # search fell back to an unrelated library) would print as [?].
+    body = re.split(r"^#{1,3}[ 	]*(?:References|Bibliography)[ 	]*$", paper,
+                    maxsplit=1, flags=re.MULTILINE | re.IGNORECASE)[0]
+    body_keys = _paper_citation_keys(body)
+    for key, entry in _reference_list_entries(paper).items():
+        if key in body_keys:
+            entries.setdefault(key, entry)
     return "\n\n".join(entries.values()) + "\n" if entries else ""
+
+
+_REFERENCE_ITEM_RE = re.compile(
+    r"^[ \t]*(?:[-*][ \t]+)?\[([A-Za-z][A-Za-z0-9_:-]*\d{4}[A-Za-z0-9_:-]*)\][ \t]+(.+)$",
+    re.MULTILINE,
+)
+
+
+def _reference_list_entries(paper: str) -> dict[str, str]:
+    """BibTeX for ``[key] Authors. Title. Venue, Year.`` lines under References."""
+    heading = re.search(r"^#{1,3}[ \t]*(?:References|Bibliography)[ \t]*$", paper, re.MULTILINE | re.IGNORECASE)
+    if not heading:
+        return {}
+    entries: dict[str, str] = {}
+    for match in _REFERENCE_ITEM_RE.finditer(paper[heading.end():]):
+        key, text = match.group(1), match.group(2).strip()
+        fields = {"note": text}
+        year = re.search(r"(?:19|20)\d{2}(?=\D*$)", text)
+        # Authors, title and venue are separated by ". " not following an initial.
+        parts = re.split(r"(?<![A-Z])\.\s+", text, maxsplit=2)
+        if year and len(parts) == 3:
+            fields = {
+                "author": parts[0].replace(", and ", " and ").replace(", ", " and ")
+                .replace(" et al", " and others"),
+                "title": parts[1],
+                "howpublished": re.sub(r",?\s*(?:19|20)\d{2}\.?$", "", parts[2]).rstrip("."),
+            }
+        if year:
+            fields["year"] = year.group(0)
+        body = ",\n".join(
+            "  {} = {{{}}}".format(
+                name, re.sub(r"(?<!\\)([&%#_])", r"\\\1", re.sub(r"[{}]", "", value)),
+            )
+            for name, value in fields.items()
+        )
+        entries[key] = f"@misc{{{key},\n{body}\n}}"
+    return entries
 
 
 def _execute_export_publish(
@@ -9833,6 +9907,53 @@ def _execute_export_publish(
             _repeated,
         )
 
+    # WS-5.4: Generate result visualizations
+    # Priority: FigureAgent charts (stage-16 RESULT_ANALYSIS) > stage-14 legacy > fallback
+    try:
+        chart_dir = stage_dir / "charts"
+        chart_dir.mkdir(parents=True, exist_ok=True)
+        # A resumed S25 reuses this dir; charts of the earlier attempt are stale.
+        for _stale in chart_dir.glob("fig_*.png"):
+            _stale.unlink()
+        charts: list[Path] = []
+
+        # Check if FigureAgent produced charts in stage-16 or stage-14
+        _fa_charts_found = False
+        # Only the current round: an older stage-16_vN holds superseded charts.
+        for _fa_stage in _current_stage_dirs(run_dir, "stage-16", "stage-14"):
+            if _fa_charts_found:
+                break
+            for _fa_dir in [_fa_stage / "charts"]:
+                _fa_pngs = sorted(_fa_dir.glob("fig_*.png"))
+                if _fa_pngs:
+                    import shutil
+                    for _fa_png in _fa_pngs:
+                        dest = chart_dir / _fa_png.name
+                        shutil.copy2(_fa_png, dest)
+                        charts.append(dest)
+                    _fa_charts_found = True
+                    logger.info(
+                        "Stage 22: Copied %d FigureAgent charts from %s",
+                        len(_fa_pngs), _fa_dir,
+                    )
+                    break
+
+        # Always generate structured charts from visualize.py (different names)
+        from researchclaw.experiment.visualize import generate_all_charts
+        _metric_dir = getattr(config.experiment, "metric_direction", "minimize")
+        _viz_charts = generate_all_charts(
+            run_dir,
+            chart_dir,
+            metric_key=config.experiment.metric_key,
+            metric_direction=_metric_dir,
+        )
+        charts.extend(_viz_charts)
+
+        if charts:
+            logger.info("Stage 22: Generated %d chart(s) total", len(charts))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Chart generation failed: %s", exc)
+
     # FIGURE_PROMPT blocks are instructions for the image model; turn them
     # into real figures (rendered or fallback) copied into charts/.
     final_paper, _prompt_figures = _figure_prompts_to_markdown(
@@ -9851,6 +9972,8 @@ def _execute_export_publish(
 
     # Initialize artifacts list
     artifacts = ["paper_final.md"]
+    if any((stage_dir / "charts").glob("*.png")):
+        artifacts.append("charts/")
     # F2.7: Post-process citations — [cite_key] → \cite{cite_key}
     # and copy final references.bib to export stage
     _ay_map: dict[str, str] = {}  # BUG-102: author-year → cite_key map
@@ -10159,50 +10282,6 @@ def _execute_export_publish(
             logger.debug("Stage 22: Compile verification skipped: %s", _compile_exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("LaTeX generation skipped: %s", exc)
-
-    # WS-5.4: Generate result visualizations
-    # Priority: FigureAgent charts (stage-16 RESULT_ANALYSIS) > stage-14 legacy > fallback
-    try:
-        chart_dir = stage_dir / "charts"
-        chart_dir.mkdir(parents=True, exist_ok=True)
-        charts: list[Path] = []
-
-        # Check if FigureAgent produced charts in stage-16 or stage-14
-        _fa_charts_found = False
-        for _fa_pattern in ("stage-16*/charts", "stage-14*/charts"):
-            if _fa_charts_found:
-                break
-            for _fa_dir in sorted(run_dir.glob(_fa_pattern), reverse=True):
-                _fa_pngs = list(_fa_dir.glob("fig_*.png"))
-                if _fa_pngs:
-                    import shutil
-                    for _fa_png in _fa_pngs:
-                        dest = chart_dir / _fa_png.name
-                        shutil.copy2(_fa_png, dest)
-                        charts.append(dest)
-                    _fa_charts_found = True
-                    logger.info(
-                        "Stage 22: Copied %d FigureAgent charts from %s",
-                        len(_fa_pngs), _fa_dir,
-                    )
-                    break
-
-        # Always generate structured charts from visualize.py (different names)
-        from researchclaw.experiment.visualize import generate_all_charts
-        _metric_dir = getattr(config.experiment, "metric_direction", "minimize")
-        _viz_charts = generate_all_charts(
-            run_dir,
-            chart_dir,
-            metric_key=config.experiment.metric_key,
-            metric_direction=_metric_dir,
-        )
-        charts.extend(_viz_charts)
-
-        if charts:
-            artifacts.append("charts/")
-            logger.info("Stage 22: Generated %d chart(s) total", len(charts))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Chart generation failed: %s", exc)
 
     # BUG-99: Validate that \includegraphics paths in .tex match actual files.
     # The LLM may write paper referencing a chart name that differs from the

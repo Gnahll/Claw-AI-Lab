@@ -1065,6 +1065,52 @@ def test_export_recovers_cited_bibliography_without_inventing_entries(run_dir: P
     assert "missing2025" not in bib
 
 
+
+def test_export_bibliography_falls_back_to_paper_reference_list(run_dir: Path) -> None:
+    # S4 fell back to an unrelated seminal library; the writer cited its own list.
+    _write_prior_artifact(run_dir, 4, "references.bib", "@article{black2024pi0,\n title={Pi0},\n}\n")
+    paper = (
+        "# Paper\n\nAs shown [bappy2019hybrid] [fu2019dual].\n\n# References\n\n"
+        "[bappy2019hybrid] Jawadul H. Bappy, Cody Simons, and B. S. Manjunath. "
+        "Hybrid LSTM and Encoder-Decoder Architecture for Image Forgeries. IEEE TIP, 2019.\n\n"
+        "[fu2019dual] Jun Fu et al. Dual Attention Network for Scene Segmentation. CVPR, 2019.\n\n"
+        "[unused2020] Nobody. Uncited & Ignored. Venue, 2020.\n"
+    )
+    entries = rc_executor._bibliography_entries(rc_executor._export_bibliography(run_dir, paper))
+    assert {"bappy2019hybrid", "fu2019dual"} <= set(entries)
+    assert "unused2020" not in entries
+    assert "author = {Jawadul H. Bappy and Cody Simons and B. S. Manjunath}" in entries["bappy2019hybrid"]
+    assert "title = {Hybrid LSTM and Encoder-Decoder Architecture for Image Forgeries}" in entries["bappy2019hybrid"]
+    assert "author = {Jun Fu and others}" in entries["fu2019dual"]
+    assert "year = {2019}" in entries["fu2019dual"]
+
+
+def test_dedupe_markdown_figures_drops_orphan_captions() -> None:
+    paper = (
+        "![Figure 4. Main.](charts/fig_main.png)\n\n*Figure 4. Main caption.*\n\n"
+        "![Figure 9. Main again.](charts/fig_main.png)\n\n*Figure 9. Companion view.*\n\ntext\n"
+    )
+    out, removed = rc_executor._dedupe_markdown_figures(paper)
+    assert removed == 2
+    assert "*Figure 4. Main caption.*" in out
+    assert "Figure 9" not in out
+    assert "text" in out
+
+
+def test_paper_experiment_evidence_keeps_project_specific_results(run_dir: Path) -> None:
+    summary = {
+        "metrics_summary": {"macro_pixel_f1": {"mean": 0.75}},
+        "robustness": [{"dataset": "CASIA1.0", "corruption": "jpeg_90", "OCBI": 0.8468}],
+        "reference": {"label": "Authors' public weights", "clean": {"COVERAGE": 0.6762}},
+        "epoch_series": [{"epoch": i, "loss": 0.1} for i in range(2000)],
+    }
+    _write_prior_artifact(run_dir, 16, "experiment_summary.json", json.dumps(summary))
+    evidence = rc_executor._paper_experiment_evidence(run_dir)
+    assert "jpeg_90" in evidence
+    assert "Authors' public weights" in evidence
+    assert "epoch_series" not in evidence
+    assert "statistically significant" in evidence
+
 def test_citation_verify_preserves_pending_and_low_relevance_references(
     run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1210,6 +1256,44 @@ class TestExportPublishCodePackage:
         assert "`main.py`" in new_part.split("New files:")[1]
         assert "`cotransformer.py`" in modified_part.split("Diffs")[0]
         assert "full_code_diff.patch" in readme
+
+    def test_export_copies_current_round_charts_before_compile(
+        self,
+        tmp_path: Path,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md",
+            "# Test Paper\n\n## Results\n\n![Main](charts/fig_main_comparison.png)\n",
+        )
+        for stage, name in (("stage-16_v1", "fig_main_results.png"),
+                            ("stage-16", "fig_main_comparison.png")):
+            (run_dir / stage / "charts").mkdir(parents=True, exist_ok=True)
+            (run_dir / stage / "charts" / name).write_bytes(b"png")
+        stage_dir = run_dir / "stage-25"
+        (stage_dir / "charts").mkdir(parents=True)
+        (stage_dir / "charts" / "fig_stale.png").write_bytes(b"old")
+        seen: list[bool] = []
+
+        def fake_compile(tex_path: Path, max_attempts: int = 2):
+            seen.append((tex_path.parent / "charts" / "fig_main_comparison.png").exists())
+            raise RuntimeError("no latex in tests")
+
+        import researchclaw.templates.compiler as compiler
+        monkeypatch.setattr(compiler, "compile_latex", fake_compile)
+
+        rc_executor._execute_export_publish(
+            stage_dir, run_dir, rc_config, adapters, llm=None
+        )
+
+        charts = stage_dir / "charts"
+        assert (charts / "fig_main_comparison.png").exists()
+        assert not (charts / "fig_main_results.png").exists()
+        assert not (charts / "fig_stale.png").exists()
+        assert seen == [True]
 
     def test_export_without_refine_packages_experiment_dir(
         self,

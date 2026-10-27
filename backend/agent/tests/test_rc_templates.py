@@ -366,6 +366,13 @@ class TestBuildBody:
         assert r"\section{Fusion}" not in body
         assert r"\section{Results}" in body
 
+    def test_markdown_reference_list_left_to_bibliography(self) -> None:
+        md = "# Method\ntext [a2020]\n# References\n[a2020] A. Author. Title. Venue, 2020.\n"
+        body = _build_body(_parse_sections(md))
+        assert r"\section{Method}" in body
+        assert "References" not in body
+        assert "A. Author" not in body
+
     def test_subsubsection(self) -> None:
         md = "## Intro\nintro\n### Details\ntext"
         sections = _parse_sections(md)
