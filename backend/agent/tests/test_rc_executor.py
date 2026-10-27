@@ -1211,6 +1211,44 @@ class TestExportPublishCodePackage:
         assert "`cotransformer.py`" in modified_part.split("Diffs")[0]
         assert "full_code_diff.patch" in readme
 
+    def test_export_copies_current_round_charts_before_compile(
+        self,
+        tmp_path: Path,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md",
+            "# Test Paper\n\n## Results\n\n![Main](charts/fig_main_comparison.png)\n",
+        )
+        for stage, name in (("stage-16_v1", "fig_main_results.png"),
+                            ("stage-16", "fig_main_comparison.png")):
+            (run_dir / stage / "charts").mkdir(parents=True, exist_ok=True)
+            (run_dir / stage / "charts" / name).write_bytes(b"png")
+        stage_dir = run_dir / "stage-25"
+        (stage_dir / "charts").mkdir(parents=True)
+        (stage_dir / "charts" / "fig_stale.png").write_bytes(b"old")
+        seen: list[bool] = []
+
+        def fake_compile(tex_path: Path, max_attempts: int = 2):
+            seen.append((tex_path.parent / "charts" / "fig_main_comparison.png").exists())
+            raise RuntimeError("no latex in tests")
+
+        import researchclaw.templates.compiler as compiler
+        monkeypatch.setattr(compiler, "compile_latex", fake_compile)
+
+        rc_executor._execute_export_publish(
+            stage_dir, run_dir, rc_config, adapters, llm=None
+        )
+
+        charts = stage_dir / "charts"
+        assert (charts / "fig_main_comparison.png").exists()
+        assert not (charts / "fig_main_results.png").exists()
+        assert not (charts / "fig_stale.png").exists()
+        assert seen == [True]
+
     def test_export_without_refine_packages_experiment_dir(
         self,
         tmp_path: Path,

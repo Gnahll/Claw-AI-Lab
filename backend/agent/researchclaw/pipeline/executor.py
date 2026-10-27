@@ -9833,6 +9833,53 @@ def _execute_export_publish(
             _repeated,
         )
 
+    # WS-5.4: Generate result visualizations
+    # Priority: FigureAgent charts (stage-16 RESULT_ANALYSIS) > stage-14 legacy > fallback
+    try:
+        chart_dir = stage_dir / "charts"
+        chart_dir.mkdir(parents=True, exist_ok=True)
+        # A resumed S25 reuses this dir; charts of the earlier attempt are stale.
+        for _stale in chart_dir.glob("fig_*.png"):
+            _stale.unlink()
+        charts: list[Path] = []
+
+        # Check if FigureAgent produced charts in stage-16 or stage-14
+        _fa_charts_found = False
+        # Only the current round: an older stage-16_vN holds superseded charts.
+        for _fa_stage in _current_stage_dirs(run_dir, "stage-16", "stage-14"):
+            if _fa_charts_found:
+                break
+            for _fa_dir in [_fa_stage / "charts"]:
+                _fa_pngs = sorted(_fa_dir.glob("fig_*.png"))
+                if _fa_pngs:
+                    import shutil
+                    for _fa_png in _fa_pngs:
+                        dest = chart_dir / _fa_png.name
+                        shutil.copy2(_fa_png, dest)
+                        charts.append(dest)
+                    _fa_charts_found = True
+                    logger.info(
+                        "Stage 22: Copied %d FigureAgent charts from %s",
+                        len(_fa_pngs), _fa_dir,
+                    )
+                    break
+
+        # Always generate structured charts from visualize.py (different names)
+        from researchclaw.experiment.visualize import generate_all_charts
+        _metric_dir = getattr(config.experiment, "metric_direction", "minimize")
+        _viz_charts = generate_all_charts(
+            run_dir,
+            chart_dir,
+            metric_key=config.experiment.metric_key,
+            metric_direction=_metric_dir,
+        )
+        charts.extend(_viz_charts)
+
+        if charts:
+            logger.info("Stage 22: Generated %d chart(s) total", len(charts))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Chart generation failed: %s", exc)
+
     # FIGURE_PROMPT blocks are instructions for the image model; turn them
     # into real figures (rendered or fallback) copied into charts/.
     final_paper, _prompt_figures = _figure_prompts_to_markdown(
@@ -9851,6 +9898,8 @@ def _execute_export_publish(
 
     # Initialize artifacts list
     artifacts = ["paper_final.md"]
+    if any((stage_dir / "charts").glob("*.png")):
+        artifacts.append("charts/")
     # F2.7: Post-process citations — [cite_key] → \cite{cite_key}
     # and copy final references.bib to export stage
     _ay_map: dict[str, str] = {}  # BUG-102: author-year → cite_key map
@@ -10159,50 +10208,6 @@ def _execute_export_publish(
             logger.debug("Stage 22: Compile verification skipped: %s", _compile_exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("LaTeX generation skipped: %s", exc)
-
-    # WS-5.4: Generate result visualizations
-    # Priority: FigureAgent charts (stage-16 RESULT_ANALYSIS) > stage-14 legacy > fallback
-    try:
-        chart_dir = stage_dir / "charts"
-        chart_dir.mkdir(parents=True, exist_ok=True)
-        charts: list[Path] = []
-
-        # Check if FigureAgent produced charts in stage-16 or stage-14
-        _fa_charts_found = False
-        for _fa_pattern in ("stage-16*/charts", "stage-14*/charts"):
-            if _fa_charts_found:
-                break
-            for _fa_dir in sorted(run_dir.glob(_fa_pattern), reverse=True):
-                _fa_pngs = list(_fa_dir.glob("fig_*.png"))
-                if _fa_pngs:
-                    import shutil
-                    for _fa_png in _fa_pngs:
-                        dest = chart_dir / _fa_png.name
-                        shutil.copy2(_fa_png, dest)
-                        charts.append(dest)
-                    _fa_charts_found = True
-                    logger.info(
-                        "Stage 22: Copied %d FigureAgent charts from %s",
-                        len(_fa_pngs), _fa_dir,
-                    )
-                    break
-
-        # Always generate structured charts from visualize.py (different names)
-        from researchclaw.experiment.visualize import generate_all_charts
-        _metric_dir = getattr(config.experiment, "metric_direction", "minimize")
-        _viz_charts = generate_all_charts(
-            run_dir,
-            chart_dir,
-            metric_key=config.experiment.metric_key,
-            metric_direction=_metric_dir,
-        )
-        charts.extend(_viz_charts)
-
-        if charts:
-            artifacts.append("charts/")
-            logger.info("Stage 22: Generated %d chart(s) total", len(charts))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Chart generation failed: %s", exc)
 
     # BUG-99: Validate that \includegraphics paths in .tex match actual files.
     # The LLM may write paper referencing a chart name that differs from the
