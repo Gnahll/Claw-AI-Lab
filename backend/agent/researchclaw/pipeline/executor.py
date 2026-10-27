@@ -1085,6 +1085,14 @@ def _collect_experiment_results(
                         "condition": _s.get("method", "unknown"),
                     })
 
+    # Resumed/hand-finished runs: run_report.json is a failed attempt while
+    # runs/results.json holds the finished experiment's real metrics.
+    if not runs_data and isinstance(structured_results, dict):
+        _structured_metrics = _run_payload_metrics(structured_results)
+        if _structured_metrics:
+            runs_data.append({"metrics": _structured_metrics, "source": "results.json"})
+            result_versions.append(runs_data[0])
+
     if not runs_data:
         result: dict[str, Any] = {"runs": [], "metrics_summary": {}, "best_run": None, "latex_table": ""}
         if structured_results is not None:
@@ -4581,7 +4589,14 @@ def _execute_result_analysis(
     if exp_data.get("best_run") and isinstance(exp_data["best_run"], dict):
         _best_metrics = exp_data["best_run"].get("metrics", {})
 
-    # Group metrics by condition prefix (e.g., "ppo/primary_metric" → condition "ppo")
+    # Group metrics by condition prefix (e.g., "ppo/primary_metric" → condition "ppo").
+    # Deeper paths also keep their sub-path ("test/clean/CASIA/pixel_f1"); the
+    # bare leaf name is kept only when it is unambiguous within the condition.
+    _leaf_counts: dict[tuple[str, str], int] = {}
+    for _mk in _best_metrics:
+        parts = _mk.split("/")
+        if len(parts) >= 2:
+            _leaf_counts[(parts[0], parts[-1])] = _leaf_counts.get((parts[0], parts[-1]), 0) + 1
     for _mk, _mv in _best_metrics.items():
         parts = _mk.split("/")
         if len(parts) >= 2:
@@ -4590,9 +4605,18 @@ def _execute_result_analysis(
             if cond not in _condition_summaries:
                 _condition_summaries[cond] = {"metrics": {}}
             try:
-                _condition_summaries[cond]["metrics"][metric_name] = float(_mv)
+                _val = float(_mv)
             except (ValueError, TypeError):
-                pass
+                continue
+            _cond_metrics = _condition_summaries[cond]["metrics"]
+            if len(parts) > 2:
+                _cond_metrics["/".join(parts[1:])] = _val
+            if (
+                len(parts) == 2
+                or _leaf_counts[(cond, metric_name)] == 1
+                or metric_name == config.experiment.metric_key
+            ):
+                _cond_metrics[metric_name] = _val
 
     # BUG-09 fix: If no condition summaries were built (metrics don't use
     # condition/metric format), try to extract from metrics_summary or
@@ -5818,21 +5842,35 @@ def _run_payload_metrics(payload: dict[str, Any]) -> dict[str, Any]:
 
     flat: dict[str, Any] = {}
 
+    # Held-out results are often nested as condition/split/dataset/(corruption/)metric
     def _walk(node: dict[str, Any], prefix: str, depth: int) -> None:
         for metric_name, metric_value in node.items():
-            if len(flat) >= _MAX_PAYLOAD_METRICS or metric_name in _NON_METRIC_KEYS:
+            if metric_name in _NON_METRIC_KEYS:
                 continue
             path = f"{prefix}/{metric_name}" if prefix else str(metric_name)
             if _is_num(metric_value):
                 flat.setdefault(path, metric_value)
-            elif isinstance(metric_value, dict) and depth < 4:
+            elif isinstance(metric_value, dict) and depth < 8:
                 container_path = (
                     "" if depth == 0 and metric_name in _METRIC_CONTAINER_KEYS else path
                 )
                 _walk(metric_value, container_path, depth + 1)
 
     _walk(results, "", 0)
-    return flat
+    if len(flat) <= _MAX_PAYLOAD_METRICS:
+        return flat
+
+    # Over the cap: keep the declared metric (e.g. pixel_f1 inside
+    # "macro_pixel_f1_error") and shallow paths before per-step diagnostics.
+    declared = str(results.get("metric_name") or payload.get("metric_name") or "")
+
+    def _rank(path: str) -> tuple[int, int]:
+        leaf = path.rsplit("/", 1)[-1]
+        is_target = leaf == "primary_metric" or (len(leaf) >= 3 and leaf in declared)
+        return (0 if is_target else 1, path.count("/"))
+
+    kept = set(sorted(flat, key=_rank)[:_MAX_PAYLOAD_METRICS])
+    return {path: value for path, value in flat.items() if path in kept}
 
 
 def _collect_raw_experiment_metrics(run_dir: Path) -> tuple[str, bool]:

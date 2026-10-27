@@ -2090,6 +2090,33 @@ class TestRunPayloadMetrics:
         payload = {f"metric_{index}": index for index in range(250)}
         assert len(rc_executor._run_payload_metrics(payload)) == 200
 
+    def test_reads_deeply_nested_held_out_results(self) -> None:
+        payload = {"conditions": {"ours": {"test": {"robust": {"CASIA": {"jpeg_70": {
+            "pixel_f1": 0.4}}}}}}}
+        assert rc_executor._run_payload_metrics(payload) == {
+            "ours/test/robust/CASIA/jpeg_70/pixel_f1": 0.4,
+        }
+
+    def test_cap_keeps_declared_metric_over_diagnostics(self) -> None:
+        payload = {
+            "metric_name": "macro_pixel_f1_error",
+            "primary_metric": 0.25,
+            "conditions": {
+                name: {
+                    "first_update_activity": {
+                        f"rank_{i}": {"gpu": {"loss": 1.0, "step": i}} for i in range(150)
+                    },
+                    "test": {f"ds_{i}": {"pixel_f1": 0.5, "loss": 0.3} for i in range(30)},
+                }
+                for name in ("ours", "base")
+            },
+        }
+        metrics = rc_executor._run_payload_metrics(payload)
+        assert len(metrics) == 200
+        assert metrics["primary_metric"] == 0.25
+        assert all(f"{name}/test/ds_{i}/pixel_f1" in metrics for name in ("ours", "base") for i in range(30))
+        assert all(f"{name}/test/ds_{i}/loss" in metrics for name in ("ours", "base") for i in range(30))
+
 
 class TestCollectExperimentResults:
     """Tests for _collect_experiment_results() with agentic outputs."""
@@ -2240,6 +2267,32 @@ class TestFinalVersionDataFlow:
         rc_executor._execute_result_analysis(stage_dir, tmp_path, rc_config, adapters)
         summary = json.loads((stage_dir / "experiment_summary.json").read_text(encoding="utf-8"))
         assert summary["best_run"]["metrics"][rc_config.experiment.metric_key] == 0.1
+
+    def test_resumed_run_summary_uses_nested_results_json(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from researchclaw.pipeline.result_analysis import ResultAnalysisRuntime
+
+        monkeypatch.setattr(ResultAnalysisRuntime, "execute", lambda *args, **kwargs: None)
+        monkeypatch.setattr(rc_executor, "_run_chart_generation", lambda *args, **kwargs: None)
+        runs_dir = tmp_path / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "run_report.json").write_text(json.dumps({"success": False, "results": None}))
+        (runs_dir / "results.json").write_text(json.dumps({"conditions": {
+            name: {"validation": {"f1": f1}, "test": {"clean": {
+                "A": {"f1": f1 - 0.1}, "B": {"f1": f1 - 0.2}}}}
+            for name, f1 in (("ours", 0.7), ("base", 0.6))
+        }}))
+        stage_dir = tmp_path / "stage-16"
+        stage_dir.mkdir()
+        rc_executor._execute_result_analysis(stage_dir, tmp_path, rc_config, adapters)
+        summary = json.loads((stage_dir / "experiment_summary.json").read_text(encoding="utf-8"))
+        assert summary["metrics_summary"]["ours/test/clean/B/f1"]["mean"] == pytest.approx(0.5)
+        ours = summary["condition_summaries"]["ours"]["metrics"]
+        assert ours["test/clean/A/f1"] == pytest.approx(0.6)
+        assert "f1" not in ours  # ambiguous across validation and test sets
+        assert set(summary["condition_summaries"]) == {"ours", "base"}
 
 
 class TestCollectExperimentEvidence:
