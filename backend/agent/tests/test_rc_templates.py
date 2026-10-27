@@ -357,6 +357,15 @@ class TestBuildBody:
         body = _build_body(sections, title="My Paper")
         assert r"\section{Method}" in body
 
+    def test_h1_sections_keep_h2_subsections_under_h1_title(self) -> None:
+        md = "# My Paper\n# Abstract\nabs\n# Method\nintro\n## Fusion\ntext\n# Results\nres"
+        sections = _parse_sections(md)
+        body = _build_body(sections, title="My Paper")
+        assert r"\section{Method}" in body
+        assert r"\subsection{Fusion}" in body
+        assert r"\section{Fusion}" not in body
+        assert r"\section{Results}" in body
+
     def test_subsubsection(self) -> None:
         md = "## Intro\nintro\n### Details\ntext"
         sections = _parse_sections(md)

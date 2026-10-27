@@ -381,6 +381,28 @@ def _newest_stage_files(run_dir: Path, pattern: str) -> list[Path]:
     return sorted(run_dir.glob(pattern), key=key, reverse=True)
 
 
+def _current_stage_dirs(run_dir: Path, *names: str) -> list[Path]:
+    """Current round of each named stage dir, skipping older loop versions.
+
+    ``stage-16`` wins over ``stage-16_v2``, which wins over ``stage-16_v1``.
+    Figure plans and charts of an older REFINE round describe superseded
+    results and must not reach the paper.
+    """
+    dirs: list[Path] = []
+    for name in names:
+        rounds = [
+            p for p in run_dir.glob(f"{name}*")
+            if p.is_dir() and (p.name == name or (
+                p.name.startswith(f"{name}_v") and p.name[len(name) + 2:].isdigit()
+            ))
+        ]
+        if rounds:
+            dirs.append(max(rounds, key=lambda p: (
+                p.name == name, 0 if p.name == name else int(p.name[len(name) + 2:]),
+            )))
+    return dirs
+
+
 def _latest_experiment_summary_text(run_dir: Path) -> str | None:
     """Text of the newest experiment_summary.json (latest round only).
 
@@ -6768,7 +6790,7 @@ def _read_figure_manifest(run_dir: Path) -> dict[str, dict]:
     Returns ``{filename: metadata_dict}`` for each chart entry.
     """
     for pattern in ("stage-16*", "stage-14*"):
-        for d in sorted(run_dir.glob(pattern)):
+        for d in _current_stage_dirs(run_dir, pattern.rstrip("*")):
             mf = d / "charts" / "figure_manifest.json"
             if mf.is_file():
                 try:
@@ -7941,7 +7963,7 @@ def _execute_paper_draft(
     # Charts and figure plans are generated in stage-16 (RESULT_ANALYSIS),
     # also check stage-14 as a legacy fallback.
     for _fig_stage_pattern in ("stage-16*", "stage-14*"):
-        for _fig_stage_dir in sorted(run_dir.glob(_fig_stage_pattern)):
+        for _fig_stage_dir in _current_stage_dirs(run_dir, _fig_stage_pattern.rstrip("*")):
             for _fp_name in ("figure_plan_final.json", "figure_plan.json"):
                 _fp_path = _fig_stage_dir / _fp_name
                 if not _fp_path.exists():
@@ -7979,7 +8001,7 @@ def _execute_paper_draft(
         # Fallback: scan for chart PNG files in stage-16 (RESULT_ANALYSIS) and stage-14
         _chart_files: list[str] = []
         for _chart_stage_pattern in ("stage-16*", "stage-14*"):
-            for _chart_stage_dir in sorted(run_dir.glob(_chart_stage_pattern)):
+            for _chart_stage_dir in _current_stage_dirs(run_dir, _chart_stage_pattern.rstrip("*")):
                 _charts_path = _chart_stage_dir / "charts"
                 if _charts_path.is_dir():
                     for _cf in sorted(_charts_path.glob("*.png")):
@@ -10261,18 +10283,34 @@ def _execute_export_publish(
         logger.debug("Stage 22: Figure path validation skipped: %s", _fig_exc)
 
     # --- Code packaging: multi-file directory or single file ---
-    exp_final_dir_path = _read_prior_artifact(run_dir, "experiment_final/")
-    if exp_final_dir_path and Path(exp_final_dir_path).is_dir():
+    # Without ITERATIVE_REFINE output (skipped or stopped S15), package the
+    # code that S14 actually ran from experiment/.
+    exp_final_dir_path = None
+    for _code_dir_name in ("experiment_final/", "experiment/"):
+        _candidate = _read_prior_artifact(run_dir, _code_dir_name)
+        if _candidate and Path(_candidate).is_dir():
+            exp_final_dir_path = _candidate
+            break
+    if exp_final_dir_path:
         import ast
 
         code_dir = stage_dir / "code"
         code_dir.mkdir(parents=True, exist_ok=True)
         all_code_combined = ""
         code_file_names: list[str] = []
-        for src in sorted(Path(exp_final_dir_path).glob("*.py")):
-            (code_dir / src.name).write_bytes(src.read_bytes())
-            all_code_combined += src.read_text(encoding="utf-8") + "\n"
-            code_file_names.append(src.name)
+        exp_root = Path(exp_final_dir_path)
+        for src in sorted(exp_root.rglob("*.py")):
+            rel = src.relative_to(exp_root)
+            # source/ is copied below; outputs/ and backups are not project code
+            if rel.parts[0] in _CODE_PACKAGE_SKIP_DIRS or any(
+                part in _SOURCE_SKIP_DIRS for part in rel.parts[:-1]
+            ):
+                continue
+            target = code_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(src.read_bytes())
+            all_code_combined += src.read_text(encoding="utf-8", errors="replace") + "\n"
+            code_file_names.append(rel.as_posix())
 
         # Detect dependencies from all files
         detected: set[str] = set()
@@ -10423,6 +10461,7 @@ _SOURCE_SKIP_DIRS = {"ckpt", "pretrained", "__pycache__", ".git"}
 _SOURCE_SKIP_SUFFIXES = {".pth", ".pt", ".ckpt", ".safetensors", ".bin", ".pyc"}
 _SOURCE_MAX_BYTES = 20 * 1024 * 1024
 _CODE_DIFFS = ("model_diff.patch", "full_code_diff.patch")
+_CODE_PACKAGE_SKIP_DIRS = {"source", "outputs", "repair_backup", "codebases", "datasets", "checkpoints"}
 
 
 def _copy_experiment_source(exp_final: Path, code_dir: Path) -> dict[str, list[str]]:
