@@ -1211,6 +1211,51 @@ class TestExportPublishCodePackage:
         assert "`cotransformer.py`" in modified_part.split("Diffs")[0]
         assert "full_code_diff.patch" in readme
 
+    def test_export_without_refine_packages_experiment_dir(
+        self,
+        tmp_path: Path,
+        run_dir: Path,
+        rc_config: RCConfig,
+        adapters: AdapterBundle,
+    ) -> None:
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md", "# Test Paper\n\nSome content..."
+        )
+        exp = run_dir / "stage-11" / "experiment"
+        for rel in ("main.py", "author/ocbi.py", "author/models/block.py",
+                    "repair_backup/main.py", "outputs/export.py"):
+            (exp / rel).parent.mkdir(parents=True, exist_ok=True)
+            (exp / rel).write_text("import torch\n", encoding="utf-8")
+        stage_dir = tmp_path / "run" / "stage-25"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+
+        rc_executor._execute_export_publish(
+            stage_dir, run_dir, rc_config, adapters, llm=None
+        )
+
+        code = stage_dir / "code"
+        assert (code / "main.py").exists()
+        assert (code / "author" / "ocbi.py").exists()
+        assert (code / "author" / "models" / "block.py").exists()
+        assert not (code / "repair_backup").exists()
+        assert not (code / "outputs").exists()
+        assert "torch" in (code / "requirements.txt").read_text(encoding="utf-8")
+        assert "`author/ocbi.py`" in (code / "README.md").read_text(encoding="utf-8")
+
+    def test_figure_lookup_ignores_older_refine_rounds(self, tmp_path: Path) -> None:
+        for name in ("stage-16_v1", "stage-16_v2", "stage-14"):
+            (tmp_path / name / "charts").mkdir(parents=True)
+        (tmp_path / "stage-16_v10").mkdir()
+        assert rc_executor._current_stage_dirs(tmp_path, "stage-16", "stage-14") == [
+            tmp_path / "stage-16_v10", tmp_path / "stage-14",
+        ]
+        (tmp_path / "stage-16" / "charts").mkdir(parents=True)
+        (tmp_path / "stage-16_v1" / "charts" / "figure_manifest.json").write_text(
+            json.dumps([{"file_path": "charts/fig_old.png"}]), encoding="utf-8"
+        )
+        assert rc_executor._current_stage_dirs(tmp_path, "stage-16")[0].name == "stage-16"
+        assert rc_executor._read_figure_manifest(tmp_path) == {}
+
     def test_copy_experiment_source_skips_large_files(self, tmp_path: Path) -> None:
         exp = tmp_path / "experiment_final"
         (exp / "source").mkdir(parents=True)

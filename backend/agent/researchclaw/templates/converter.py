@@ -743,16 +743,6 @@ def _build_body(sections: list[_Section], *, title: str = "") -> str:
 
     # Determine minimum heading level used for real body sections
     # (skip title/abstract/references).
-    title_h1_found = False
-    for sec in sections:
-        if (
-            sec.level == 1
-            and sec.heading
-            and sec.heading.strip().lower() == title_lower
-        ):
-            title_h1_found = True
-            break
-
     # T1.3: Auto-detect when all body sections use H2 (##) instead of H1 (#).
     # This happens when the LLM uses ## for main sections (Introduction, Method, etc.)
     # without an explicit H1 title heading. We must promote H2→\section.
@@ -764,15 +754,10 @@ def _build_body(sections: list[_Section], *, title: str = "") -> str:
 
     min_body_level = min(body_levels) if body_levels else 1
 
-    # Promote if: (a) title was H1 and body starts at H2, OR
-    # (b) no title H1 found but all body sections are H2+ (LLM omitted H1 title)
-    if title_h1_found:
-        level_offset = 1
-    elif min_body_level >= 2:
-        # All body sections are H2 or deeper — promote so H2→\section
-        level_offset = min_body_level - 1
-    else:
-        level_offset = 0
+    # Promote so the shallowest body level maps to \section, with or without
+    # an H1 title.  A title H1 alone must not shift ``# Method`` / ``## Sub``
+    # papers, otherwise every subsection becomes a \section.
+    level_offset = max(0, min_body_level - 1)
 
     _level_map = {
         1: "section",
