@@ -165,13 +165,9 @@ class ExperimentRunRuntime:
         )
 
         session.log("EXECUTE", "Running main.py under pipeline supervision")
-        verified_run = run_experiment(workspace, stage_dir / "runs" / "attempt-1", config)
-        turn_result = TurnResult()
-        if not verified_run["success"]:
-            failure_log = (stage_dir / "runs" / "attempt-1" / "execution.log").read_text(encoding="utf-8", errors="replace")[-12000:]
-            turn_result = loop.run_turn(user_message + "\nSupervised execution failed. Repair the code; the pipeline will rerun it.\n"
-                                        + json.dumps(verified_run["errors"]) + "\n" + failure_log)
-            verified_run = run_experiment(workspace, stage_dir / "runs" / "attempt-2", config)
+        verified_run, turn_result = self._supervised_run(
+            workspace, stage_dir, config, loop, user_message, session, resumed=carried.is_file(),
+        )
 
         # Copy results back
         self._copy_results_back(workspace, experiment_dir, stage_dir, session)
@@ -227,6 +223,51 @@ class ExperimentRunRuntime:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    _RESUME_REPAIR_RULES = (
+        "\nThis workspace resumed a previous run: outputs/ was carried over from an earlier "
+        "workspace (outputs/CARRIED_OVER_FROM.txt) and holds real checkpoints and finished "
+        "condition results. Do not delete, archive or ignore them, and do not change the code "
+        "to retrain conditions that already finished. Fix only the reported failure; missing "
+        "artifacts (final model, test predictions) must be produced from the saved checkpoints.\n"
+    )
+
+    @staticmethod
+    def _supervised_run(
+        workspace: Path,
+        stage_dir: Path,
+        config: RCConfig,
+        loop: Any,
+        user_message: str,
+        session: StageSession,
+        *,
+        resumed: bool = False,
+    ) -> tuple[dict[str, Any], TurnResult]:
+        """Run main.py; on failure let the agent repair it once and rerun.
+
+        The rerun is skipped when the repair turn itself failed (e.g. the LLM
+        returned HTTP 400): rerunning unchanged code only replaces the real
+        failure with a misleading one.  When both attempts fail, the
+        attempt-1 errors are kept in the reported errors.
+        """
+        runs = stage_dir / "runs"
+        first = run_experiment(workspace, runs / "attempt-1", config)
+        if first["success"]:
+            return first, TurnResult()
+        failure_log = (runs / "attempt-1" / "execution.log").read_text(encoding="utf-8", errors="replace")[-12000:]
+        turn_result = loop.run_turn(
+            user_message
+            + (ExperimentRunRuntime._RESUME_REPAIR_RULES if resumed else "")
+            + "\nSupervised execution failed. Repair the code; the pipeline will rerun it.\n"
+            + json.dumps(first["errors"]) + "\n" + failure_log
+        )
+        if turn_result.errors:
+            session.log("EXECUTE", "Repair turn failed; not rerunning: " + "; ".join(turn_result.errors))
+            return {**first, "errors": [*first["errors"], *(f"Repair aborted: {e}" for e in turn_result.errors)]}, turn_result
+        second = run_experiment(workspace, runs / "attempt-2", config)
+        if not second["success"]:
+            second = {**second, "errors": [*second["errors"], *(f"attempt-1: {e}" for e in first["errors"])]}
+        return second, turn_result
 
     @staticmethod
     def _resolve_coding_llm(llm: Any, config: RCConfig) -> Any:
