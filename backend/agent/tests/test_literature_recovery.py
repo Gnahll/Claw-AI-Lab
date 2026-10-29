@@ -1,4 +1,6 @@
 import json
+import gzip
+import io
 from pathlib import Path
 import sys
 import time
@@ -33,6 +35,13 @@ def test_unresolved_publisher_pages_are_not_numeric_title_candidates(monkeypatch
 
 def test_plain_title_does_not_invent_publication_year():
     assert executor._resolve_user_reference("Image forgery localization")["year"] == 0
+
+
+def test_publisher_reads_unsolicited_gzip_response(monkeypatch):
+    page = b'<meta name="citation_title" content="Real forensic attention paper"><meta name="citation_date" content="2026">'
+    monkeypatch.setattr(publisher, "urlopen", lambda *a, **kw: io.BytesIO(gzip.compress(page)))
+    paper = publisher.resolve_publisher_reference("https://publisher.example/38250")
+    assert paper.title == "Real forensic attention paper" and paper.year == 2026
 
 
 def test_source_response_is_flushed_before_later_source_blocks(monkeypatch):

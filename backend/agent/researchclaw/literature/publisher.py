@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import hashlib
+import gzip
+import io
 from html import unescape
 from html.parser import HTMLParser
 import logging
@@ -62,7 +64,13 @@ def resolve_publisher_reference(url: str) -> Paper | None:
     try:
         request = Request(url, headers={"User-Agent": "ResearchClaw/0.3 (academic reference metadata)"})
         with urlopen(request, timeout=12) as response:
-            html = response.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
+            raw = response.read(2 * 1024 * 1024)
+            # Some publisher/CDN responses are gzip even without negotiation;
+            # urllib does not decode content encodings automatically.
+            if raw.startswith(b"\x1f\x8b"):
+                with gzip.GzipFile(fileobj=io.BytesIO(raw)) as compressed:
+                    raw = compressed.read(2 * 1024 * 1024)
+            html = raw.decode("utf-8", errors="replace")
         return paper_from_html(url, html)
     except (OSError, ValueError) as exc:
         logger.warning("Publisher reference metadata unavailable for %s (%s)", url, type(exc).__name__)
