@@ -88,3 +88,30 @@ def test_local_runtime_settings_are_in_protected_snapshot(deployment, tmp_path):
     (tmp_path / ".env").write_text("RESEARCHCLAW_API_KEY=changed-fixture\n")
     assert before != deployment.protected_files(tmp_path)
     assert ".env" in before and "examples/config_template.local.yaml" in before
+
+
+def test_frontend_source_build_requires_explicit_reviewed_option(deployment):
+    with pytest.raises(RuntimeError, match='--with-frontend'):
+        deployment.needs_frontend_build(['frontend/src/App.tsx'], False)
+    assert deployment.needs_frontend_build(['frontend/src/App.tsx'], True)
+    assert not deployment.needs_frontend_build(['backend/services/agent_bridge.py'], False)
+
+
+@pytest.mark.parametrize('path', ['frontend/package-lock.json', 'frontend/vite.config.ts', 'start.sh'])
+def test_frontend_option_does_not_bypass_dependency_or_launcher_review(deployment, path):
+    with pytest.raises(RuntimeError, match='separate reviewed'):
+        deployment.needs_frontend_build([path], True)
+
+
+def test_failed_frontend_build_removes_temporary_link_and_never_installs(deployment, tmp_path, monkeypatch):
+    (tmp_path/'frontend/node_modules').mkdir(parents=True)
+    candidate=tmp_path/'candidate';(candidate/'frontend').mkdir(parents=True)
+    monkeypatch.setattr(deployment, 'service_record', lambda *args: {'environment': {'PATH':'fixture'}})
+    monkeypatch.setattr(deployment.shutil, 'which', lambda *args, **kwargs: '/fixture/npm')
+    def failed_build(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args[0])
+    monkeypatch.setattr(deployment.subprocess, 'run', failed_build)
+    with pytest.raises(subprocess.CalledProcessError):
+        deployment.validate_frontend(tmp_path, candidate)
+    assert not (candidate/'frontend/node_modules').exists()
+    assert (tmp_path/'frontend/node_modules').is_dir()

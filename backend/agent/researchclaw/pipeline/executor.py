@@ -10923,6 +10923,13 @@ def execute_stage(
 ) -> StageResult:
     """Execute one pipeline stage, validate outputs, and apply gate logic."""
 
+    # The file/UI topic stays short. Every stage receives the separately stored
+    # details as labeled context, including resume and downstream writing stages.
+    if getattr(config.research, "details", ""):
+        from dataclasses import replace
+        config = replace(config, research=replace(config.research,
+            topic=config.research.prompt_topic, details=""))
+
     stage_dir = run_dir / f"stage-{int(stage):02d}"
     stage_dir.mkdir(parents=True, exist_ok=True)
     _t_health_start = _time.monotonic()

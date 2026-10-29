@@ -291,7 +291,7 @@ def main():
     args = parser.parse_args()
     config = RCConfig.load(args.config, check_paths=False)
     request = json.loads(Path(args.request).read_text(encoding="utf-8"))
-    request["topic"] = config.research.topic
+    request["topic"] = config.research.prompt_topic
     integrate(request, Path(args.output), create_llm_client(config))
 
 

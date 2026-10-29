@@ -78,6 +78,14 @@ class ResearchConfig:
     quality_threshold: float = 0.0
     graceful_degradation: bool = True
     reference_papers: tuple[str, ...] = ()
+    details: str = ""
+
+    @property
+    def prompt_topic(self) -> str:
+        """Keep stored topics concise; explicitly label execution details for models."""
+        if not self.details:
+            return self.topic
+        return self.topic + "\n\n## Research details and execution requirements\n" + self.details
 
 
 @dataclass(frozen=True)
@@ -463,6 +471,7 @@ class RCConfig:
             ),
             research=ResearchConfig(
                 topic=research["topic"],
+                details=research.get("details", ""),
                 domains=tuple(research.get("domains") or ()),
                 daily_paper_count=int(research.get("daily_paper_count", 0)),
                 quality_threshold=float(research.get("quality_threshold", 0.0)),
@@ -563,6 +572,10 @@ def validate_config(
 ) -> ValidationResult:
     errors: list[str] = []
     warnings: list[str] = []
+
+    research_data = data.get("research")
+    if isinstance(research_data, dict) and "details" in research_data and not isinstance(research_data["details"], str):
+        errors.append("research.details must be a string")
 
     llm_provider = _get_by_path(data, "llm.provider")
     for key in REQUIRED_FIELDS:

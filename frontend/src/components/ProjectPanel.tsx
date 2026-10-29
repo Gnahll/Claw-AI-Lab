@@ -44,7 +44,8 @@ interface Props {
     researchAngles: string[],
     referencePapers: string,
     referenceFiles: ReferencePdfUpload[],
-    paths: ProjectResources
+    paths: ProjectResources,
+    researchDetails: string
   ) => void;
 }
 
@@ -52,6 +53,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
   const [panelOpen, setPanelOpen] = useState(true);
   const [mode, setMode] = useState<SubmitMode>('lab');
   const [topicInput, setTopicInput] = useState('');
+  const [detailsInput, setDetailsInput] = useState('');
   const [anglesInput, setAnglesInput] = useState('');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [refPapersInput, setRefPapersInput] = useState('');
@@ -139,8 +141,10 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
       refPapersInput.trim(),
       referenceFiles.map(({ name, contentBase64 }) => ({ name, contentBase64 })),
       paths,
+      detailsInput.trim(),
     );
     setTopicInput('');
+    setDetailsInput('');
     setAnglesInput('');
     setRefPapersInput('');
     setReferenceFiles([]);
@@ -214,13 +218,25 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
             </div>
 
             <div className="project-input-stack">
+              <label className="project-field-label" htmlFor="research-topic">{t('project.topic_label')}</label>
               <textarea
+                id="research-topic"
                 className="project-topic-input"
                 placeholder={info.placeholder}
                 value={topicInput}
                 onChange={e => setTopicInput(e.target.value)}
                 onKeyDown={onKey}
                 rows={2}
+                disabled={!connected}
+              />
+              <label className="project-field-label" htmlFor="research-details">{t('project.details_label')}</label>
+              <textarea
+                id="research-details"
+                className="project-topic-input project-details-input"
+                placeholder={t('project.details_placeholder')}
+                value={detailsInput}
+                onChange={e => setDetailsInput(e.target.value)}
+                rows={5}
                 disabled={!connected}
               />
               {mode === 'lab' && (
