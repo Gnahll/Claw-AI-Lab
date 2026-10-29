@@ -159,7 +159,34 @@ def check_plan_file(path: Path, run_dir: Path, config: Any, *, require_protocol:
         plan = yaml.safe_load(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, yaml.YAMLError) as exc:
         return [f"Cannot read acceptance plan: {exc}"]
-    return plan_issues(plan, require_protocol=require_protocol, user_text=requirement_text(config, run_dir))
+    return (plan_issues(plan, require_protocol=require_protocol, user_text=requirement_text(config, run_dir))
+            + resource_plan_issues(plan, config))
+
+
+def resource_plan_issues(plan: Any, config: Any) -> list[str]:
+    """A changed GPU authorization must invalidate an old world-size/batch plan."""
+    if not isinstance(plan, dict):
+        return []
+    allocated = getattr(getattr(config, "experiment", None), "gpu_uuid", "") or ""
+    if not allocated:
+        return []
+    world = len([item for item in allocated.split(",") if item.strip()])
+    errors = []
+    for section in ("common_training", "training"):
+        training = plan.get(section)
+        if not isinstance(training, dict):
+            continue
+        declared = training.get("world_size")
+        if declared is not None and declared != world:
+            errors.append(f"{section}.world_size={declared} conflicts with {world} authorized GPUs; remeasure the resource plan")
+        batch = training.get("per_gpu_batch_size", training.get("per_gpu_batch"))
+        accumulation = training.get("gradient_accumulation_steps", training.get("accumulation"))
+        effective = training.get("effective_batch_size", training.get("effective_batch"))
+        if all(type(value) is int and value > 0 for value in (batch, accumulation, effective)):
+            if world * batch * accumulation != effective:
+                errors.append(f"{section}: {world} GPUs × batch {batch} × accumulation {accumulation} "
+                              f"does not equal effective batch {effective}; preserve the budget and remeasure")
+    return errors
 
 
 def write_plan_blocker(stage_dir: Path, issues: list[str]) -> str:

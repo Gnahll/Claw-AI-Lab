@@ -403,10 +403,11 @@ class CodegenRuntime:
 
         # Legacy resumes also reject explicitly unresolved definitions, without
         # forcing migration of an existing user's scientific gates.
-        from researchclaw.pipeline.acceptance import plan_issues, requirement_text, write_plan_blocker
+        from researchclaw.pipeline.acceptance import plan_issues, resource_plan_issues, requirement_text, write_plan_blocker
         try:
             _acceptance_plan = yaml.safe_load(ctx.exp_plan or "{}")
-            _acceptance_errors = plan_issues(_acceptance_plan, user_text=requirement_text(config, run_dir))
+            _acceptance_errors = (plan_issues(_acceptance_plan, user_text=requirement_text(config, run_dir))
+                                  + resource_plan_issues(_acceptance_plan, config))
         except yaml.YAMLError as exc:
             _acceptance_errors = [f"Invalid acceptance plan YAML: {exc}"]
         if _acceptance_errors:

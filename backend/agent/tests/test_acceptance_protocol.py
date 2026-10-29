@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from researchclaw.pipeline.acceptance import (
-    ACCEPTANCE_POLICY, plan_issues, pretraining_blocker, registered_context,
+    ACCEPTANCE_POLICY, plan_issues, pretraining_blocker, registered_context, resource_plan_issues,
 )
 from researchclaw.pipeline.stages import StageStatus
 
@@ -197,6 +197,23 @@ def test_real_subprocess_blocker_survives_exit_without_becoming_success(tmp_path
 def test_generic_failed_metrics_are_not_reclassified_as_pretraining():
     assert pretraining_blocker({"status": "failed", "reason": "CUDA error"}) is None
     assert pretraining_blocker({"status": "done", "H1": {"AUROC": .49}}) is None
+
+
+def test_four_gpu_plan_cannot_run_after_user_authorizes_two_gpus():
+    config = SimpleNamespace(experiment=SimpleNamespace(gpu_uuid="GPU-six,GPU-seven"))
+    plan = {"common_training": {"world_size": 4, "per_gpu_batch_size": 8,
+                                "gradient_accumulation_steps": 2, "effective_batch_size": 64}}
+    original = deepcopy(plan)
+    errors = resource_plan_issues(plan, config)
+    assert len(errors) == 2 and "authorized GPUs" in errors[0]
+    assert plan == original  # No guessing a new accumulation count or runtime.
+    plan["common_training"].update(world_size=2, gradient_accumulation_steps=4)
+    assert resource_plan_issues(plan, config) == []
+
+
+def test_unmeasured_two_gpu_batch_is_left_for_actual_preflight():
+    config = SimpleNamespace(experiment=SimpleNamespace(gpu_uuid="GPU-four,GPU-five"))
+    assert resource_plan_issues({"common_training": {"world_size": 2, "per_gpu_batch_size": None}}, config) == []
 
 
 def test_s14_skips_paid_repair_and_second_execution_for_acceptance_failure(tmp_path, monkeypatch):

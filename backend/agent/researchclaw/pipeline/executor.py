@@ -3857,11 +3857,11 @@ def _execute_experiment_design(
                 )
 
     # Definitions must be implementable before spending a coding/training run.
-    from researchclaw.pipeline.acceptance import plan_issues, requirement_text, write_plan_blocker
+    from researchclaw.pipeline.acceptance import plan_issues, resource_plan_issues, requirement_text, write_plan_blocker
     _acceptance_errors = plan_issues(
         plan, require_protocol=bool(llm is not None and getattr(config.experiment, "require_training", False)),
         user_text=requirement_text(config, run_dir),
-    )
+    ) + resource_plan_issues(plan, config)
     if _acceptance_errors:
         (stage_dir / "exp_plan_draft.yaml").write_text(
             yaml.safe_dump(plan, allow_unicode=True), encoding="utf-8")
