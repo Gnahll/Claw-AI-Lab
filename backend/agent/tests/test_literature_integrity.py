@@ -17,7 +17,8 @@ def config():
 
 def offline_search(monkeypatch):
     monkeypatch.setattr(executor, "_check_literature_sites_reachable", lambda **kw: {"arxiv": True})
-    monkeypatch.setattr(search, "search_papers_multi_query", lambda *a, **kw: [])
+    from researchclaw.literature import bounded_search
+    monkeypatch.setattr(bounded_search, "bounded_search", lambda *a, **kw: [])
     monkeypatch.setattr(arxiv_client, "search_arxiv", lambda *a, **kw: [])
 
 

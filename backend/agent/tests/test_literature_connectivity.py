@@ -117,7 +117,9 @@ def test_s4_searches_only_available_sources(tmp_path, monkeypatch, available):
     def search_papers(*args, **kwargs):
         calls.append(kwargs["sources"])
         return [Paper(paper_id="real-paper", title="Retrieved paper", source=available[0])]
-    monkeypatch.setattr(search, "search_papers_multi_query", search_papers)
+    from researchclaw.literature import bounded_search
+    monkeypatch.setattr(bounded_search, "bounded_search", lambda *a, **kw:
+                        [] if kw.get("sort_by") == "submitted_date" else search_papers(*a, **kw))
     monkeypatch.setattr(data, "load_seminal_papers", lambda topic: [])
     monkeypatch.setattr(arxiv_client, "search_arxiv", lambda *args, **kwargs: [])
     config = SimpleNamespace(research=SimpleNamespace(topic="image forensics", reference_papers=()),
