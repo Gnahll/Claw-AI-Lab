@@ -22,6 +22,11 @@ def rc_config(tmp_path):
     return RCConfig.from_dict(_valid_config_data(), project_root=tmp_path, check_paths=False)
 
 
+def _complete_sections(plan):
+    return {'objectives':['Compare the complete method fairly'], 'metrics':['pixel_f1'],
+            'risks':['Numerical instability'], 'compute_budget':{'training_conditions':2}, **plan}
+
+
 def _design_config(rc_config, tmp_path, *, fixed_local):
     for name in ('data', 'code'):
         (tmp_path / name).mkdir(exist_ok=True)
@@ -35,8 +40,8 @@ def _design_config(rc_config, tmp_path, *, fixed_local):
 def test_fixed_local_experiment_keeps_authored_baseline_spec_and_skips_recommender(tmp_path, rc_config, monkeypatch):
     from researchclaw.pipeline import executor
     from researchclaw.agents import benchmark_agent
-    plan={'baselines':[{'name':'original','implementation_spec':{'loss_function':'author loss'}}],
-          'proposed_methods':[{'name':'joint D1 D2'}], 'datasets':['approved local data'], 'ablations':[]}
+    plan=_complete_sections({'baselines':[{'name':'original','implementation_spec':{'loss_function':'author loss'}}],
+          'proposed_methods':[{'name':'joint D1 D2'}], 'datasets':['approved local data'], 'ablations':[]})
     monkeypatch.setattr(executor, '_build_context_preamble', lambda *a, **k:'')
     monkeypatch.setattr(executor, '_chat_with_prompt', lambda *a, **k:SimpleNamespace(content=yaml.safe_dump(plan)))
     called=[]
@@ -51,8 +56,8 @@ def test_fixed_local_experiment_keeps_authored_baseline_spec_and_skips_recommend
 def test_authored_plan_survives_interrupted_optional_recommender(tmp_path, rc_config, monkeypatch):
     from researchclaw.pipeline import executor
     from researchclaw.agents import benchmark_agent
-    plan={'baselines':[{'name':'original','implementation_spec':{'loss_function':'author loss'}}],
-          'proposed_methods':['complete'], 'datasets':['specified'], 'ablations':[]}
+    plan=_complete_sections({'baselines':[{'name':'original','implementation_spec':{'loss_function':'author loss'}}],
+          'proposed_methods':['complete'], 'datasets':['specified'], 'ablations':[]})
     monkeypatch.setattr(executor, '_build_context_preamble', lambda *a, **k:'')
     monkeypatch.setattr(executor, '_chat_with_prompt', lambda *a, **k:SimpleNamespace(content=yaml.safe_dump(plan)))
     class InterruptedRecommender:
@@ -63,6 +68,25 @@ def test_authored_plan_survives_interrupted_optional_recommender(tmp_path, rc_co
     with pytest.raises(KeyboardInterrupt):
         executor._execute_experiment_design(stage,tmp_path,_design_config(rc_config,tmp_path,fixed_local=False),object(),llm=object())
     assert yaml.safe_load((stage/'exp_plan.yaml').read_text())['baselines']==plan['baselines']
+
+
+def test_s9_invalid_reply_does_not_pass_with_placeholder_plan(tmp_path, rc_config, monkeypatch):
+    from researchclaw.pipeline import executor
+    monkeypatch.setattr(executor, '_build_context_preamble', lambda *a, **k:'')
+    calls=[]
+    def invalid(*args,**kwargs):
+        calls.append((args,kwargs))
+        return SimpleNamespace(content='I will prepare a plan.',finish_reason='length',truncated=True,completion_tokens=4096)
+    monkeypatch.setattr(executor,'_chat_with_prompt',invalid)
+    stage=tmp_path/'stage-09';stage.mkdir()
+    result=executor._execute_experiment_design(stage,tmp_path,_design_config(rc_config,tmp_path,fixed_local=True),object(),llm=object())
+    assert result.status==StageStatus.FAILED and result.decision=='retry'
+    assert not (stage/'exp_plan.yaml').exists()
+    assert 'placeholder' in result.error
+    assert (stage/'plan_generation_response.json').is_file()
+    assert (stage/'plan_generation_retry_response.json').is_file()
+    assert calls[0][1]['max_tokens']==16384 and calls[1][1]['max_tokens']>=16384
+    assert 'Image manipulation localization' in calls[1][0][2]
 
 
 def test_s9_no_llm_with_local_dataset(tmp_path, monkeypatch):

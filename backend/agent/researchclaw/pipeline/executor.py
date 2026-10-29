@@ -3613,6 +3613,19 @@ def _execute_experiment_design(
             json_mode=sp.json_mode,
             max_tokens=sp.max_tokens,
         )
+        def _record_plan_response(filename: str, response: Any) -> None:
+            (stage_dir / filename).write_text(json.dumps({
+                "content": response.content,
+                "finish_reason": getattr(response, "finish_reason", ""),
+                "truncated": getattr(response, "truncated", False),
+                "completion_tokens": getattr(response, "completion_tokens", 0),
+                "max_tokens": sp.max_tokens,
+            }, ensure_ascii=False, indent=2), encoding="utf-8")
+        _record_plan_response("plan_generation_response.json", resp)
+        _plan_keys = {"objectives", "datasets", "baselines", "proposed_methods", "ablations", "metrics", "risks", "compute_budget"}
+        def _complete_plan(value: Any, response: Any) -> bool:
+            return (isinstance(value, dict) and _plan_keys <= value.keys()
+                    and not getattr(response, "truncated", False))
         raw_yaml = _extract_yaml_block(resp.content)
         try:
             parsed = yaml.safe_load(raw_yaml)
@@ -3650,7 +3663,7 @@ def _execute_experiment_design(
                     parsed = yaml.safe_load("\n".join(_yaml_lines))
                 except yaml.YAMLError:
                     pass
-        if isinstance(parsed, dict):
+        if _complete_plan(parsed, resp):
             plan = parsed
         else:
             logger.warning(
@@ -3665,25 +3678,33 @@ def _execute_experiment_design(
             if llm is not None:
                 logger.info("Stage 09: Retrying with strict YAML-only prompt...")
                 _retry_prompt = (
-                    "Output ONLY valid YAML. No prose, no markdown fences, no explanation.\n"
-                    f"Topic: {config.research.topic}\n"
-                    "Required keys: baselines, proposed_methods, ablations, "
-                    "datasets, metrics, objectives, risks, compute_budget.\n"
-                    "Each key maps to a list of strings."
+                    "The previous reply was not a complete parseable experiment plan. "
+                    "Return ONLY compact valid YAML; no preface or claims of work done. "
+                    "Retain every required section, structured implementation specification, "
+                    "source constraint and approved budget. Do not replace definitions with lists of names.\n\n"
+                    + "Research topic and constraints:\n" + config.research.topic + "\n\n"
+                    + sp.user + _implementation_handoff
                 )
                 _retry_resp = _chat_with_prompt(
                     llm,
                     "You output ONLY valid YAML. Nothing else.",
                     _retry_prompt,
-                    max_tokens=4096,
+                    max_tokens=max(sp.max_tokens or 0, 16384),
                 )
+                _record_plan_response("plan_generation_retry_response.json", _retry_resp)
                 try:
                     _retry_parsed = yaml.safe_load(_retry_resp.content)
-                    if isinstance(_retry_parsed, dict):
+                    if _complete_plan(_retry_parsed, _retry_resp):
                         plan = _retry_parsed
                         logger.info("Stage 09: Strict YAML retry succeeded.")
                 except yaml.YAMLError:
                     pass
+
+    if plan is None and (llm is not None or getattr(config.experiment, "require_training", False)):
+        failure = {"plan_accepted": False, "reason": "No complete experiment plan was generated; placeholder plans are not accepted"}
+        (stage_dir / "plan_generation_failure.json").write_text(json.dumps(failure, indent=2), encoding="utf-8")
+        return StageResult(stage=Stage.EXPERIMENT_DESIGN, status=StageStatus.FAILED,
+            artifacts=("plan_generation_failure.json",), decision="retry", error=failure["reason"])
 
     # BUG-12: Fallback 4 — extract method/baseline names from Stage 8 hypotheses
     if plan is None:
