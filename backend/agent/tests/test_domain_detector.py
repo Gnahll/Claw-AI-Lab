@@ -100,6 +100,19 @@ class TestProfileLoading:
 
 
 class TestKeywordDetection:
+    @pytest.mark.parametrize("topic", [
+        "面向图像篡改定位的跨分支注意力研究，以 Co-Transformers 为基础",
+        "Co-Transformers for image manipulation localization",
+        "Image forgery detection using transformer attention",
+        "Image segmentation using vision transformers",
+    ])
+    def test_explicit_vision_task_overrides_generic_transformer(self, topic):
+        assert _keyword_detect(topic) == "ml_vision"
+        assert detect_domain(topic).domain_id == "ml_vision"
+
+    def test_language_transformers_remain_nlp(self):
+        assert detect_domain("Transformer attention for text classification").domain_id == "ml_nlp"
+
     def test_ml_vision_keywords(self):
         assert _keyword_detect("image classification with ResNet") == "ml_vision"
         assert _keyword_detect("convolutional neural network for object detection") == "ml_vision"
