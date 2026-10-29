@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any
 
@@ -117,7 +118,7 @@ def load_seminal_papers(topic: str) -> list[dict[str, Any]]:
     """Return seminal papers whose keywords overlap with *topic*.
 
     Each returned dict has: title, authors, year, venue, cite_key, keywords.
-    Matching is case-insensitive substring on the topic string.
+    Matching uses case-insensitive keyword boundaries; short acronyms are ignored.
     """
     all_papers = _load_all()
     topic_lower = topic.lower()
@@ -129,7 +130,8 @@ def load_seminal_papers(topic: str) -> list[dict[str, Any]]:
         if not isinstance(keywords, list):
             continue
         for kw in keywords:
-            if isinstance(kw, str) and kw.lower() in topic_lower:
+            if (isinstance(kw, str) and len(kw) >= 4
+                    and re.search(r"(?<!\w)" + re.escape(kw.lower()) + r"(?!\w)", topic_lower)):
                 ck = paper.get("cite_key", "")
                 if ck not in seen_keys:
                     seen_keys.add(ck)

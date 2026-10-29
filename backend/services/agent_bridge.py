@@ -709,6 +709,7 @@ class DiscussionGroup:
     config_path: str
     agent_ids: list[str] = field(default_factory=list)
     run_dirs: dict[str, str] = field(default_factory=dict)   # agent_id -> run_dir
+    direction_names: dict[str, str] = field(default_factory=dict)
     completed_s7: set[str] = field(default_factory=set)       # agent_ids done with S7
     completed_s8: set[str] = field(default_factory=set)       # agent_ids done with S8
     best_agent_id: str = ""
@@ -1185,6 +1186,9 @@ def launch_agent_for_task(state: BridgeState, agent: LobsterAgent, task: Task) -
     """Assign a task to an agent. Passthrough layers skip process launch."""
     messages: list[dict] = []
     _assign_task_to_agent(agent, task)
+    request_file = Path(task.run_dir) / "discussion/integration_request.json"
+    if agent.layer == "idea" and request_file.is_file():
+        return _launch_hypothesis_integration(state, agent)
 
     # Passthrough layers: just verify artifacts and mark done
     if agent.layer in PASSTHROUGH_LAYERS:
@@ -1255,7 +1259,7 @@ def launch_agent_for_task(state: BridgeState, agent: LobsterAgent, task: Task) -
         "--auto-approve",
         "--skip-preflight",
     ]
-    if task.topic:
+    if task.topic and not agent.role_tag:
         cmd.extend(["--topic", task.topic])
 
     try:
@@ -1536,10 +1540,11 @@ def on_agent_done(state: BridgeState, agent: LobsterAgent) -> list[dict]:
                 ))
                 group = DiscussionGroup(
                     project_id=pid,
-                    topic=getattr(agent, '_topic', '') or agent.current_task,
-                    config_path=agent.config_path,
+                    topic=(_agent_meta or {}).get("topic") or getattr(agent, '_topic', ''),
+                    config_path=(_agent_meta or {}).get("config_path") or agent.config_path,
                     agent_ids=[a.id for a in waiting_same_proj],
                     run_dirs={a.id: a.run_dir for a in waiting_same_proj},
+                    direction_names={a.id: a.role_tag for a in waiting_same_proj},
                 )
                 for a in waiting_same_proj:
                     state.discussion_waiting.pop(a.id, None)
@@ -1894,7 +1899,7 @@ def resume_project(state: BridgeState, project_id: str) -> list[dict]:
         for eliminated in eliminated_dirs:
             messages.append(msg_log(
                 sys_agent,
-                f"  方向 [{eliminated.name.removeprefix('run-')}] 已在 S8 讨论后淘汰，不再恢复",
+                f"  方向 [{eliminated.name.removeprefix('run-')}] 已由讨论后的统一执行路径承接，不单独恢复",
                 "info",
             ))
         for angle_dir in angle_dirs:
@@ -2128,12 +2133,12 @@ DEFAULT_LAB_ANGLES: list[dict[str, str]] = [
 def _build_role_prompt(angle_name: str, main_topic: str) -> str:
     """Build a role prompt for a Lab mode agent. Uses predefined prompts for known
     angles, otherwise generates a reasonable prompt from the angle name."""
-    if angle_name in KNOWN_LAB_ANGLES:
-        return KNOWN_LAB_ANGLES[angle_name]
+    role = KNOWN_LAB_ANGLES.get(angle_name, f"你是实验室的「{angle_name}」方向研究员。")
     return (
-        f"你是实验室的「{angle_name}」方向研究员。"
-        f"请从 {angle_name} 的专业视角对研究主题进行深入调研，"
-        f"重点关注该方向最相关的理论、方法、数据集和最新进展。"
+        role + f"\n围绕研究主题「{main_topic}」，聚焦「{angle_name}」。"
+        "明确该方向的问题边界、候选机制、可核实的文献证据、与已有方法的区别、"
+        "实现接口、资源风险和可验证预测。与其他方向互补，最终共同形成统一方法；"
+        "不能把候选机制当成已证实的创新或有效性结论。"
     )
 
 
@@ -2849,15 +2854,13 @@ def _launch_s8_for_agent(state: BridgeState, agent: LobsterAgent, group: Discuss
 
     cmd = [
         state.python_path, "-m", "researchclaw", "run",
-        "--config", group.config_path,
+        "--config", agent.config_path,
         "--output", agent.run_dir,
         "--from-stage", STAGE_NAMES.get(fs, str(fs)),
         "--to-stage", STAGE_NAMES.get(ts, str(ts)),
         "--auto-approve",
         "--skip-preflight",
     ]
-    if group.topic:
-        cmd.extend(["--topic", group.topic])
 
     try:
         log_path = Path(agent.run_dir) / f"agent_{agent.id}_s8.log"
@@ -2879,41 +2882,63 @@ def _launch_s8_for_agent(state: BridgeState, agent: LobsterAgent, group: Discuss
     return messages
 
 
-def _select_best_hypothesis(state: BridgeState, group: DiscussionGroup) -> str:
-    """Pick the best agent perspective based on hypothesis quality heuristics.
+def _launch_hypothesis_integration(state: BridgeState, agent: LobsterAgent) -> list[dict]:
+    """Run joint hypothesis generation asynchronously; resumable through its request file."""
+    agent.status = "working"
+    agent.current_stage = 8
+    agent.current_task = "S8 综合所有研究方向，生成统一假设"
+    agent._is_discussion_s8 = True
+    agent._integrating_hypotheses = True
+    agent.stage_progress[8] = "running"
+    cmd = [state.python_path, str(Path(__file__).with_name("hypothesis_integration.py")),
+           "--config", agent.config_path, "--output", agent.run_dir,
+           "--request", str(Path(agent.run_dir) / "discussion/integration_request.json")]
+    try:
+        with _open_append_log(Path(agent.run_dir) / "hypothesis_integration.log", cmd) as log:
+            agent.process = subprocess.Popen(cmd, cwd=state.agent_package_dir,
+                stdout=log, stderr=subprocess.STDOUT,
+                env={**os.environ, "PYTHONUNBUFFERED": "1", "CUDA_VISIBLE_DEVICES": ""})
+    except Exception as exc:
+        agent.status = "error"
+        agent.current_task = f"Joint hypothesis launch failed: {exc}"
+        agent.stage_progress[8] = "failed"
+    return [msg_agent_update(agent), msg_log(agent, agent.current_task, "info", 8)]
 
-    Scores each agent's hypotheses.md by: number of hypotheses found,
-    total length (richer detail = better), and presence of novelty_report.
-    Returns the agent_id with the highest score.
-    """
-    best_id = group.agent_ids[0]
-    best_score = -1
+
+def _prepare_hypothesis_integration(state: BridgeState, agent: LobsterAgent,
+                                  group: DiscussionGroup) -> list[dict]:
+    project = state.projects_dir() / group.project_id
+    meta = _read_project_meta(str(project)) or {}
+    sources = []
     for aid in group.agent_ids:
-        rd = group.run_dirs.get(aid, "")
-        if not rd:
-            continue
-        score = 0
-        hypo_file = Path(rd) / "stage-08" / "hypotheses.md"
-        if hypo_file.exists():
-            text = hypo_file.read_text(encoding="utf-8", errors="replace")
-            score += len(text)
-            score += text.lower().count("hypothesis") * 500
-            score += text.lower().count("## ") * 300
-        novelty_file = Path(rd) / "stage-08" / "novelty_report.json"
-        if novelty_file.exists():
-            score += 2000
-        if score > best_score:
-            best_score = score
-            best_id = aid
-    return best_id
+        run = group.run_dirs.get(aid)
+        if not run:
+            raise ValueError("Missing research direction workspace")
+        peer = state.agents.get(aid)
+        name = group.direction_names.get(aid) or (peer.role_tag if peer else "") or Path(run).name
+        sources.append({"name": name, "run_dir": run})
+    sources.sort(key=lambda item: item["run_dir"])
+    target = project / "run-integrated"
+    (target / "discussion").mkdir(parents=True, exist_ok=True)
+    request = {"topic": meta.get("topic") or group.topic, "sources": sources,
+               "consensus_dir": group.discussion_output_dir}
+    _write_json(target / "discussion/integration_request.json", request)
+    _write_json(target / "checkpoint.json", {"last_completed_stage": 7})
+    # Persist the integration path before launch so restart retries integration, not training.
+    _record_discussion_selection(project, str(target), [item["run_dir"] for item in sources])
+    agent.run_dir = str(target)
+    agent.config_path = meta.get("config_path") or group.config_path
+    agent._topic = request["topic"]
+    return _launch_hypothesis_integration(state, agent)
 
 
 def _on_discussion_s8_done(state: BridgeState, agent: LobsterAgent) -> list[dict]:
-    """Handle S8 completion — wait for all agents, then pick the best hypothesis
-    and create only ONE downstream task to avoid duplicate experiments."""
+    """Wait for all S8 proposals, integrate them, then queue one joint experiment."""
     messages: list[dict] = []
     agent._is_discussion_s8 = False  # type: ignore[attr-defined]
 
+    integrating = getattr(agent, "_integrating_hypotheses", False)
+    agent._integrating_hypotheses = False
     project_id = agent.project_id
     group = state.discussion_groups.get(project_id)
     if not group:
@@ -2921,6 +2946,15 @@ def _on_discussion_s8_done(state: BridgeState, agent: LobsterAgent) -> list[dict
             if agent.id in g.agent_ids:
                 group = g
                 break
+
+    if integrating:
+        # Only a validated, complete joint result can advance to experiment design.
+        report = _read_json(Path(agent.run_dir) / "stage-08/integration_report.json")
+        if not report or report.get("status") != "ready":
+            agent.status = "error"
+            agent.current_task = "Joint hypothesis missing or blocked; no experiment queued"
+            return [msg_agent_update(agent)]
+        group = None
 
     if group:
         group.completed_s8.add(agent.id)
@@ -2936,32 +2970,14 @@ def _on_discussion_s8_done(state: BridgeState, agent: LobsterAgent) -> list[dict
         messages.append(msg_agent_update(agent))
         return messages
 
-    # All S8 done — select the best hypothesis and create ONE downstream task
+    # All S8 done — integrate complementary proposals without length-based selection.
     sys_agent = LobsterAgent(id="system", name="系统", layer="idea", run_id="", run_dir="", config_path="")
 
     merged_project_id = group.project_id if group else project_id
     if group:
-        best_id = _select_best_hypothesis(state, group)
-        group.best_agent_id = best_id
-        best_run_dir = group.run_dirs.get(best_id, agent.run_dir)
-        best_config = group.config_path
-        if not best_config:
-            best_agent = state.agents.get(best_id)
-            best_config = (best_agent.config_path if best_agent else "") or agent.config_path
-        other_ids = [a for a in group.agent_ids if a != best_id]
-        _record_discussion_selection(
-            Path(best_run_dir).parent, best_run_dir,
-            [group.run_dirs[a] for a in other_ids if group.run_dirs.get(a)],
-        )
-        messages.append(msg_log(
-            sys_agent,
-            f"项目 [{merged_project_id}] 所有 agent S8 完成 → 选择最优假设 (agent {best_id})，"
-            f"合并为单一实验路径 → 进入 L2（淘汰 {', '.join(other_ids)}）",
-            "success",
-        ))
-    else:
-        best_run_dir = agent.run_dir
-        best_config = agent.config_path
+        return messages + _prepare_hypothesis_integration(state, agent, group)
+    best_run_dir = agent.run_dir
+    best_config = agent.config_path
 
     output_queue_name = LAYER_OUTPUT_QUEUE.get("idea")
     if output_queue_name and output_queue_name in state.queues and merged_project_id:
@@ -2979,7 +2995,7 @@ def _on_discussion_s8_done(state: BridgeState, agent: LobsterAgent) -> list[dict
         state.queues[output_queue_name].push(follow_task)
         messages.append(msg_log(
             sys_agent,
-            f"项目 [{merged_project_id}] 最优假设已加入 {output_queue_name} 队列 → 进入 L2 实验设计",
+            f"项目 [{merged_project_id}] 统一研究假设已加入 {output_queue_name} 队列 → 进入 L2 实验设计",
             "success",
         ))
 
