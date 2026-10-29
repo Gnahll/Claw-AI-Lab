@@ -1717,6 +1717,7 @@ _DEFAULT_STAGES: dict[str, dict[str, Any]] = {
     },
     # ── Phase D: Experiment Design ───────────────────────────────────────
     "experiment_design": {
+        "max_tokens": 16384,
         "system": "You are a principal investigator designing rigorous research experiments.",
         "user": (
             "{preamble}\n\n"
