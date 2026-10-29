@@ -5136,6 +5136,9 @@ def _decision_context(run_dir: Path, config: RCConfig) -> str:
     from researchclaw.pipeline.stages import MAX_DECISION_LOOPS
 
     lines = ["\n\n## Decision context (from the platform)"]
+    lines.append("User research scope and constraints take precedence over default baseline "
+                 "recommendations. Do not expand a fixed training budget or rerun completed "
+                 "conditions to satisfy an unrequested baseline.\n" + config.research.topic)
     selected = getattr(config.experiment, "optional_experiments", None)
     if selected is not None:
         from researchclaw.training.execution import optional_experiments_directive

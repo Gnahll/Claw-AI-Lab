@@ -127,7 +127,8 @@ def integrate(request: dict, output: Path, llm) -> None:
     (output / "stage-04/references.bib").write_text("\n\n".join(entries.values()), encoding="utf-8")
     discussion = output / "discussion"
     consensus = Path(request["consensus_dir"])
-    for name in ("consensus_synthesis.md", "discussion_transcript.md", "pre_discussion_syntheses.md"):
+    synthesis_file = request.get("synthesis_file", "consensus_synthesis.md")
+    for name in (synthesis_file, "discussion_transcript.md", "pre_discussion_syntheses.md"):
         path = consensus / name
         if path.is_file():
             shutil.copy2(path, discussion / name)
@@ -141,7 +142,7 @@ def integrate(request: dict, output: Path, llm) -> None:
     synthesis = output / "stage-07"
     synthesis.mkdir(exist_ok=True)
     (synthesis / "synthesis.md").write_text(
-        (consensus / "consensus_synthesis.md").read_text(encoding="utf-8"), encoding="utf-8")
+        (consensus / synthesis_file).read_text(encoding="utf-8"), encoding="utf-8")
     stage = output / "stage-08"
     stage.mkdir(exist_ok=True)
     method = ["# Joint research hypothesis", payload["joint_method"], "## Direction coverage"]
@@ -154,7 +155,7 @@ def integrate(request: dict, output: Path, llm) -> None:
     method.extend(["## Experiment plan", payload["experiment_plan"]])
     (stage / "hypotheses.md").write_text("\n\n".join(method) + "\n", encoding="utf-8")
     (stage / "integration_report.json").write_text(json.dumps(
-        {**payload, "sources": sources, "mode": "complementary"}, ensure_ascii=False, indent=2), encoding="utf-8")
+        {**payload, "sources": sources, "mode": request.get("workflow", "discussion_joint")}, ensure_ascii=False, indent=2), encoding="utf-8")
     (output / "checkpoint.json").write_text(json.dumps({"last_completed_stage": 8}), encoding="utf-8")
 
 

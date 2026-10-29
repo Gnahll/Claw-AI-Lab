@@ -73,12 +73,11 @@ Step 1 — EXPLORE (mandatory before writing any code):
   - Do NOT assume `datasets/`, `checkpoints/`, or `codebases/` inside the workspace contain the real files. The source of truth is the ABSOLUTE path shown in `CODEGEN.md` and `# Available data paths`.
 
 Step 2 — DESIGN based on what you found:
-  - Read model_index.json in the checkpoint directory to find the correct pipeline class
-  - Use the EXACT class specified in model_index.json `_class_name` field — NOT a generic fallback
-  - Example: if model_index.json says `"_class_name": "WanImageToVideoPipeline"`, use that class
-  - CRITICAL: Do NOT use `StableDiffusionPipeline` for non-SD models — it will fail silently or crash
-  - If model_index.json is not found → use `diffusers.DiffusionPipeline.from_pretrained()` which auto-detects
-  - If no checkpoint available → use `torchvision.models` with pretrained=True (small download)
+  - Reuse the configured repository's actual model, training and evaluation entrypoints
+  - For a Diffusers-format checkpoint, inspect model_index.json and use its `_class_name`
+  - Missing model_index.json does NOT imply a Diffusers model; inspect the repository's loader
+  - If required pretrained weights or model code are unavailable, report the missing resource
+  - Do not substitute an unrelated pipeline or a generic torchvision model to make it run
   - NEVER substitute a real model with `torch.nn.Linear` — this makes the experiment meaningless
 
 Step 3 — WRITE main.py using write_file:
@@ -147,6 +146,7 @@ CRITICAL RULES:
 
 def _intro_section() -> str:
     from researchclaw.training.execution import EXECUTION_CONTRACT
+    from researchclaw.training.first_run import FIRST_RUN_CONTRACT
 
     return (
         "You are a research coding agent that generates experiment code by using tools. "
@@ -155,7 +155,7 @@ def _intro_section() -> str:
         "iteratively until the experiment produces valid results.\n\n"
         "IMPORTANT: Do NOT describe what you plan to do — just DO it by calling tools. "
         "Every response should include at least one tool call until the experiment is complete."
-        + "\n\n" + EXECUTION_CONTRACT
+        + "\n\n" + EXECUTION_CONTRACT + "\n\n" + FIRST_RUN_CONTRACT
     )
 
 

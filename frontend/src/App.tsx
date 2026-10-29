@@ -230,12 +230,8 @@ export default function App() {
   }, [resWsUrl]);
 
   const toggleDiscussionMode = () => {
-    const next = !discussionMode;
-    setDiscussionMode(next);
-    const ws = agentWsRef.current;
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ command: 'set_discussion_mode', enabled: next }));
-    }
+    // This is a choice for the next submission, not a live server-wide switch.
+    setDiscussionMode(previous => !previous);
   };
 
   // ── Memoized derived state ──
@@ -361,6 +357,7 @@ export default function App() {
               if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                   command: 'quick_submit',
+                  discussionEnabled: discussionMode,
                   topic,
                   mode,
                   researchAngles: researchAngles.length > 0 ? researchAngles : undefined,

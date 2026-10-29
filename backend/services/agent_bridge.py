@@ -710,6 +710,7 @@ class DiscussionGroup:
     agent_ids: list[str] = field(default_factory=list)
     run_dirs: dict[str, str] = field(default_factory=dict)   # agent_id -> run_dir
     direction_names: dict[str, str] = field(default_factory=dict)
+    workflow: str = "discussion_joint"
     completed_s7: set[str] = field(default_factory=set)       # agent_ids done with S7
     completed_s8: set[str] = field(default_factory=set)       # agent_ids done with S8
     best_agent_id: str = ""
@@ -1201,8 +1202,10 @@ def launch_agent_for_task(state: BridgeState, agent: LobsterAgent, task: Task) -
     # Discussion mode: L1 runs S1-S7 only (S8 runs after discussion)
     # Reproduce mode skips discussion → runs full S1-S8
     _task_meta = _read_project_meta(task.run_dir) if task.run_dir else None
-    _is_reproduce = _task_meta.get("mode") == "reproduce" if _task_meta else False
-    if state.discussion_mode and agent.layer == "idea" and not _is_reproduce:
+    workflow = _project_workflow(state, task.project_id, task.run_dir)
+    _is_reproduce = workflow == "reproduce"
+    uses_discussion = workflow == "discussion_joint"
+    if uses_discussion and agent.layer == "idea" and not _is_reproduce:
         layer_range = LAYER_RANGE_PHASE1["idea"]
     else:
         layer_range = LAYER_RANGE.get(agent.layer, (1, 15))
@@ -1213,9 +1216,11 @@ def launch_agent_for_task(state: BridgeState, agent: LobsterAgent, task: Task) -
     if cp:
         last_done = cp.get("last_completed_stage", 0)
         resume_stage = last_done + 1
+        if workflow == "independent_joint" and agent.layer == "idea" and last_done >= 8:
+            return on_agent_done(state, agent)
 
         # Discussion mode: if S1-S7 already done, skip straight to discussion/S8
-        if state.discussion_mode and agent.layer == "idea" and not _is_reproduce and last_done >= ts:
+        if uses_discussion and agent.layer == "idea" and not _is_reproduce and last_done >= ts:
             for s in range(fs, ts + 1):
                 agent.stage_progress[s] = "completed"
             # Lab project with several angles: rejoin the discussion instead of
@@ -1322,6 +1327,40 @@ def _save_project_meta(run_dir: str, project_id: str, config_path: str, topic: s
 
 def _read_project_meta(run_dir: str) -> dict | None:
     return _read_json(Path(run_dir) / "project_meta.json")
+
+
+def _project_workflow(state: BridgeState, project_id: str, run_dir: str = "") -> str:
+    meta = _read_project_meta(str(state.projects_dir() / project_id)) or (
+        _read_project_meta(run_dir) if run_dir else None) or {}
+    if meta.get("mode") == "reproduce":
+        return "reproduce"
+    return meta.get("research_workflow") or (
+        "discussion_joint" if state.discussion_mode else "legacy_independent")
+
+
+def _independent_joint_done(state: BridgeState, agent: LobsterAgent, meta: dict) -> list[dict]:
+    """Independent S1-S8 research joins once, without a discussion subprocess."""
+    project = state.projects_dir() / agent.project_id
+    group = state.discussion_groups.get(agent.project_id)
+    if group is None:
+        directions = meta["research_directions"]
+        group = DiscussionGroup(project_id=agent.project_id, topic=meta["topic"],
+            config_path=meta["config_path"], workflow="independent_joint",
+            agent_ids=[item["run_dir"] for item in directions],
+            run_dirs={item["run_dir"]: item["run_dir"] for item in directions},
+            direction_names={item["run_dir"]: item["name"] for item in directions},
+            discussion_output_dir=str(project / "independent_synthesis"))
+        # Recover completed input proposals after restart without rerunning research.
+        for item in directions:
+            run = Path(item["run_dir"])
+            cp = _read_json(run / "checkpoint.json") or {}
+            if cp.get("last_completed_stage", 0) >= 8 and (run / "stage-08/hypotheses.md").is_file():
+                group.completed_s8.add(str(run))
+        state.discussion_groups[agent.project_id] = group
+    if group.status == "integrating":
+        _reset_agent_idle(agent)
+        return [msg_agent_update(agent)]
+    return _on_discussion_s8_done(state, agent)
 
 
 def _record_discussion_selection(proj_dir: Path, selected_run_dir: str, eliminated_run_dirs: list[str]) -> None:
@@ -1515,7 +1554,11 @@ def on_agent_done(state: BridgeState, agent: LobsterAgent) -> list[dict]:
     _agent_proj_dir = state.projects_dir() / agent.project_id if agent.project_id else None
     _agent_meta = _read_project_meta(str(_agent_proj_dir)) if _agent_proj_dir and _agent_proj_dir.exists() else None
     _agent_is_reproduce = _agent_meta.get("mode") == "reproduce" if _agent_meta else False
-    if state.discussion_mode and agent.layer == "idea" and not _agent_is_reproduce:
+    workflow = _project_workflow(state, agent.project_id, agent.run_dir)
+    if (workflow == "independent_joint" and agent.layer == "idea"
+            and len((_agent_meta or {}).get("research_directions", [])) >= 2):
+        return messages + _independent_joint_done(state, agent, _agent_meta)
+    if workflow == "discussion_joint" and agent.layer == "idea" and not _agent_is_reproduce:
         state.discussion_waiting[agent.id] = agent
         agent.current_stage = DISCUSSION_STAGE
         agent.stage_progress[DISCUSSION_STAGE] = "running"
@@ -2149,6 +2192,7 @@ def quick_submit_project(
     reference_papers: list[str] | None = None,
     reference_uploads: list[dict[str, str]] | None = None,
     path_overrides: dict | None = None,
+    discussion_enabled: bool | None = None,
 ) -> list[dict]:
     """Create a project from a topic string.
 
@@ -2163,6 +2207,10 @@ def quick_submit_project(
     if not topic.strip():
         messages.append(msg_log(sys_agent, "请输入研究主题", "error"))
         return messages
+
+    if discussion_enabled is not None and type(discussion_enabled) is not bool:
+        return [msg_log(sys_agent, "discussionEnabled must be a boolean", "error")]
+    discuss = state.discussion_mode if discussion_enabled is None else discussion_enabled
 
     base_id = project_id or _slugify(topic)
 
@@ -2247,6 +2295,10 @@ def quick_submit_project(
     if saved_reference_paths:
         messages.append(msg_log(sys_agent, f"已接收 {len(saved_reference_paths)} 个本地 PDF 参考文件", "info"))
 
+    meta = _read_project_meta(str(project_dir)) or {}
+    meta["research_workflow"] = "discussion_joint" if discuss else "independent_joint"
+    meta["research_directions"] = []
+    _write_json(project_dir / "project_meta.json", meta)
     task_count = 0
     for i, angle in enumerate(angles):
         name = angle["name"]
@@ -2287,6 +2339,9 @@ def quick_submit_project(
         )
         state.queues["init_to_idea"].push(task)
         task_count += 1
+        meta["research_directions"].append({"name": name, "run_dir": run_dir})
+        _write_json(project_dir / "project_meta.json", meta)
+
 
         messages.append(msg_log(
             sys_agent,
@@ -2302,7 +2357,8 @@ def quick_submit_project(
     messages.append(msg_project_list(list_all_projects(state)))
     messages.append(msg_log(
         sys_agent,
-        f"{task_count} 个方向 agent S7 完成后将自动讨论 → 合并为统一假设 → 进入 L2",
+        (f"{task_count} 个方向独立调研 → " + ("跨方向讨论 → " if discuss else "")
+         + "统一方法与实验 → 一篇论文"),
         "success",
     ))
     return messages
@@ -2922,6 +2978,18 @@ def _prepare_hypothesis_integration(state: BridgeState, agent: LobsterAgent,
     (target / "discussion").mkdir(parents=True, exist_ok=True)
     request = {"topic": meta.get("topic") or group.topic, "sources": sources,
                "consensus_dir": group.discussion_output_dir}
+    if group.workflow == "independent_joint":
+        independent = Path(group.discussion_output_dir)
+        independent.mkdir(parents=True, exist_ok=True)
+        parts = ["# Independent research synthesis\nNo cross-direction debate was performed."]
+        for source in sources:
+            path = Path(source["run_dir"]) / "stage-07/synthesis.md"
+            if not path.is_file():
+                raise ValueError("Missing independent research synthesis")
+            parts.append(f"## {source['name']}\n\n{path.read_text(encoding='utf-8')}")
+        (independent / "independent_synthesis.md").write_text("\n\n".join(parts), encoding="utf-8")
+        request["synthesis_file"] = "independent_synthesis.md"
+    request["workflow"] = group.workflow
     _write_json(target / "discussion/integration_request.json", request)
     _write_json(target / "checkpoint.json", {"last_completed_stage": 7})
     # Persist the integration path before launch so restart retries integration, not training.
@@ -2929,6 +2997,7 @@ def _prepare_hypothesis_integration(state: BridgeState, agent: LobsterAgent,
     agent.run_dir = str(target)
     agent.config_path = meta.get("config_path") or group.config_path
     agent._topic = request["topic"]
+    group.status = "integrating"
     return _launch_hypothesis_integration(state, agent)
 
 
@@ -2957,7 +3026,7 @@ def _on_discussion_s8_done(state: BridgeState, agent: LobsterAgent) -> list[dict
         group = None
 
     if group:
-        group.completed_s8.add(agent.id)
+        group.completed_s8.add(agent.run_dir if group.workflow == "independent_joint" else agent.id)
         messages.append(msg_log(
             agent,
             f"S8 完成 ({len(group.completed_s8)}/{len(group.agent_ids)})，等待其他 agent...",
@@ -3173,7 +3242,9 @@ async def handle_command(state: BridgeState, data: dict) -> list[dict]:
             "runs_per_condition": data.get("runsPerCondition", 3),
             "time_budget_hours": data.get("timeBudgetHours", 0),
         }
-        messages.extend(quick_submit_project(state, topic, project_id, mode, angles, ref_papers, reference_files, path_overrides))
+        messages.extend(quick_submit_project(state, topic, project_id, mode, angles, ref_papers,
+                                             reference_files, path_overrides,
+                                             discussion_enabled=data.get("discussionEnabled")))
         messages.extend(schedule_idle_agents(state))
         messages.append(msg_project_list(list_all_projects(state)))
 

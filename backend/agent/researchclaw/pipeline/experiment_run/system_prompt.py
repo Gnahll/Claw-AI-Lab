@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from researchclaw.training.first_run import FIRST_RUN_CONTRACT
+
 
 def build_system_prompt(
     *,
@@ -34,10 +36,10 @@ producing valid results (results.json with real metrics).
    - The experiment should produce `results.json` with metrics
    - Monitor stdout/stderr for errors
 5. If the experiment fails, diagnose and fix:
-   - **OOM**: Reduce batch_size, enable gradient checkpointing, use mixed precision
-   - **NaN/Inf loss**: Lower learning rate, add gradient clipping, check data
+   - **OOM**: Inspect memory and the frozen plan; report a resource blocker instead of changing planned batch
+   - **NaN/Inf loss**: Identify the unstable operation and data; do not silently change the planned learning rate
    - **Missing file/path**: Fix the path to actual data locations
-   - **Timeout**: Reduce training steps (but keep at least 50% of original)
+   - **Timeout**: Preserve checkpoints and report remaining work; do not shorten formal training
    - **Import error**: Install the missing package
 6. Re-run after fixing
 7. When done, verify results.json exists and contains valid metrics
@@ -49,11 +51,10 @@ producing valid results (results.json with real metrics).
 - NEVER replace the model with a dummy to speed things up
 - NEVER remove evaluation steps to avoid errors
 - Prefer targeted fixes (edit_file) over full rewrites
-- If reducing training steps for time, keep at least 50% of the original count
+- Keep the full planned training budget; never reduce epochs or steps just to pass
 - Log what you changed and why
-- If the experiment takes too long, you may reduce steps/epochs but MUST
-  keep the same experimental conditions and evaluation protocol
-"""
+- If the experiment takes too long, preserve progress and report a runtime-budget blocker
+""" + "\n\n" + FIRST_RUN_CONTRACT
 
 
 def build_user_message(
