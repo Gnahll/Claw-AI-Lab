@@ -498,6 +498,20 @@ class CodegenRuntime:
             file_path.write_text(code, encoding="utf-8")
         session.log(CodegenPhase.GENERATE, f"Wrote {len(files)} files to {exp_dir}")
 
+        from researchclaw.pipeline.codegen.readiness import declared_interface_gaps
+        implementation_errors = declared_interface_gaps(files, ctx.exp_plan)
+        if result.error:
+            implementation_errors.insert(0, result.error)
+        if implementation_errors:
+            report = stage_dir / "implementation_readiness.json"
+            report.write_text(json.dumps({"ready": False, "errors": implementation_errors,
+                "scope": "Named interfaces only; runtime and training verification remain required"}, indent=2), encoding="utf-8")
+            session.log_error(CodegenPhase.VALIDATE, "; ".join(implementation_errors))
+            session.persist()
+            return StageResult(stage=Stage.CODE_GENERATION, status=StageStatus.FAILED,
+                artifacts=("experiment/", "implementation_readiness.json"), decision="retry",
+                error="Implementation is incomplete: " + "; ".join(implementation_errors))
+
         # ── Phase 6: FINALIZE ────────────────────────────────────────────
         artifacts = self._finalize(files, ctx, config, stage_dir, exp_dir, session)
 

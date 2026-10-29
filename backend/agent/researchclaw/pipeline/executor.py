@@ -3597,10 +3597,19 @@ def _execute_experiment_design(
             metric_direction=config.experiment.metric_direction,
             reference_paper_block=_ref_block,
         )
+        _implementation_handoff = (
+            "\nIMPLEMENTATION HANDOFF: Define proposed-method constants, every diagnostic metric's "
+            "formula/aggregation/edge cases, and fixed fixture inputs/reference distributions. "
+            "Do not leave these as 'recover definitions' or 'freeze later' instructions that prevent "
+            "S11 from implementing the method. Distinguish later measured resource/gradient checks "
+            "from definitions needed to write the code. Do not invent an author's missing protocol: "
+            "identify it and request an explicit choice rather than claiming author fidelity. "
+            "Respect all user budgets; no gate removal or validation/test-based definition selection.\n"
+        )
         resp = _chat_with_prompt(
             llm,
             sp.system,
-            sp.user,
+            sp.user + _implementation_handoff,
             json_mode=sp.json_mode,
             max_tokens=sp.max_tokens,
         )

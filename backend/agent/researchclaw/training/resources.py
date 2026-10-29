@@ -43,6 +43,8 @@ def with_execution_resources(stage):
 
             old_visibility = os.environ.get("CUDA_VISIBLE_DEVICES")
             previous_handler = None
+            gpu_uuids = []
+            checking_gpu = None
             with ExitStack() as resources:
                 try:
                     gpu_uuids = parse_gpu_uuids(getattr(config.experiment, "gpu_uuid", ""))
@@ -51,6 +53,7 @@ def with_execution_resources(stage):
                         lock_dir = Path.home() / ".cache" / "researchclaw" / "gpu-locks"
                         lock_dir.mkdir(parents=True, exist_ok=True)
                     for gpu_uuid in sorted(gpu_uuids):  # fixed order: two projects never deadlock
+                        checking_gpu = gpu_uuid
                         resources.enter_context(job_lock(lock_dir / f"{gpu_uuid}.lock"))
                         require_idle_gpu(gpu_uuid)
                 except (ValueError, RuntimeError, OSError, subprocess.SubprocessError) as exc:
@@ -58,7 +61,15 @@ def with_execution_resources(stage):
                         os.environ.pop("CUDA_VISIBLE_DEVICES", None)
                     else:
                         os.environ["CUDA_VISIBLE_DEVICES"] = old_visibility
-                    return StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(), error=str(exc))
+                    from researchclaw.training.jobs import write_json
+                    stage_dir.mkdir(parents=True, exist_ok=True)
+                    write_json(stage_dir / "resource_blocker.json", {
+                        "status": "blocked", "execution_started": False,
+                        "gpu_uuids": gpu_uuids, "checking_gpu_uuid": checking_gpu,
+                        "reason": str(exc),
+                    })
+                    return StageResult(stage=stage, status=StageStatus.FAILED,
+                        artifacts=("resource_blocker.json",), decision="retry", error=str(exc))
                 try:
                     if threading.current_thread() is threading.main_thread():
                         previous_handler = signal.getsignal(signal.SIGTERM)

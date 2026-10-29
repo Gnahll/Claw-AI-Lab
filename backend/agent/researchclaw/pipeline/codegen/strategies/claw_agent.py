@@ -120,6 +120,23 @@ class ClawAgentStrategy:
         loop.set_exp_plan(ctx.exp_plan)
         session.log(CodegenPhase.GENERATE, "Starting turn loop...")
         turn_result = loop.run_turn(user_message)
+        from researchclaw.pipeline.codegen.readiness import declared_interface_gaps
+        gaps = declared_interface_gaps(turn_result.files, ctx.exp_plan)
+        if gaps and not turn_result.errors:
+            session.log(CodegenPhase.GENERATE, "Implementation incomplete; requesting one targeted repair: " + "; ".join(gaps))
+            repaired = loop.run_turn(
+                "The generated files do not implement the explicit plan interfaces:\n"
+                + "\n".join(gaps)
+                + "\nImplement the actual baseline and proposed method. An audit-only main.py or named stubs "
+                "do not complete S11. Preserve user budgets and scientific gates. If a protocol definition "
+                "cannot be resolved from the supplied plan and instructions, report it explicitly; do not "
+                "invent author settings, remove gates, or pretend the implementation is complete."
+            )
+            repaired.iterations += turn_result.iterations
+            repaired.tool_calls += turn_result.tool_calls
+            repaired.elapsed_sec += turn_result.elapsed_sec
+            turn_result = repaired
+            gaps = declared_interface_gaps(turn_result.files, ctx.exp_plan)
 
         elapsed = time.monotonic() - t0
 
@@ -142,7 +159,7 @@ class ClawAgentStrategy:
 
         session.llm_calls += turn_result.tool_calls
 
-        if turn_result.files and "main.py" in turn_result.files:
+        if turn_result.files and "main.py" in turn_result.files and not gaps and not turn_result.errors:
             session.log(
                 CodegenPhase.GENERATE,
                 f"ClawAgent SUCCESS — {len(turn_result.files)} files, "
@@ -165,7 +182,7 @@ class ClawAgentStrategy:
             files=turn_result.files,
             strategy_name=self.name,
             elapsed_sec=elapsed,
-            error="No main.py produced",
+            error="; ".join([*turn_result.errors, *gaps]) or "No main.py produced",
         )
 
     # ------------------------------------------------------------------
