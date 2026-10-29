@@ -227,3 +227,19 @@ def test_retry_reuses_condensed_inputs_and_records_provenance(tmp_path, monkeypa
     assert len(condensed) == 2
     inputs = json.loads((output / 'stage-08/integration_inputs.json').read_text())
     assert len(inputs['directions']) == 2 and inputs['directions'][0]['sha256']
+
+
+def test_failed_integration_displays_saved_reason_in_agent_log(tmp_path):
+    bridge = _load_agent_bridge_module()
+    state = bridge.BridgeState(runs_base_dir=str(tmp_path))
+    agent = bridge.create_agent(state, 'integrator', 'idea')
+    agent.project_id = 'p'
+    agent.run_dir = str(tmp_path / 'joint')
+    agent._integrating_hypotheses = True
+    agent.process = SimpleNamespace(poll=lambda: 1)
+    stage = Path(agent.run_dir) / 'stage-08'
+    stage.mkdir(parents=True)
+    (stage / 'integration_report.json').write_text(json.dumps({'status': 'blocked', 'reason': 'Unresolved interface conflict'}))
+    messages = bridge.poll_agent(agent)
+    assert agent.status == 'error' and 'Unresolved interface conflict' in agent.current_task
+    assert any('Unresolved interface conflict' in str(message) for message in messages)

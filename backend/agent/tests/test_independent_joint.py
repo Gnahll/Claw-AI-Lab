@@ -72,6 +72,7 @@ def test_independent_directions_join_once_without_debate_or_duplicate_experiment
     bridge.on_agent_done(state, agents[-1])
     outputs = state.queues["idea_to_experiment"].tasks
     assert len(outputs) == 1 and outputs[0].run_dir == str(target)
+    assert state.discussion_groups['one-paper'].status == 'done'
 
 
 def test_restart_joins_saved_independent_hypotheses_without_rerunning_research(tmp_path, monkeypatch):

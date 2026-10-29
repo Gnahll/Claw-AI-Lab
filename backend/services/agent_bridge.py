@@ -3035,6 +3035,8 @@ def _on_discussion_s8_done(state: BridgeState, agent: LobsterAgent) -> list[dict
             agent.status = "error"
             agent.current_task = "Joint hypothesis missing or blocked; no experiment queued"
             return [msg_agent_update(agent)]
+        if group:
+            group.status = "done"
         group = None
 
     if group:
