@@ -109,6 +109,7 @@ def search_papers(
     year_min: int = 0,
     deduplicate: bool = True,
     s2_api_key: str = "",
+    on_results: Callable[[list[Paper]], None] | None = None,
 ) -> list[Paper]:
     """Search multiple academic sources and return deduplicated results.
 
@@ -141,6 +142,7 @@ def search_papers(
     cache_hits = 0
 
     for src in sources:
+        source_start = len(all_papers)
         src_lower = src.lower().replace("-", "_").replace(" ", "_")
         cache_source = (
             "semantic_scholar" if src_lower in ("semantic_scholar", "s2") else src_lower
@@ -209,6 +211,9 @@ def search_papers(
                     "No cache available for %s/%r — skipping", src, query
                 )
 
+        if on_results is not None and len(all_papers) > source_start:
+            on_results(all_papers[source_start:])
+
     # Summary log
     total = len(all_papers)
     parts = [f"{src}: {n}" for src, n in source_stats.items()]
@@ -239,6 +244,7 @@ def search_papers_multi_query(
     s2_api_key: str = "",
     inter_query_delay: float = 1.0,
     max_time_sec: float = 45,
+    on_results: Callable[[list[Paper]], None] | None = None,
 ) -> list[Paper]:
     """Run multiple queries and return deduplicated union.
 
@@ -266,6 +272,7 @@ def search_papers_multi_query(
                 year_min=year_min,
                 s2_api_key=s2_api_key,
                 deduplicate=False,
+                **({"on_results": on_results} if on_results is not None else {}),
             )
         except Exception:  # noqa: BLE001
             logger.warning("[literature] Query %d/%d failed — skipping", i + 1, len(queries))

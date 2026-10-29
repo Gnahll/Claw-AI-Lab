@@ -2547,9 +2547,8 @@ def _extract_local_pdf_reference(pdf_path: Path) -> dict[str, Any]:
 def _resolve_user_reference(ref: str) -> dict | None:
     """Resolve a user-provided reference string to a candidate dict.
 
-    Accepts arXiv IDs, arXiv URLs, local PDF paths, or plain titles.
-    Attempts arXiv API lookup first, then local PDF parsing, then falls back to
-    a title-only entry.
+    Accepts arXiv IDs/URLs, publisher URLs, local PDFs, or plain titles.
+    Unresolved URLs stay unresolved; URL slugs are never paper titles.
     """
     import re as _re_ref
 
@@ -2586,15 +2585,22 @@ def _resolve_user_reference(ref: str) -> dict | None:
     if pdf_path.is_file() and pdf_path.suffix.lower() == ".pdf":
         return _extract_local_pdf_reference(pdf_path)
 
+    if normalized_ref.startswith(("https://", "http://")):
+        from researchclaw.literature.publisher import resolve_publisher_reference
+        paper = resolve_publisher_reference(normalized_ref)
+        if paper is None:
+            return None
+        result = paper.to_dict()
+        result["bibtex"] = paper.to_bibtex()
+        result["collected_at"] = _utcnow_iso()
+        return result
     title = normalized_ref
-    if title.startswith("http"):
-        title = title.rsplit("/", 1)[-1]
     return {
         "id": f"user-ref-{title[:40].replace(' ', '-').lower()}",
         "title": title,
         "source": "user_reference",
         "url": normalized_ref if normalized_ref.startswith("http") else "",
-        "year": 2025,
+        "year": 0,
         "abstract": "",
         "authors": [],
         "collected_at": _utcnow_iso(),
@@ -2610,7 +2616,7 @@ def _execute_literature_collect(
     llm: LLMClient | None = None,
     prompts: PromptManager | None = None,
 ) -> StageResult:
-    """Stage 4: Collect literature — prefer real APIs, fallback to LLM."""
+    """Stage 4: Collect real literature, retaining completed searches on timeout."""
     topic = config.research.topic
 
     # Pre-flight: check if any literature site is reachable
@@ -2660,11 +2666,7 @@ def _execute_literature_collect(
     _SEARCH_TIMEOUT_SEC = 60  # hard cap on API search phase
 
     try:
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-        from researchclaw.literature.search import (
-            search_papers_multi_query,
-            papers_to_bibtex,
-        )
+        from researchclaw.literature.bounded_search import bounded_search
 
         # Expand queries for broader coverage
         expanded_queries = _expand_search_queries(queries, config.research.topic)
@@ -2679,24 +2681,11 @@ def _execute_literature_collect(
             _SEARCH_TIMEOUT_SEC,
         )
 
-        with ThreadPoolExecutor(max_workers=1) as _pool:
-            _fut = _pool.submit(
-                search_papers_multi_query,
-                expanded_queries,
-                limit_per_query=40,
-                sources=reachable_sources,
-                year_min=year_min,
-                s2_api_key=config.llm.s2_api_key,
-            )
-            try:
-                papers = _fut.result(timeout=_SEARCH_TIMEOUT_SEC)
-            except FuturesTimeout:
-                logger.warning(
-                    "[literature] API search timed out after %ds — skipping",
-                    _SEARCH_TIMEOUT_SEC,
-                )
-                _fut.cancel()
-                papers = []
+        papers = bounded_search(
+            expanded_queries, output_dir=stage_dir / "api_search",
+            limit_per_query=40, sources=reachable_sources, year_min=year_min,
+            s2_api_key=config.llm.s2_api_key, timeout=_SEARCH_TIMEOUT_SEC,
+        )
 
         if papers:
             real_search_succeeded = True
@@ -2713,7 +2702,7 @@ def _execute_literature_collect(
             )
     except Exception:  # noqa: BLE001
         logger.warning(
-            "[rate-limit] Literature search failed — falling back to LLM",
+            "[rate-limit] Literature search failed — retaining resolved references only",
             exc_info=True,
         )
 
@@ -2726,6 +2715,7 @@ def _execute_literature_collect(
 
     # --- Inject user-provided reference papers ---
     _user_refs = config.research.reference_papers
+    unresolved_references: list[str] = []
     if _user_refs:
         _existing_titles = {c.get("title", "").lower() for c in candidates}
         _ref_injected = 0
@@ -2735,9 +2725,13 @@ def _execute_literature_collect(
             if not ref_str:
                 continue
             _resolved = _resolve_user_reference(ref_str)
+            if not _resolved:
+                unresolved_references.append(ref_str)
             if _resolved and _resolved.get("title", "").lower() not in _existing_titles:
                 _existing_titles.add(_resolved["title"].lower())
                 candidates.append(_resolved)
+                if _resolved.get("bibtex"):
+                    bibtex_entries.append(_resolved["bibtex"])
                 _ref_injected += 1
 
             # Extract full text for local PDFs (used by S9 experiment design)
@@ -2763,34 +2757,25 @@ def _execute_literature_collect(
 
         if _ref_injected:
             logger.info("Stage 4: Injected %d user-provided reference papers", _ref_injected)
+    (stage_dir / "unresolved_references.json").write_text(
+        json.dumps(unresolved_references, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
 
     # --- arXiv recent papers auto-discovery (30s timeout) ---
     _ARXIV_DISC_TIMEOUT = 30
     try:
-        from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
-        from researchclaw.literature.arxiv_client import search_arxiv as _arxiv_search
+        from researchclaw.literature.bounded_search import bounded_search
         _topic_kw = _extract_keywords(topic)
         if _topic_kw:
             _arxiv_query = " AND ".join(
                 f"all:{w}" for w in _topic_kw[:5]
             )
 
-            def _do_arxiv_disc() -> list:
-                return _arxiv_search(
-                    _arxiv_query, limit=30, sort_by="submitted_date",
-                    year_min=2025,
-                )
-
-            with ThreadPoolExecutor(max_workers=1) as _pool:
-                _fut = _pool.submit(_do_arxiv_disc)
-                try:
-                    _recent = _fut.result(timeout=_ARXIV_DISC_TIMEOUT)
-                except FuturesTimeout:
-                    logger.warning(
-                        "arXiv recent discovery timed out after %ds — skipping",
-                        _ARXIV_DISC_TIMEOUT,
-                    )
-                    _recent = []
+            _recent = bounded_search(
+                [_arxiv_query], output_dir=stage_dir / "recent_search", sources=("arxiv",),
+                limit_per_query=30, sort_by="submitted_date", year_min=2025,
+                timeout=_ARXIV_DISC_TIMEOUT,
+            ) if "arxiv" in reachable else []
 
             _existing_titles_lower = {c.get("title", "").lower() for c in candidates}
             _disc = 0
@@ -2814,23 +2799,6 @@ def _execute_literature_collect(
                 logger.info("Stage 4: Discovered %d recent arXiv papers (2025+)", _disc)
     except Exception:  # noqa: BLE001
         logger.debug("arXiv recent discovery skipped", exc_info=True)
-
-    # --- Fallback: LLM-generated candidates ---
-    if not candidates and llm is not None:
-        plan_text = _read_prior_artifact(run_dir, "search_plan.yaml") or ""
-        _pm = prompts or PromptManager()
-        _overlay = _get_evolution_overlay(run_dir, "literature_collect")
-        sp = _pm.for_stage("literature_collect", evolution_overlay=_overlay, topic=topic, plan_text=plan_text)
-        resp = _chat_with_prompt(
-            llm,
-            sp.system,
-            sp.user,
-            json_mode=sp.json_mode,
-            max_tokens=sp.max_tokens,
-        )
-        payload = _safe_json_loads(resp.content, {})
-        if isinstance(payload, dict) and isinstance(payload.get("candidates"), list):
-            candidates = [row for row in payload["candidates"] if isinstance(row, dict)]
 
     # --- Web search augmentation (Tavily/DDG + Google Scholar + Crawl4AI) — 60s timeout ---
     _WEB_SEARCH_TIMEOUT = 60
@@ -3072,10 +3040,6 @@ def _execute_literature_screen(
             dropped_count += 1
     if not filtered_rows:
         return fail_screen("No topic-relevant candidates remain. Revise queries and retry S4; unrelated papers are not restored.")
-    # Rebuild candidates_text from filtered rows
-    candidates_text = "\n".join(
-        json.dumps(r, ensure_ascii=False) for r in filtered_rows
-    )
     logger.info(
         "Domain pre-filter: kept %d, dropped %d (keywords: %s)",
         len(filtered_rows),
@@ -3087,26 +3051,51 @@ def _execute_literature_screen(
     if llm is not None:
         _pm = prompts or PromptManager()
         _overlay = _get_evolution_overlay(run_dir, "literature_screen")
-        sp = _pm.for_stage(
-            "literature_screen",
-            evolution_overlay=_overlay,
-            topic=config.research.topic,
-            domains=", ".join(config.research.domains)
-            if config.research.domains
-            else "general",
-            quality_threshold=config.research.quality_threshold,
-            candidates_text=candidates_text,
-        )
-        resp = _chat_with_prompt(
-            llm,
-            sp.system,
-            sp.user,
-            json_mode=sp.json_mode,
-            max_tokens=sp.max_tokens,
-        )
-        payload = _safe_json_loads(resp.content, {})
-        if isinstance(payload, dict) and isinstance(payload.get("shortlist"), list):
-            shortlist = [row for row in payload["shortlist"] if isinstance(row, dict)]
+        # The full topic also contains execution policies. Keep the scientific
+        # focus, and assess every candidate in bounded batches rather than
+        # sending hundreds of abstracts in a single gateway request.
+        def make_prompt(rows: list[dict[str, Any]]) -> Any:
+            return _pm.for_stage(
+                "literature_screen", evolution_overlay=_overlay,
+                topic=config.research.topic[:3500],
+                domains=", ".join(config.research.domains)[:500] or "general",
+                quality_threshold=config.research.quality_threshold,
+                candidates_text="\n".join(json.dumps(row, ensure_ascii=False) for row in rows),
+            )
+
+        batches: list[list[dict[str, Any]]] = []
+        current: list[dict[str, Any]] = []
+        fields = ("paper_id", "id", "title", "abstract", "year", "venue", "citation_count", "doi", "url", "source", "cite_key")
+        for original in filtered_rows:
+            compact = {key: (value[:1400] if key == "abstract" else value[:500])
+                       if isinstance(value, str) else value
+                       for key in fields if (value := original.get(key)) is not None}
+            trial = make_prompt([*current, compact])
+            if current and (len(current) >= 6 or len(trial.system) + len(trial.user) > 12000):
+                batches.append(current)
+                current = []
+            single = make_prompt([compact])
+            if len(single.system) + len(single.user) > 12000:
+                return fail_screen("Screening prompt instructions exceed 12000 characters even for one paper; shorten the custom prompt and retry S5.")
+            current.append(compact)
+        if current:
+            batches.append(current)
+        for index, batch in enumerate(batches, 1):
+            sp = make_prompt(batch)
+            (stage_dir / f"screening_batch_{index:03d}.json").write_text(
+                json.dumps({"topic_focus": config.research.topic[:3500], "candidates": batch,
+                            "prompt_chars": len(sp.system) + len(sp.user)}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            resp = _chat_with_prompt(llm, sp.system, sp.user,
+                                     json_mode=sp.json_mode, max_tokens=sp.max_tokens)
+            (stage_dir / f"screening_response_{index:03d}.json").write_text(resp.content, encoding="utf-8")
+            payload = _safe_json_loads(resp.content, {})
+            if not isinstance(payload, dict) or not isinstance(payload.get("shortlist"), list):
+                return fail_screen(f"Invalid screening response in batch {index}; retry S5 without inventing assessments.")
+            batch_titles = {str(row.get("title", "")).strip().casefold() for row in batch}
+            shortlist.extend(row for row in payload["shortlist"] if isinstance(row, dict)
+                             and str(row.get("title", "")).strip().casefold() in batch_titles)
     # Accept only assessed papers from the actual filtered input, never invented
     # entries or a fixed-size supplement. A small genuine shortlist is valid.
     by_title = {str(row.get("title", "")).strip().casefold(): row for row in filtered_rows}
