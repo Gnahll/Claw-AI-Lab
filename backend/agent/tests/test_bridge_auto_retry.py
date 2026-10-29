@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -91,3 +92,28 @@ def test_pause_removes_project_tasks_from_queue_file(bridge_state):
     reloaded = bridge.TaskQueue(queue.name, queue.path)
     reloaded.load()
     assert [task.id for task in reloaded.tasks] == ["task-2"]
+
+
+@pytest.mark.parametrize("error", [
+    "Acceptance protocol needs design revision: H2 mapping is undefined",
+    "Pretraining acceptance blocked: retained_H1_failed",
+])
+def test_acceptance_block_does_not_queue_an_unchanged_paid_retry(bridge_state, error):
+    bridge, state, agent, failed, _ = bridge_state
+    path = Path(failed.run_dir) / "stage-14/decision.json"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"status": "failed", "error": error}))
+    messages = bridge._queue_auto_retry(state, agent, failed, 1)
+    assert queued(state) == []
+    assert any("验收协议" in str(message) for message in messages)
+
+
+def test_old_acceptance_report_does_not_suppress_a_new_network_retry(bridge_state):
+    bridge, state, agent, failed, _ = bridge_state
+    from pathlib import Path
+    path = Path(failed.run_dir) / "stage-14"
+    path.mkdir()
+    (path / "acceptance_review.json").write_text(json.dumps({"retryable": False}))
+    (path / "decision.json").write_text(json.dumps({"status": "failed", "error": "HTTP Error 524"}))
+    bridge._queue_auto_retry(state, agent, failed, 1)
+    assert len(queued(state)) == 1

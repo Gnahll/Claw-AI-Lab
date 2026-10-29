@@ -147,6 +147,7 @@ CRITICAL RULES:
 def _intro_section() -> str:
     from researchclaw.training.execution import EXECUTION_CONTRACT
     from researchclaw.training.first_run import FIRST_RUN_CONTRACT
+    from researchclaw.pipeline.acceptance import ACCEPTANCE_POLICY
 
     return (
         "You are a research coding agent that generates experiment code by using tools. "
@@ -155,7 +156,7 @@ def _intro_section() -> str:
         "iteratively until the experiment produces valid results.\n\n"
         "IMPORTANT: Do NOT describe what you plan to do — just DO it by calling tools. "
         "Every response should include at least one tool call until the experiment is complete."
-        + "\n\n" + EXECUTION_CONTRACT + "\n\n" + FIRST_RUN_CONTRACT
+        + "\n\n" + EXECUTION_CONTRACT + "\n\n" + FIRST_RUN_CONTRACT + "\n\n" + ACCEPTANCE_POLICY
     )
 
 

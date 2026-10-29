@@ -1746,6 +1746,21 @@ def _queue_auto_retry(state: BridgeState, agent: LobsterAgent, failed: Task | No
         return []
     resume_info = _determine_resume_target(failed.run_dir)
     target_layer, next_stage = resume_info or (failed.target_layer, None)
+    # A design/acceptance refusal needs a changed protocol, not another paid
+    # coding/execution attempt. Use the CURRENT failed decision, not an old
+    # report left behind by a previous attempt that may already be resolved.
+    if next_stage is not None:
+        decision_path = Path(failed.run_dir) / f"stage-{next_stage:02d}" / "decision.json"
+        try:
+            decision = json.loads(decision_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            decision = {}
+        error = str(decision.get("error") or "")
+        if decision.get("status") == "failed" and error.startswith((
+            "Acceptance protocol needs design revision", "Pretraining acceptance blocked:",
+        )):
+            return [msg_log(agent, "验收协议阻止了训练，已停止自动重试。请修订方案中的定义或处理失败项；"
+                                   "平台不会自行降低门槛或重复开训。原因：" + error[:1200], "error", next_stage)]
     if any(t.status in ("pending", "assigned") and t.run_dir == failed.run_dir
            for q in state.queues.values() for t in q.tasks):
         return []

@@ -141,6 +141,21 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
             report["pid"] = process.pid
             report["returncode"] = _supervise(process, max(1, budget), config.experiment, output_dir,
                                               evidence_path.with_suffix(".jsonl"), report)
+            # A deliberate, measured pretraining refusal commonly exits 1. Read
+            # its fresh root report before replacing it with a generic exit code.
+            if result_path.is_file() and not result_path.is_symlink():
+                from researchclaw.pipeline.acceptance import pretraining_blocker
+                try:
+                    _blocked_results = json.loads(result_path.read_text(encoding="utf-8"), parse_constant=_reject_nonfinite)
+                except (OSError, ValueError):
+                    _blocked_results = None
+                blocker = pretraining_blocker(_blocked_results)
+                if blocker:
+                    report.update(results=_blocked_results, **blocker)
+                    report["results_sha256"] = hashlib.sha256(result_path.read_bytes()).hexdigest()
+                    raise ValueError(f"Pretraining acceptance blocked: {blocker['reason']}; "
+                                     f"checks={json.dumps(blocker['required_gate_status'], ensure_ascii=False)}. "
+                                     "Revise the experiment design; mandatory gates were not changed.")
             if process.returncode:
                 raise ValueError(f"Experiment process exited with {process.returncode}; see execution.log")
             if not result_path.is_file() or result_path.is_symlink():

@@ -49,6 +49,16 @@ class ExperimentRunRuntime:
         session = StageSession(stage_dir=stage_dir, stage_name="experiment_run")
         session.log("INIT", "ExperimentRunRuntime started")
 
+        from researchclaw.pipeline.acceptance import check_plan_file, write_plan_blocker
+        plan = run_dir / "stage-09" / "exp_plan.yaml"
+        if plan.is_file():
+            issues = check_plan_file(plan, run_dir, config)
+            if issues:
+                error = write_plan_blocker(stage_dir, issues)
+                session.log_error("INIT", error)
+                return StageResult(stage=Stage.EXPERIMENT_RUN, status=StageStatus.FAILED,
+                                   artifacts=("acceptance_review.json",), decision="revise_design", error=error)
+
         resource_manifest = build_resource_manifest(
             existing_project_dir=getattr(config.experiment, "existing_project_dir", "") or "",
             codebases_dir=getattr(config.experiment, "codebases_dir", "") or "",
@@ -262,6 +272,9 @@ class ExperimentRunRuntime:
         runs = stage_dir / "runs"
         first = run_experiment(workspace, runs / "attempt-1", config)
         if first["success"]:
+            return first, TurnResult()
+        if first.get("failure_type") == "pretraining_blocked":
+            session.log("EXECUTE", "Acceptance checks blocked training; no repair or execution retry")
             return first, TurnResult()
         failure_log = (runs / "attempt-1" / "execution.log").read_text(encoding="utf-8", errors="replace")[-12000:]
         turn_result = loop.run_turn(

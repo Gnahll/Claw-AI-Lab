@@ -11,6 +11,12 @@ First-run readiness and frozen protocol:
   participate in optimization, peak memory and throughput. Record measured readiness.
   Choose feasible microbatch/accumulation settings in the plan before freezing it;
   preserve any user-specified effective batch, data split and full training budget.
+- Separate engineering prerequisites from research hypotheses in acceptance_protocol.
+  Engineering readiness must pass before training. Hypothesis quality and expected
+  improvements are measured research outcomes, not invented default training gates.
+  Preserve explicit user-mandated gates verbatim. Define all checkers, alignment,
+  reference distributions and aggregation during design; do not pass unresolved
+  definitions to S11. A smoke pass never implies full scientific acceptance.
 - Honor user-selected conditions, seeds and optional experiments. Extra baselines are
   recommendations when feasible, not permission to expand a fixed experiment budget.
   Distinguish retrained baselines, public-checkpoint references and literature values.
