@@ -84,7 +84,9 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
     },
   };
 
-  const info = modeInfo[mode];
+  const info = mode === 'lab' && !discussionMode
+    ? { ...modeInfo.lab, desc: t('project.mode.lab_independent_desc') }
+    : modeInfo[mode];
   const [showModeHelp, setShowModeHelp] = useState(false);
 
   const arrayBufferToBase64 = (buffer: ArrayBuffer) => {

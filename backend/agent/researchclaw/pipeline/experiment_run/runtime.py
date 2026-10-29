@@ -210,6 +210,15 @@ class ExperimentRunRuntime:
         (runs_dir / "run_report.json").write_text(
             json.dumps(report, indent=2), encoding="utf-8",
         )
+        if success and config.experiment.require_training:
+            from researchclaw.training.verified_run import create_receipt
+            execution_path = next(path for path in (
+                runs_dir / "attempt-1/execution_report.json", runs_dir / "attempt-2/execution_report.json")
+                if path.is_file() and json.loads(path.read_text(encoding="utf-8")) == verified_run)
+            receipt = create_receipt(workspace, run_dir, execution_path, config)
+            (runs_dir / "verified_run_receipt.json").write_text(
+                json.dumps(receipt, indent=2), encoding="utf-8")
+            session.log("RESULT", "Saved verified-run receipt for S15 review without retraining")
         session.add_artifact("runs/run_report.json")
 
         return StageResult(

@@ -47,6 +47,11 @@ class IterativeRefineRuntime:
         session = StageSession(stage_dir=stage_dir, stage_name="iterative_refine")
         session.log("INIT", "IterativeRefineRuntime started")
 
+        # A completed verified S14 needs an integrity review, not another full training run.
+        reuse = self._review_verified_run(stage_dir, run_dir, config, session)
+        if reuse is not None:
+            return reuse
+
         # Resolve coding LLM
         llm = self._resolve_coding_llm(llm, config)
         if llm is None:
@@ -498,3 +503,40 @@ class IterativeRefineRuntime:
             except OSError:
                 pass
         session.log("FINALIZE", f"Wrote experiment_final/ ({len(list(final_dir.rglob('*')))} files)")
+
+    def _review_verified_run(self, stage_dir: Path, run_dir: Path, config: RCConfig,
+                             session: StageSession) -> Any:
+        from researchclaw.pipeline.executor import StageResult
+        from researchclaw.training.verified_run import validate_receipt
+
+        path = run_dir / "stage-14/runs/verified_run_receipt.json"
+        if not path.is_file():
+            return None  # Legacy runs retain the existing verification path.
+        try:
+            if (stage_dir / REFINE_REQUEST_FILE).is_file():
+                raise ValueError("S17 requested additional experiments; preserve completed S14 and "
+                                 "review the added scope instead of automatically retraining every condition")
+            experiment_dir = run_dir / "stage-11/experiment"
+            if not experiment_dir.is_dir():
+                experiment_dir = self._find_experiment_dir(run_dir)
+            if experiment_dir is None:
+                raise ValueError("Experiment code is missing")
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+            workspace = validate_receipt(receipt, experiment_dir, run_dir, config)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            session.log_error("VERIFY", str(exc))
+            (stage_dir / "verification_blocker.txt").write_text(str(exc), encoding="utf-8")
+            return StageResult(stage=Stage.ITERATIVE_REFINE, status=StageStatus.FAILED,
+                               artifacts=("verification_blocker.txt",), error=str(exc))
+        final_dir = stage_dir / "experiment_final"
+        self._write_final_experiment(experiment_dir, final_dir, session)
+        shutil.copy2(workspace / "results.json", final_dir / "results.json")
+        shutil.copy2(workspace / "results.json", stage_dir / "results.json")
+        log = {"adopted": True, "improved": False, "retrained": False,
+               "verification_mode": "verified_s14_integrity_review", "source_receipt": str(path),
+               "source_workspace": str(workspace), "refine_loop": False}
+        (stage_dir / "refinement_log.json").write_text(json.dumps(log, indent=2), encoding="utf-8")
+        session.log("VERIFY", "S14 source, protocol, results, weights and predictions unchanged; no retraining")
+        return StageResult(stage=Stage.ITERATIVE_REFINE, status=StageStatus.DONE,
+                           artifacts=("refinement_log.json", "experiment_final/"),
+                           evidence_refs=(str(path.relative_to(run_dir)), "refinement_log.json"))

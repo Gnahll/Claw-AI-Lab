@@ -133,6 +133,9 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
     with (output_dir / "execution.log").open("w", encoding="utf-8") as log:
         try:
             report["source_sha256"] = hashlib.sha256((workspace / "main.py").read_bytes()).hexdigest()
+            if training:
+                from researchclaw.training.verified_run import source_manifest
+                report["source_manifest"] = source_manifest(workspace)
             process = subprocess.Popen(cmd, cwd=workspace, env=env, stdout=log, stderr=subprocess.STDOUT,
                                        start_new_session=os.name != "nt")
             report["pid"] = process.pid
