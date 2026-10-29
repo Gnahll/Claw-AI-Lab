@@ -281,6 +281,16 @@ _KEYWORD_RULES: list[tuple[list[str], str]] = [
 def _keyword_detect(text: str) -> str | None:
     """Match text against keyword rules. Returns domain_id or None."""
     lower = text.lower()
+    # A task or a vision-specific architecture is stronger evidence than the
+    # generic word "transformer", also present in Co-Transformers and ViTs.
+    # Keep the existing NLP rules for text/language tasks without these clues.
+    vision_tasks = (
+        "image manipulation localization", "image forgery", "image tampering",
+        "image segmentation", "image classification", "object detection",
+        "vision transformer", "图像篡改", "篡改定位", "图像分割", "图像分类",
+    )
+    if any(task in lower for task in vision_tasks):
+        return "ml_vision"
     for keywords, domain_id in _KEYWORD_RULES:
         for kw in keywords:
             if kw in lower:
