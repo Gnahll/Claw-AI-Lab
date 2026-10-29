@@ -115,3 +115,58 @@ def test_failed_frontend_build_removes_temporary_link_and_never_installs(deploym
         deployment.validate_frontend(tmp_path, candidate)
     assert not (candidate/'frontend/node_modules').exists()
     assert (tmp_path/'frontend/node_modules').is_dir()
+
+
+@pytest.mark.parametrize('fail_health', [False, True])
+def test_frontend_deployment_restarts_both_services_and_rolls_back_on_failure(deployment, tmp_path, monkeypatch, fail_health):
+    root=tmp_path/'apps/lab';(root/'.git').mkdir(parents=True)
+    old='a'*40;new='b'*40;calls=[];commands=[];health_calls=[]
+    records={name:{'pid':pid,'identity':'original','arguments':[name],'environment':{},'cwd':str(root)}
+             for name,pid in [('agent_bridge',101),('frontend',102),('resource_monitor',103)]}
+    active={101,102,103};children={}
+    def git_result(root,*args):
+        if args==('rev-parse','--show-toplevel'):return str(root)
+        if args[0]=='branch':return 'preview-v1.1.0'
+        if args[0]=='status':return ''
+        if args[0]=='diff':return 'frontend/src/App.tsx'
+        return new if args[-1]=='origin/preview-v1.1.0' else old
+    def stop(root,record):
+        calls.append(('stop',record['arguments'][0]));active.discard(record['pid'])
+    def start(name):
+        def perform(root,record):
+            calls.append(('start',name));pid=201 if name=='agent_bridge' else 202
+            active.add(pid)
+            child=SimpleNamespace(pid=pid,poll=lambda: None if pid in active else 0)
+            children[name]=child
+            return child
+        return perform
+    def record(root,name):
+        return dict(records[name],pid=children[name].pid) if name in children else records[name]
+    def health(root):
+        health_calls.append(root)
+        if fail_health and len(health_calls)==1:raise RuntimeError('simulated failed health')
+    monkeypatch.setattr(deployment,'git',git_result)
+    monkeypatch.setattr(deployment.subprocess,'run',lambda cmd,**kw: commands.append(cmd) or SimpleNamespace(returncode=0))
+    monkeypatch.setattr(deployment,'validate_candidate',lambda root,rev,dest:dest.mkdir())
+    monkeypatch.setattr(deployment,'validate_frontend',lambda root,dest:calls.append(('build','frontend')))
+    monkeypatch.setattr(deployment,'service_record',record)
+    monkeypatch.setattr(deployment,'assert_idle',lambda *args:None)
+    monkeypatch.setattr(deployment,'identity',lambda pid:'original' if pid in active else None)
+    monkeypatch.setattr(deployment.os,'kill',lambda *args:None)
+    monkeypatch.setattr(deployment,'stop_bridge',stop)
+    monkeypatch.setattr(deployment,'stop_frontend',stop)
+    monkeypatch.setattr(deployment,'start_bridge',start('agent_bridge'))
+    monkeypatch.setattr(deployment,'start_frontend',start('frontend'))
+    monkeypatch.setattr(deployment,'health',health)
+    if fail_health:
+        with pytest.raises(RuntimeError,match='simulated failed health'):
+            deployment.deploy(root,with_frontend=True)
+        assert any(cmd[-3:]==['reset','--keep',old] for cmd in commands)
+        assert calls[-2:]==[('start','frontend'),('start','agent_bridge')]
+        assert len(health_calls)==2
+    else:
+        result=deployment.deploy(root,with_frontend=True)
+        assert result['frontend_rebuilt'] is True and result['commit']==new
+        assert calls==[('build','frontend'),('stop','agent_bridge'),('stop','frontend'),
+                       ('start','frontend'),('start','agent_bridge')]
+    assert 103 in active
