@@ -229,6 +229,50 @@ def test_retry_reuses_condensed_inputs_and_records_provenance(tmp_path, monkeypa
     assert len(inputs['directions']) == 2 and inputs['directions'][0]['sha256']
 
 
+def test_joint_redesign_receives_durable_feedback_on_first_call_and_retry(tmp_path):
+    request = small_request(tmp_path)
+    output = tmp_path / 'joint'
+    output.mkdir()
+    decision = 'Retain AUROC >= 0.70 and two 200-epoch conditions; measured AUROC 0.49 failed.'
+    (output / 'human_feedback.jsonl').write_text(json.dumps(
+        {'targetLayer': 'all', 'timestamp': 100, 'content': decision}) + '\n')
+    originals = {s['run_dir']: (Path(s['run_dir']) / 'stage-08/hypotheses.md').read_bytes()
+                 for s in request['sources']}
+    prompts = []
+    class LLM:
+        def chat(self, messages, **kwargs):
+            prompt = messages[0]['content']
+            assert decision in prompt
+            assert len(prompt) + len(kwargs['system']) < 14000
+            prompts.append(prompt)
+            return SimpleNamespace(content=json.dumps(payload()), total_tokens=1)
+    integration.integrate(request, output, LLM())
+    integration.integrate(request, output, LLM())
+    assert len(prompts) == 2
+    inputs = json.loads((output / 'stage-08/integration_inputs.json').read_text())
+    assert decision in inputs['feedback'] and inputs['topic'] == request['topic']
+    for directory, before in originals.items():
+        assert (Path(directory) / 'stage-08/hypotheses.md').read_bytes() == before
+
+
+def test_joint_feedback_over_budget_fails_before_model_call_without_truncation(tmp_path):
+    request = small_request(tmp_path)
+    output = tmp_path / 'joint'
+    output.mkdir()
+    (output / 'checkpoint.json').write_text('{"last_completed_stage": 7}')
+    feedback = 'Required constraint ' * 1000
+    (output / 'human_feedback.jsonl').write_text(json.dumps(
+        {'timestamp': 100, 'content': feedback}) + '\n')
+    class LLM:
+        def chat(self, *args, **kwargs):
+            pytest.fail('Oversized constraints must not be silently shortened or sent')
+    with pytest.raises(ValueError, match='integration input budget'):
+        integration.integrate(request, output, LLM())
+    assert json.loads((output / 'checkpoint.json').read_text())['last_completed_stage'] == 7
+    assert not (output / 'stage-08/hypotheses.md').exists()
+    assert feedback in (output / 'human_feedback.jsonl').read_text()
+
+
 def test_failed_integration_displays_saved_reason_in_agent_log(tmp_path):
     bridge = _load_agent_bridge_module()
     state = bridge.BridgeState(runs_base_dir=str(tmp_path))

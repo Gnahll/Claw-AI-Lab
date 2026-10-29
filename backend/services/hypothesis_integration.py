@@ -156,7 +156,16 @@ def _integrate(request: dict, output: Path, llm) -> None:
     # Never silently truncate project constraints. Oversized input requires an explicit edit.
     if len(topic) > 8000:
         raise ValueError("Research topic exceeds integration budget; shorten it explicitly")
+    # Integration runs outside execute_stage, so it must explicitly load the same
+    # durable project feedback used by the ordinary stages. A rollback must not
+    # silently regenerate a candidate without its measured failures/user decision.
+    from researchclaw.pipeline.executor import _load_human_feedback
+    from researchclaw.pipeline.stages import Stage
+
+    feedback = _load_human_feedback(output, Stage.HYPOTHESIS_GEN)
     topic_block = "Research topic and constraints:\n" + topic + "\n\n"
+    if feedback:
+        topic_block += "Project feedback and measured revision context:\n" + feedback + "\n\n"
     budget = 14000 - len(SYSTEM) - len(topic_block) - 300
     share = budget // len(sources)
     if share < 500:
@@ -195,7 +204,7 @@ def _integrate(request: dict, output: Path, llm) -> None:
                               "sha256": digest, "condensed": text})
         blocks.append(label + "\n" + text)
     (output / "stage-08/integration_inputs.json").write_text(json.dumps(
-        {"topic": topic, "directions": input_records}, ensure_ascii=False, indent=2), encoding="utf-8")
+        {"topic": topic, "feedback": feedback, "directions": input_records}, ensure_ascii=False, indent=2), encoding="utf-8")
     response = talk.chat("Integrating all directions", SYSTEM, topic_block + "\n\n".join(blocks), 8192)
     (output / "stage-08/integration_response.json").write_text(response, encoding="utf-8")
     raw = response.strip()
