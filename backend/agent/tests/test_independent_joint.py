@@ -67,8 +67,9 @@ def test_independent_directions_join_once_without_debate_or_duplicate_experiment
     assert bridge._lab_resume_angle_dirs(project, bridge._read_project_meta(str(project)))[0] == [target]
     stage = target / "stage-08"
     stage.mkdir()
-    (stage / "integration_report.json").write_text(json.dumps({"status": "ready"}))
-    bridge._on_discussion_s8_done(state, agents[-1])
+    (stage / "integration_report.json").write_text(json.dumps({"status": "ready", "readiness": "design_only", "training_completed": False}))
+    # Exercise the real process-completion entry point, not only its helper.
+    bridge.on_agent_done(state, agents[-1])
     outputs = state.queues["idea_to_experiment"].tasks
     assert len(outputs) == 1 and outputs[0].run_dir == str(target)
 

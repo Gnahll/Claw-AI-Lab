@@ -26,7 +26,13 @@ def payload():
         for ident, mechanism in (("D1", "Reliability-gated cross-branch exchange"),
                                  ("D2", "Input-dependent attention scale weights"))],
         "joint_method": "Combine reliable cross-branch exchange and adaptive attention",
-        "experiment_plan": "Use the same split, final checkpoint, and training budget"}
+        "experiment_plan": "Use the same split, final checkpoint, and training budget",
+        "readiness": "design_only", "training_completed": False,
+        "interface_contract": "Keep branch-specific values; exchange constraints and route attention scales.",
+        "reconciliations": [{"conflict": "Value transfer versus connectivity-only exchange",
+                             "resolution": "Use directional connectivity constraints to preserve both direction goals"}],
+        "pending_checks": [{"stage": "S9-S13 before full training", "check": "Verify source interface, gradients and memory",
+                            "stop_condition": "No compatible interface or insufficient resources"}]}
 
 
 @pytest.mark.parametrize("defect", ["missing", "duplicate", "blocked", "empty_evidence"])
@@ -73,6 +79,8 @@ def test_joint_output_preserves_both_directions_literature_and_originals(tmp_pat
     text = (output / "stage-08/hypotheses.md").read_text()
     assert "D1: Mechanism 1" in text and "D2: Mechanism 2" in text
     assert "attention scale weights" in text
+    assert "Pending checks before full training" in text
+    assert "training are not completed" in text
     assert all(f"D{index}: Mechanism {index}" in prompts[-1] for index in (1, 2))
     assert len((output / "stage-04/candidates.jsonl").read_text().splitlines()) == 2
     assert "ref1" in (output / "stage-04/references.bib").read_text()
@@ -133,3 +141,89 @@ def test_role_prompt_includes_topic_and_complementary_responsibility():
     prompt = bridge._build_role_prompt("Adaptive attention", "Image forgery localization")
     assert "Image forgery localization" in prompt and "Adaptive attention" in prompt
     assert "统一方法" in prompt
+
+
+def small_request(tmp_path):
+    sources = []
+    for index in (1, 2):
+        run = tmp_path / f"input-{index}"
+        (run / "stage-08").mkdir(parents=True)
+        (run / "stage-08/hypotheses.md").write_text(f"D{index} candidate and unverified interface")
+        sources.append({"name": f"Direction {index}", "run_dir": str(run)})
+    consensus = tmp_path / "synthesis"
+    consensus.mkdir()
+    (consensus / "independent_synthesis.md").write_text("Independently researched mechanisms")
+    return {"topic": "Image forgery localization", "sources": sources,
+            "consensus_dir": str(consensus), "synthesis_file": "independent_synthesis.md",
+            "workflow": "independent_joint"}
+
+
+def test_blocked_design_keeps_model_response_and_does_not_advance(tmp_path):
+    request = small_request(tmp_path)
+    output = tmp_path / "joint"
+    output.mkdir()
+    (output / "checkpoint.json").write_text('{"last_completed_stage": 7}')
+    result = {**payload(), "status": "blocked", "reason": "Irreconcilable explicit user constraints"}
+    class LLM:
+        def chat(self, messages, **kwargs):
+            assert "Missing future code inspection" in kwargs["system"]
+            assert "revise the latter" in kwargs["system"]
+            return SimpleNamespace(content=json.dumps(result), total_tokens=1)
+    with pytest.raises(ValueError, match="Irreconcilable"):
+        integration.integrate(request, output, LLM())
+    report = json.loads((output / "stage-08/integration_report.json").read_text())
+    raw = json.loads((output / "stage-08/integration_response.json").read_text())
+    assert report["status"] == "blocked" and raw == result
+    assert json.loads((output / "checkpoint.json").read_text())["last_completed_stage"] == 7
+    assert not (output / "stage-08/hypotheses.md").exists()
+
+
+@pytest.mark.parametrize("change", [{"training_completed": True}, {"readiness": "trained"},
+                                    {"pending_checks": []}, {"interface_contract": ""},
+                                    {"reconciliations": [{"conflict": "values mismatch"}]}])
+def test_s8_readiness_requires_untrained_design_and_pending_checks(change):
+    with pytest.raises(ValueError):
+        integration.validate({**payload(), **change}, ["D1", "D2"])
+
+
+def test_doi_identity_accepts_url_variation_but_rejects_real_conflicts(tmp_path):
+    request = small_request(tmp_path)
+    template = ('@inproceedings{{zhang2026collaborative,\n'
+                '  title = {{Collaborative Transformers}},\n  author = {{Jiwei Zhang}},\n'
+                '  year = {{2026}},\n  doi = {{10.1609/aaai.v40i15.38250}},\n'
+                '  url = {{{url}}},\n}}')
+    urls = ['https://ojs.aaai.org/index.php/AAAI/article/view/38250', 'https://doi.org/10.1609/aaai.v40i15.38250']
+    for source, url in zip(request['sources'], urls):
+        path = Path(source['run_dir']) / 'stage-04'
+        path.mkdir()
+        (path / 'references.bib').write_text(template.format(url=url))
+    entries, duplicates = integration._merge_bibliographies(request['sources'])
+    assert len(entries) == 1 and len(duplicates) == 1
+    assert all(url in str(duplicates) for url in urls)
+    path = Path(request['sources'][1]['run_dir']) / 'stage-04/references.bib'
+    path.write_text(path.read_text().replace('2026}', '2025}'))
+    with pytest.raises(ValueError, match='Conflicting bibliography key'):
+        integration._merge_bibliographies(request['sources'])
+
+
+def test_no_doi_cannot_merge_different_url_records_by_guessing_identity():
+    assert not integration._equivalent_bibliography_entries(
+        '@article{x, title={Same title}, url={https://one.test}}',
+        '@article{x, title={Same title}, url={https://two.test}}')
+
+
+def test_retry_reuses_condensed_inputs_and_records_provenance(tmp_path, monkeypatch):
+    request = small_request(tmp_path)
+    condensed = []
+    monkeypatch.setattr(integration.Discussion, 'condense',
+                        lambda self, label, text, limit: condensed.append(label) or text)
+    class LLM:
+        def chat(self, messages, **kwargs):
+            assert len(messages[0]['content']) + len(kwargs['system']) < 14000
+            return SimpleNamespace(content=json.dumps(payload()), total_tokens=1)
+    output = tmp_path / 'joint'
+    integration.integrate(request, output, LLM())
+    integration.integrate(request, output, LLM())
+    assert len(condensed) == 2
+    inputs = json.loads((output / 'stage-08/integration_inputs.json').read_text())
+    assert len(inputs['directions']) == 2 and inputs['directions'][0]['sha256']
