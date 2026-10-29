@@ -160,9 +160,12 @@ class SanityCheckRuntime:
                 + "\nExecution log:\n"
                 + failure_log
             )
-            attempt_dir = evidence_dir / "attempt-2"
-            measured_smoke = run_experiment(workspace, attempt_dir, config, smoke=True, timeout=180)
-            attempts.append(measured_smoke)
+            if turn_result.errors:
+                session.log("REPAIR", "Repair failed; preserving original failure without rerunning: " + "; ".join(turn_result.errors))
+            else:
+                attempt_dir = evidence_dir / "attempt-2"
+                measured_smoke = run_experiment(workspace, attempt_dir, config, smoke=True, timeout=180)
+                attempts.append(measured_smoke)
 
         for filename in ("execution.log", "execution_report.json"):
             shutil.copy2(attempt_dir / filename, evidence_dir / filename)

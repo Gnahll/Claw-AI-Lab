@@ -333,6 +333,11 @@ def _project_instructions_section(ctx: CodegenContext) -> str:
         "Your workspace contains `CODEGEN.md`, `DATA_CONTRACT.md`, and `PROJECT_CONTEXT.json`. "
         "Read all three with `read_file` BEFORE writing any code. "
         "Reuse the selected project's loaders, model, evaluation, and configuration; do not replace it with a toy implementation."
+        " Implement the plan's named required_distinct_helpers as real callable code. "
+        "A file that only audits resources and exits blocked does not complete S11. "
+        "Freeze routine method definitions before checking their outcomes; keep engineering preflight "
+        "and later full training distinct. Unperformed future checks are tasks to implement and run, "
+        "not evidence that the code implementation is complete."
     )
 
 
