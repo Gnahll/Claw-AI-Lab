@@ -144,7 +144,8 @@ class ClawAgentStrategy:
         if ctx.stage_dir:
             (ctx.stage_dir / "claw_agent_log.json").write_text(
                 json.dumps({
-                    "success": "main.py" in turn_result.files,
+                    "success": "main.py" in turn_result.files and not gaps and not turn_result.errors,
+                    "implementation_gaps": gaps,
                     "iterations": turn_result.iterations,
                     "tool_calls": turn_result.tool_calls,
                     "files_produced": sorted(turn_result.files.keys()),
