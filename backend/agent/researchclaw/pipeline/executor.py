@@ -177,6 +177,10 @@ def _utcnow_iso() -> str:
 
 
 _CHINESE_ENGLISH_DOMAIN_MAP: dict[str, list[str]] = {
+    "篡改": ["forgery", "tampering", "forensics"],
+    "图像篡改定位": ["image manipulation localization"],
+    "多尺度": ["multi-scale"],
+    "注意力": ["attention"],
     "具身智能": ["embodied intelligence", "embodied AI"],
     "视觉语言动作": ["vision language action", "VLA"],
     "视觉语言模型": ["vision language model", "VLM"],
@@ -248,30 +252,9 @@ def _build_fallback_queries(topic: str) -> list[str]:
         _skip_en = {"lab", "the", "and", "for", "with", "de", "成员"}
         core_en = [t for t in en_tokens_dedup if len(t) > 2 and t.lower() not in _skip_en]
 
-        has_video = "video" in topic.lower()
-        has_action = "action" in topic.lower()
-        has_world_model = "世界模型" in topic or "world model" in topic.lower()
-        has_embodied = "具身" in topic or "embodied" in topic.lower()
-        has_vla = "vla" in topic.lower()
-        has_vlm = "vlm" in topic.lower()
-
-        if has_video or has_action:
-            _add("video action model robot embodied intelligence")
-            _add("world action model WAM robot manipulation")
-            _add("joint video action prediction robot")
-        if has_world_model or has_video:
-            _add("world model action joint training robot")
-            _add("unified world model vision language action")
-        if has_embodied:
-            _add("embodied AI robot manipulation latest architecture")
-            _add("embodied intelligence VLA world model")
-        if has_vla or has_vlm:
-            _add("vision language action model robot VLA")
-            _add("VLM evaluation embodied robot")
-
         if core_en:
             _add(" ".join(core_en[:6]))
-            _add(" ".join(core_en[:4]) + " robot survey")
+            _add(" ".join(core_en[:4]) + " survey")
             _add(" ".join(core_en[:4]) + " benchmark")
     else:
         chunks = re.split(r"[,:;()\[\]]+", topic)
@@ -2734,32 +2717,12 @@ def _execute_literature_collect(
             exc_info=True,
         )
 
-    # --- Inject foundational/seminal papers ---
-    try:
-        from researchclaw.data import load_seminal_papers
-        seminal = load_seminal_papers(topic)
-        if seminal:
-            _existing_titles = {c.get("title", "").lower() for c in candidates}
-            _injected = 0
-            for sp in seminal:
-                if sp.get("title", "").lower() not in _existing_titles:
-                    candidates.append({
-                        "id": f"seminal-{sp.get('cite_key', '')}",
-                        "title": sp.get("title", ""),
-                        "source": "seminal_library",
-                        "url": "",
-                        "year": sp.get("year", 2020),
-                        "abstract": f"Foundational paper on {', '.join(sp.get('keywords', [])[:3])}.",
-                        "authors": [{"name": sp.get("authors", "")}],
-                        "cite_key": sp.get("cite_key", ""),
-                        "venue": sp.get("venue", ""),
-                        "collected_at": _utcnow_iso(),
-                    })
-                    _injected += 1
-            if _injected:
-                logger.info("Stage 4: Injected %d seminal papers from seed library", _injected)
-    except Exception:  # noqa: BLE001
-        logger.debug("Seminal paper injection skipped", exc_info=True)
+    # Foundational references are background, never substitutes for domain search.
+    from researchclaw.data import load_seminal_papers
+    background = load_seminal_papers(topic)
+    (stage_dir / "background_references.json").write_text(
+        json.dumps(background, ensure_ascii=False, indent=2), encoding="utf-8",
+    )
 
     # --- Inject user-provided reference papers ---
     _user_refs = config.research.reference_papers
@@ -2950,23 +2913,24 @@ def _execute_literature_collect(
                 exc_info=True,
             )
 
-    # --- Ultimate fallback: placeholder data ---
-    real_search_succeeded = bool(candidates)
+    # Never fabricate papers to make a failed search look successful.
+    online_sources = {"openalex", "semantic_scholar", "arxiv", "arxiv_recent_discovery", "google_scholar"}
+    source_counts: dict[str, int] = {}
+    for candidate in candidates:
+        source = str(candidate.get("source", "unknown"))
+        source_counts[source] = source_counts.get(source, 0) + 1
+    real_search_succeeded = any(source_counts.get(name, 0) for name in online_sources)
     if not candidates:
-        logger.warning("Stage 4: All literature searches failed — using placeholder papers")
-        candidates = [
-            {
-                "id": f"candidate-{idx + 1}",
-                "title": f"[Placeholder] Study {idx + 1} on {topic}",
-                "source": "arxiv" if idx % 2 == 0 else "semantic_scholar",
-                "url": f"https://example.org/{_safe_filename(topic.lower())}/{idx + 1}",
-                "year": 2024,
-                "abstract": f"This candidate investigates {topic} and reports preliminary findings.",
-                "collected_at": _utcnow_iso(),
-                "is_placeholder": True,
-            }
-            for idx in range(max(20, config.research.daily_paper_count or 20))
-        ]
+        note = "No verifiable literature candidates retrieved. Check queries/network and retry S4."
+        (stage_dir / "candidates.jsonl").write_text("", encoding="utf-8")
+        (stage_dir / "literature_error.txt").write_text(note, encoding="utf-8")
+        (stage_dir / "search_meta.json").write_text(json.dumps({
+            "real_search": False, "source_counts": source_counts,
+            "background_count": len(background), "total_candidates": 0,
+        }), encoding="utf-8")
+        return StageResult(stage=Stage.LITERATURE_COLLECT, status=StageStatus.FAILED,
+                           artifacts=("candidates.jsonl", "literature_error.txt", "search_meta.json",
+                                      "background_references.json"), decision="retry", error=note)
 
     # Write candidates
     out = stage_dir / "candidates.jsonl"
@@ -3017,7 +2981,7 @@ def _execute_literature_collect(
         )
 
     # Write references.bib (F2.4)
-    artifacts = ["candidates.jsonl", "site_status.json"]
+    artifacts = ["candidates.jsonl", "site_status.json", "background_references.json"]
     if (stage_dir / "reference_paper_text.md").exists():
         artifacts.append("reference_paper_text.md")
     if web_context_parts:
@@ -3039,6 +3003,8 @@ def _execute_literature_collect(
         json.dumps(
             {
                 "real_search": real_search_succeeded,
+                "source_counts": source_counts,
+                "background_count": len(background),
                 "queries_used": queries,
                 "year_min": year_min,
                 "total_candidates": len(candidates),
@@ -3070,16 +3036,15 @@ def _execute_literature_screen(
 ) -> StageResult:
     candidates_text = _read_prior_artifact(run_dir, "candidates.jsonl") or ""
 
-    if not candidates_text.strip():
-        logger.info("Stage 5: No candidates from literature collection — skipping screen")
+    def fail_screen(note: str) -> StageResult:
         (stage_dir / "shortlist.jsonl").write_text("", encoding="utf-8")
-        return StageResult(
-            stage=Stage.LITERATURE_SCREEN,
-            status=StageStatus.DONE,
-            artifacts=("shortlist.jsonl",),
-            evidence_refs=(),
-            decision="Skipped: no candidates available (upstream literature collection was skipped or empty)",
-        )
+        (stage_dir / "screening_error.txt").write_text(note, encoding="utf-8")
+        return StageResult(stage=Stage.LITERATURE_SCREEN, status=StageStatus.FAILED,
+                           artifacts=("shortlist.jsonl", "screening_error.txt"),
+                           decision="retry", error=note)
+
+    if not candidates_text.strip():
+        return fail_screen("No literature candidates. Retry S4 before screening.")
 
     # --- P1-1: keyword relevance pre-filter ---
     # Before LLM screening, drop papers whose title+abstract share no keywords
@@ -3091,12 +3056,12 @@ def _execute_literature_screen(
     dropped_count = 0
     for raw_line in candidates_text.strip().splitlines():
         row = _safe_json_loads(raw_line, {})
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or row.get("is_placeholder") or row.get("source") == "seminal_library":
             continue
         title = str(row.get("title", "")).lower()
         abstract = str(row.get("abstract", "")).lower()
         text_blob = f"{title} {abstract}"
-        overlap = sum(1 for kw in topic_keywords if kw in text_blob)
+        overlap = sum(1 for kw in topic_keywords if re.search(r"(?<!\w)" + re.escape(kw) + r"(?!\w)", text_blob))
         # T2.2: Relaxed from ≥2 to ≥1 keyword hit — previous threshold was
         # too aggressive (94% rejection rate).  Single-keyword matches are
         # still screened by the LLM in the next step.
@@ -3105,9 +3070,8 @@ def _execute_literature_screen(
             filtered_rows.append(row)
         else:
             dropped_count += 1
-    # If pre-filter dropped everything, fall back to original (safety valve)
     if not filtered_rows:
-        filtered_rows = _parse_jsonl_rows(candidates_text)
+        return fail_screen("No topic-relevant candidates remain. Revise queries and retry S4; unrelated papers are not restored.")
     # Rebuild candidates_text from filtered rows
     candidates_text = "\n".join(
         json.dumps(r, ensure_ascii=False) for r in filtered_rows
@@ -3143,42 +3107,27 @@ def _execute_literature_screen(
         payload = _safe_json_loads(resp.content, {})
         if isinstance(payload, dict) and isinstance(payload.get("shortlist"), list):
             shortlist = [row for row in payload["shortlist"] if isinstance(row, dict)]
-    _MIN_SHORTLIST = 15
+    # Accept only assessed papers from the actual filtered input, never invented
+    # entries or a fixed-size supplement. A small genuine shortlist is valid.
+    by_title = {str(row.get("title", "")).strip().casefold(): row for row in filtered_rows}
+    accepted = []
+    seen = set()
+    for assessment in shortlist:
+        key = str(assessment.get("title", "")).strip().casefold()
+        if key not in by_title or key in seen:
+            continue
+        try:
+            relevance = float(assessment["relevance_score"])
+        except (KeyError, ValueError, TypeError):
+            continue
+        if not 0.5 <= relevance <= 1.0:
+            continue
+        accepted.append({**by_title[key], **{k: assessment[k] for k in
+                         ("relevance_score", "quality_score", "keep_reason") if k in assessment}})
+        seen.add(key)
+    shortlist = accepted
     if not shortlist:
-        pool = filtered_rows if filtered_rows else _parse_jsonl_rows(candidates_text)
-        pool_sorted = sorted(
-            pool,
-            key=lambda r: (
-                r.get("keyword_overlap", 0),
-                1 if r.get("source") == "seminal_library" else 0,
-            ),
-            reverse=True,
-        )
-        rows = pool_sorted[:_MIN_SHORTLIST]
-        for idx, item in enumerate(rows):
-            item["relevance_score"] = round(0.75 - idx * 0.02, 3)
-            item["quality_score"] = round(0.72 - idx * 0.015, 3)
-            item["keep_reason"] = "Template screened entry"
-            shortlist.append(item)
-    elif len(shortlist) < _MIN_SHORTLIST:
-        # T2.2: LLM returned too few — supplement from filtered candidates
-        existing_titles = {
-            str(s.get("title", "")).lower().strip() for s in shortlist
-        }
-        for row in filtered_rows:
-            if len(shortlist) >= _MIN_SHORTLIST:
-                break
-            title_lower = str(row.get("title", "")).lower().strip()
-            if title_lower and title_lower not in existing_titles:
-                row.setdefault("relevance_score", 0.5)
-                row.setdefault("quality_score", 0.5)
-                row.setdefault("keep_reason", "Supplemented to meet minimum shortlist")
-                shortlist.append(row)
-                existing_titles.add(title_lower)
-        logger.info(
-            "Stage 5: Supplemented shortlist to %d papers (minimum: %d)",
-            len(shortlist), _MIN_SHORTLIST,
-        )
+        return fail_screen("No candidates passed relevance assessment. Retry screening or revise S4 queries; no template scores were assigned.")
     out = stage_dir / "shortlist.jsonl"
     _write_jsonl(out, shortlist)
     return StageResult(
