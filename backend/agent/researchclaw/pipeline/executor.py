@@ -3828,6 +3828,11 @@ def _execute_experiment_design(
                 )
 
     # ── BA: BenchmarkAgent — intelligent dataset/baseline selection ──────
+    # Retain a completed design even if optional recommendation is interrupted.
+    plan.setdefault("topic", config.research.topic)
+    (stage_dir / "exp_plan.yaml").write_text(
+        yaml.dump(plan, default_flow_style=False, allow_unicode=True), encoding="utf-8",
+    )
     _benchmark_plan = None
     # BUG-40: Skip BenchmarkAgent for non-ML domains — it has no relevant
     # benchmarks for physics/chemistry/mathematics/etc. and would inject
@@ -3854,8 +3859,16 @@ def _execute_experiment_design(
             "BenchmarkAgent skipped: domain '%s' is not ML (topic: %s)",
             _ba_domain_label, config.research.topic[:80],
         )
+    _fixed_local_experiment = bool(
+        getattr(config.experiment, "datasets_dir", "")
+        and (getattr(config.experiment, "codebases_dir", "")
+             or getattr(config.experiment, "existing_project_dir", ""))
+    )
+    if _fixed_local_experiment:
+        logger.info("BenchmarkAgent skipped: configured local data and code define the experiment; preserving baseline specifications")
     if (
-        _ba_domain_ok
+        not _fixed_local_experiment
+        and _ba_domain_ok
         and config.experiment.benchmark_agent.enabled
         and config.experiment.mode in ("sandbox", "docker")
         and llm is not None

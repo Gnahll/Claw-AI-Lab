@@ -3,6 +3,7 @@
 from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock
+from dataclasses import replace
 
 import pytest
 import yaml
@@ -12,6 +13,56 @@ from researchclaw.pipeline.codegen.runtime import CodegenRuntime, _discover_data
 from researchclaw.pipeline.codegen.types import CodegenContext, CodegenResult
 from researchclaw.pipeline.executor import _execute_experiment_design
 from researchclaw.pipeline.stages import StageStatus
+from researchclaw.config import RCConfig
+from .test_rc_config import _valid_config_data
+
+
+@pytest.fixture
+def rc_config(tmp_path):
+    return RCConfig.from_dict(_valid_config_data(), project_root=tmp_path, check_paths=False)
+
+
+def _design_config(rc_config, tmp_path, *, fixed_local):
+    for name in ('data', 'code'):
+        (tmp_path / name).mkdir(exist_ok=True)
+    return replace(rc_config, research=replace(rc_config.research, topic='Image manipulation localization'),
+        experiment=replace(rc_config.experiment, mode='sandbox',
+            datasets_dir=str(tmp_path / 'data') if fixed_local else '',
+            codebases_dir=str(tmp_path / 'code') if fixed_local else '',
+            benchmark_agent=replace(rc_config.experiment.benchmark_agent, enabled=True)))
+
+
+def test_fixed_local_experiment_keeps_authored_baseline_spec_and_skips_recommender(tmp_path, rc_config, monkeypatch):
+    from researchclaw.pipeline import executor
+    from researchclaw.agents import benchmark_agent
+    plan={'baselines':[{'name':'original','implementation_spec':{'loss_function':'author loss'}}],
+          'proposed_methods':[{'name':'joint D1 D2'}], 'datasets':['approved local data'], 'ablations':[]}
+    monkeypatch.setattr(executor, '_build_context_preamble', lambda *a, **k:'')
+    monkeypatch.setattr(executor, '_chat_with_prompt', lambda *a, **k:SimpleNamespace(content=yaml.safe_dump(plan)))
+    called=[]
+    monkeypatch.setattr(benchmark_agent, 'BenchmarkOrchestrator', lambda *a, **k:called.append(True))
+    stage=tmp_path/'stage-09';stage.mkdir()
+    result=executor._execute_experiment_design(stage,tmp_path,_design_config(rc_config,tmp_path,fixed_local=True),object(),llm=object())
+    saved=yaml.safe_load((stage/'exp_plan.yaml').read_text())
+    assert result.status==StageStatus.DONE and called==[]
+    assert saved['baselines']==plan['baselines'] and saved['ablations']==[]
+
+
+def test_authored_plan_survives_interrupted_optional_recommender(tmp_path, rc_config, monkeypatch):
+    from researchclaw.pipeline import executor
+    from researchclaw.agents import benchmark_agent
+    plan={'baselines':[{'name':'original','implementation_spec':{'loss_function':'author loss'}}],
+          'proposed_methods':['complete'], 'datasets':['specified'], 'ablations':[]}
+    monkeypatch.setattr(executor, '_build_context_preamble', lambda *a, **k:'')
+    monkeypatch.setattr(executor, '_chat_with_prompt', lambda *a, **k:SimpleNamespace(content=yaml.safe_dump(plan)))
+    class InterruptedRecommender:
+        def __init__(self,*a,**k):pass
+        def orchestrate(self,*a,**k):raise KeyboardInterrupt('Optional selection interrupted')
+    monkeypatch.setattr(benchmark_agent, 'BenchmarkOrchestrator', InterruptedRecommender)
+    stage=tmp_path/'stage-09';stage.mkdir()
+    with pytest.raises(KeyboardInterrupt):
+        executor._execute_experiment_design(stage,tmp_path,_design_config(rc_config,tmp_path,fixed_local=False),object(),llm=object())
+    assert yaml.safe_load((stage/'exp_plan.yaml').read_text())['baselines']==plan['baselines']
 
 
 def test_s9_no_llm_with_local_dataset(tmp_path, monkeypatch):
