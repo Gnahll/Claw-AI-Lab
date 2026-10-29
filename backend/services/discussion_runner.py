@@ -193,10 +193,11 @@ def run_discussion(
     transcript_parts: list[str] = []
     agent_labels = list(syntheses.keys())
     budget = max_prompt_chars - max(len(SYSTEM_PRESENT), len(SYSTEM_CRITIQUE), len(SYSTEM_CONSENSUS)) - 400
-    topic = _fit(topic, budget // 4)
-    # Perspectives go into every round; the rest is left for the topic and earlier rounds.
-    block_limit = budget - len(topic) - budget * 3 // 10
-    share = block_limit // len(syntheses) - 40
+    # User-provided execution requirements must not disappear at a topic slice.
+    block_limit = budget - len(topic) - 1400
+    share = block_limit // max(1, len(syntheses)) - 40
+    if share < 500:
+        raise ValueError("Research topic/details exceed the discussion context budget; shorten them explicitly")
     condensed = {}
     for label, text in syntheses.items():
         condensed[label] = talk.condense(label, text, share)
@@ -231,8 +232,9 @@ def run_discussion(
     # ── Round 2: Critical review ──
     if num_rounds >= 2:
         print(f"  [Round 2/{num_rounds}] Critical review...", flush=True)
-        prior = _fit(analysis, room(SYSTEM_CRITIQUE, perspectives_block))
+        prior = _fit(analysis, room(SYSTEM_CRITIQUE, topic, perspectives_block))
         user_r2 = (
+            f"Research topic: {topic}\n\n"
             f"Original perspectives:\n\n{perspectives_block}\n\n"
             f"---\n\nInitial analysis:\n\n{prior}\n\n"
             f"Please provide your critical review following your instructions."
@@ -320,7 +322,7 @@ def _run(args, output_dir: Path, beat) -> None:
     if args.topic:
         config = dataclasses.replace(config, research=dataclasses.replace(config.research, topic=args.topic))
     config = ensure_english_topic(config, output_dir, llm)
-    topic = config.research.topic
+    topic = getattr(config.research, "prompt_topic", config.research.topic)
     print(f"   Topic:      {topic}")
 
     # Collect syntheses

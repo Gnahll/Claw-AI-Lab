@@ -1,4 +1,7 @@
 const en: Record<string, string> = {
+  'project.topic_label': 'Research topic',
+  'project.details_label': 'Details (optional)',
+  'project.details_placeholder': 'Datasets, training budget, GPUs, evaluation protocol and deliverables. Keep the topic focused on the method and research direction.',
   // Header
   'header.title': 'Claw AI Lab',
   'header.mock_to_real': '🎭 Mock → Switch to Real',

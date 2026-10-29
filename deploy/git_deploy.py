@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -101,6 +102,48 @@ def start_bridge(root: Path, record: dict):
     return child
 
 
+def stop_frontend(root: Path, record: dict) -> None:
+    # Vite's recorded PID is its Node process, not an unverified shell/process group.
+    if not any(str(root / "frontend/node_modules") in arg and "vite" in arg for arg in record["arguments"]):
+        raise RuntimeError("Frontend PID does not belong to this checkout's Vite service")
+    stop_bridge(root, record)
+
+
+def start_frontend(root: Path, record: dict):
+    with (root / "logs/frontend.log").open("ab") as log:
+        child = subprocess.Popen(record["arguments"], cwd=record["cwd"], env=record["environment"],
+                                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+                                 start_new_session=True)
+    (root / ".pids/frontend.pid").write_text(str(child.pid) + "\n")
+    return child
+
+
+def needs_frontend_build(changed: list[str], reviewed: bool) -> bool:
+    if any((path.startswith("frontend/") and not path.startswith("frontend/src/"))
+           or path in {"backend/agent/pyproject.toml", "start.sh", "backend/services/resource_monitor.py"}
+           or Path(path).name in {"requirements.txt", "uv.lock", "poetry.lock"} for path in changed):
+        raise RuntimeError("Dependency, frontend configuration or launcher change requires a separate reviewed deployment")
+    frontend = any(path.startswith("frontend/src/") for path in changed)
+    if frontend and not reviewed:
+        raise RuntimeError("Frontend source change requires --with-frontend and a validated build/restart deployment")
+    return frontend
+
+
+def validate_frontend(root: Path, candidate: Path) -> None:
+    environment = service_record(root, "frontend")["environment"]
+    npm = shutil.which("npm", path=environment.get("PATH"))
+    if not npm or not (root / "frontend/node_modules").is_dir():
+        raise RuntimeError("Installed frontend build tools are unavailable")
+    modules = candidate / "frontend/node_modules"
+    modules.symlink_to(root / "frontend/node_modules", target_is_directory=True)
+    try:
+        with (candidate.parent / "frontend-build.log").open("wb") as log:
+            subprocess.run([npm, "run", "build"], cwd=candidate / "frontend", env=environment,
+                           stdout=log, stderr=subprocess.STDOUT, check=True, timeout=180)
+    finally:
+        modules.unlink()
+
+
 def health(root: Path, *, timeout: int = 120) -> None:
     environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
     for name in list(environment):
@@ -146,7 +189,7 @@ def validate_candidate(root: Path, revision: str, destination: Path) -> None:
         archive.extractall(destination)
     environment = dict(os.environ, PYTHONPATH=str(destination / "backend/agent"),
                        PYTHONDONTWRITEBYTECODE="1", CUDA_VISIBLE_DEVICES="")
-    tests = ["test_domain_detector.py", "test_implementation_readiness.py", "test_literature_recovery.py", "test_independent_joint.py", "test_first_run_contract.py", "test_verified_run_review.py", "test_research_integration.py", "test_literature_integrity.py", "test_literature_connectivity.py", "test_original_workflow_training.py", "test_claw_engine_executor.py", "test_coverage_data.py", "test_managed_training.py", "test_rc_config.py", "test_rc_cli.py",
+    tests = ["test_research_details.py", "test_domain_detector.py", "test_implementation_readiness.py", "test_literature_recovery.py", "test_independent_joint.py", "test_first_run_contract.py", "test_verified_run_review.py", "test_research_integration.py", "test_literature_integrity.py", "test_literature_connectivity.py", "test_original_workflow_training.py", "test_claw_engine_executor.py", "test_coverage_data.py", "test_managed_training.py", "test_rc_config.py", "test_rc_cli.py",
              "test_resource_intake.py", "test_agent_bridge_reference_config.py", "test_bridge_auto_retry.py", "test_prediction_checks.py", "test_discussion_budget.py", "test_stage09_stage11_regressions.py",
              "test_git_deploy.py"]
     selected = [str(destination / "backend/agent/tests" / name) for name in tests
@@ -158,7 +201,7 @@ def validate_candidate(root: Path, revision: str, destination: Path) -> None:
         subprocess.run(["bash", "-n", str(destination / script)], check=True)
 
 
-def deploy(root: Path, *, check_only: bool = False) -> dict:
+def deploy(root: Path, *, check_only: bool = False, with_frontend: bool = False) -> dict:
     root = root.resolve(strict=True)
     if Path(git(root, "rev-parse", "--show-toplevel")) != root:
         raise RuntimeError("Run this command from the deployed Git checkout")
@@ -175,17 +218,18 @@ def deploy(root: Path, *, check_only: bool = False) -> dict:
             health(root)
             return {"status": "already_current", "commit": before}
         changed = git(root, "diff", "--name-only", before, target).splitlines()
-        if any(path.startswith("frontend/") or path in {"backend/agent/pyproject.toml", "start.sh", "backend/services/resource_monitor.py"}
-               or Path(path).name in {"requirements.txt", "uv.lock", "poetry.lock"} for path in changed):
-            raise RuntimeError("Frontend, dependency or launcher change requires a reviewed build/restart deployment")
+        frontend_changed = needs_frontend_build(changed, with_frontend)
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         backup = root.parent.parent / "backups/claw-ai-lab" / ("git-deploy-" + timestamp)
         backup.mkdir(parents=True, mode=0o700)
         validate_candidate(root, target, backup / "candidate")
+        if frontend_changed:
+            validate_frontend(root, backup / "candidate")
         if check_only:
             return {"status": "validated", "before": before, "target": target, "report": str(backup)}
         bridge = service_record(root, "agent_bridge")
         other = {name: service_record(root, name) for name in ("frontend", "resource_monitor")}
+        frontend = other.pop("frontend") if frontend_changed else None
         assert_idle(root, bridge["pid"])
         snapshot = protected_files(root)
         subprocess.run(["git", "-C", str(root), "archive", "--format=tar", "-o", str(backup / "previous-source.tar"), before], check=True)
@@ -193,6 +237,8 @@ def deploy(root: Path, *, check_only: bool = False) -> dict:
         stopped = False
         updated = False
         child = None
+        frontend_stopped = False
+        frontend_child = None
         try:
             os.kill(bridge["pid"], signal.SIGSTOP)
             try:
@@ -205,26 +251,38 @@ def deploy(root: Path, *, check_only: bool = False) -> dict:
             stop_bridge(root, bridge)
             stopped = True
             assert_idle(root, bridge["pid"])
+            if frontend is not None:
+                stop_frontend(root, frontend)
+                frontend_stopped = True
             subprocess.run(["git", "-C", str(root), "merge", "--ff-only", target], check=True)
             updated = True
+            if frontend is not None:
+                frontend_child = start_frontend(root, frontend)
             child = start_bridge(root, bridge)
             health(root)
             if child.poll() is not None or protected_files(root) != snapshot:
                 raise RuntimeError("Service exited or protected runtime state changed")
+            if frontend_child is not None and frontend_child.poll() is not None:
+                raise RuntimeError("Frontend exited after deployment")
             for record in other.values():
                 if identity(record["pid"]) != record["identity"]:
                     raise RuntimeError("Unrelated service identity changed")
             tracked_clean(root)
-            result = {"status": "deployed", "before": before, "commit": target, "backup": str(backup), "bridge_pid": child.pid}
+            result = {"status": "deployed", "before": before, "commit": target, "backup": str(backup), "bridge_pid": child.pid,
+                      "frontend_rebuilt": frontend_changed}
             (backup / "result.json").write_text(json.dumps(result, indent=2))
             return result
         except BaseException:
             if child is not None and child.poll() is None:
                 stop_bridge(root, service_record(root, "agent_bridge"))
+            if frontend_child is not None and frontend_child.poll() is None:
+                stop_frontend(root, service_record(root, "frontend"))
             if updated:
                 tracked_clean(root)
                 subprocess.run(["git", "-C", str(root), "reset", "--keep", before], check=True)
             if stopped:
+                if frontend_stopped:
+                    start_frontend(root, frontend)
                 start_bridge(root, bridge)
                 health(root)
             raise
@@ -234,9 +292,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--check", action="store_true", help="Fetch and validate; do not install or restart")
     parser.add_argument("--restart-bridge", action="store_true", help="Reload local .env after editing a key; requires idle queues")
+    parser.add_argument("--with-frontend", action="store_true", help="Validate frontend/src changes, build before install, restart Vite with rollback")
     args = parser.parse_args()
-    if args.check and args.restart_bridge:
-        parser.error("--check and --restart-bridge cannot be combined")
+    if args.restart_bridge and (args.check or args.with_frontend):
+        parser.error("--restart-bridge cannot be combined with deployment options")
     root = Path(__file__).resolve().parent.parent
     try:
         if args.restart_bridge:
@@ -249,7 +308,7 @@ def main() -> int:
                 health(root)
             result = {"status": "bridge_restarted"}
         else:
-            result = deploy(root, check_only=args.check)
+            result = deploy(root, check_only=args.check, with_frontend=args.with_frontend)
         print(json.dumps(result, indent=2))
         return 0
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:

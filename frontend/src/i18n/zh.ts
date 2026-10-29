@@ -1,4 +1,7 @@
 const zh: Record<string, string> = {
+  'project.topic_label': '研究主题',
+  'project.details_label': '细节（选填）',
+  'project.details_placeholder': '填写数据、训练预算、GPU、评估协议和交付要求；研究主题只需描述方法思路和研究大方向。',
   // Header
   'header.title': 'Claw AI Lab',
   'header.mock_to_real': '🎭 模拟 → 切换真实',

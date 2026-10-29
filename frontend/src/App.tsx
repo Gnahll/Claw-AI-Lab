@@ -352,13 +352,14 @@ export default function App() {
                 }
               }
             }}
-            onQuickSubmit={(topic, mode, researchAngles, referencePapers, referenceFiles, paths) => {
+            onQuickSubmit={(topic, mode, researchAngles, referencePapers, referenceFiles, paths, researchDetails) => {
               const ws = agentWsRef.current;
               if (ws && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({
                   command: 'quick_submit',
                   discussionEnabled: discussionMode,
                   topic,
+                  researchDetails,
                   mode,
                   researchAngles: researchAngles.length > 0 ? researchAngles : undefined,
                   referencePapers: referencePapers || undefined,

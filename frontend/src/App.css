@@ -1157,6 +1157,13 @@
   line-height: 1.4;
   transition: border-color 0.2s;
 }
+.project-field-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+}
+.project-details-input {
+  min-height: 90px;
+}
 .project-topic-input:focus {
   border-color: var(--accent);
   outline: none;

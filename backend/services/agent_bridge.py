@@ -1328,6 +1328,17 @@ def _save_project_meta(run_dir: str, project_id: str, config_path: str, topic: s
     }
     meta_path = Path(run_dir) / "project_meta.json"
     if not meta_path.exists():
+        # The stored display topic remains concise; execution requirements live
+        # in a dedicated config and metadata field and survive restart.
+        try:
+            import yaml
+            saved = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+            research = saved.get("research") if isinstance(saved, dict) else None
+            details = research.get("details", "") if isinstance(research, dict) else ""
+            if isinstance(details, str):
+                meta["research_details"] = details
+        except (OSError, ValueError, yaml.YAMLError):
+            pass
         _write_json(meta_path, meta)
 
 
@@ -2037,6 +2048,7 @@ def _generate_config_from_template(
     optional_experiments: list[str] | None = None,
     runs_per_condition: int = 3,
     time_budget_hours: int = 0,
+    research_details: str = "",
 ) -> str:
     """Generate a project-specific YAML config from the default template.
 
@@ -2057,6 +2069,8 @@ def _generate_config_from_template(
     if not template_path.exists():
         raise FileNotFoundError(f"Config template not found at {template_path}")
 
+    if not isinstance(research_details, str):
+        raise ValueError("researchDetails must be a string")
     full_topic = f"{role_prompt}\n\n研究主题: {topic}" if role_prompt else topic
     if type(require_training) is not bool:
         raise ValueError("requireTraining 必须是布尔值")
@@ -2085,7 +2099,7 @@ def _generate_config_from_template(
     parsed = yaml.safe_load(template_path.read_text(encoding="utf-8"))
     parsed.setdefault("project", {})["name"] = project_id
     research = parsed.setdefault("research", {})
-    research.update(topic=full_topic, reference_papers=reference_papers or [])
+    research.update(topic=full_topic, details=research_details.strip(), reference_papers=reference_papers or [])
     experiment = parsed.setdefault("experiment", {})
     experiment.update(require_training=require_training, gpu_uuid=gpu_uuid, training_job_dir="",
                       runs_per_condition=runs_per_condition)
@@ -2203,6 +2217,7 @@ def quick_submit_project(
     reference_uploads: list[dict[str, str]] | None = None,
     path_overrides: dict | None = None,
     discussion_enabled: bool | None = None,
+    research_details: str = "",
 ) -> list[dict]:
     """Create a project from a topic string.
 
@@ -2217,6 +2232,10 @@ def quick_submit_project(
     if not topic.strip():
         messages.append(msg_log(sys_agent, "请输入研究主题", "error"))
         return messages
+
+    if not isinstance(research_details, str):
+        return [msg_log(sys_agent, "researchDetails must be a string", "error")]
+    research_details = research_details.strip()
 
     if discussion_enabled is not None and type(discussion_enabled) is not bool:
         return [msg_log(sys_agent, "discussionEnabled must be a boolean", "error")]
@@ -2238,6 +2257,7 @@ def quick_submit_project(
         try:
             config_path = _generate_config_from_template(
                 state, base_id, topic.strip(),
+                research_details=research_details,
                 reference_papers=all_reference_papers,
                 codebases_dir=_po.get("codebases_dir", ""),
                 datasets_dir=_po.get("datasets_dir", ""),
@@ -2281,6 +2301,7 @@ def quick_submit_project(
     try:
         project_config_path = _generate_config_from_template(
             state, base_id, topic.strip(),
+            research_details=research_details,
             reference_papers=all_reference_papers,
             codebases_dir=_po.get("codebases_dir", ""),
             datasets_dir=_po.get("datasets_dir", ""),
@@ -2323,6 +2344,7 @@ def quick_submit_project(
         try:
             config_path = _generate_config_from_template(
                 state, f"{base_id}--{slug}", topic.strip(), role_prompt,
+                research_details=research_details,
                 reference_papers=all_reference_papers,
                 codebases_dir=_po.get("codebases_dir", ""),
                 datasets_dir=_po.get("datasets_dir", ""),
@@ -3258,7 +3280,8 @@ async def handle_command(state: BridgeState, data: dict) -> list[dict]:
         }
         messages.extend(quick_submit_project(state, topic, project_id, mode, angles, ref_papers,
                                              reference_files, path_overrides,
-                                             discussion_enabled=data.get("discussionEnabled")))
+                                             discussion_enabled=data.get("discussionEnabled"),
+                                             research_details=data.get("researchDetails", "")))
         messages.extend(schedule_idle_agents(state))
         messages.append(msg_project_list(list_all_projects(state)))
 
