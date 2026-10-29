@@ -1,9 +1,10 @@
 # Complementary research directions and literature integrity
 
-Lab projects with discussion enabled now combine all completed S8 proposals into
-one joint hypothesis in `run-integrated`, instead of ranking text length,
-headings, keyword counts, or the presence of a novelty report. Independent mode
-and reproduction mode retain their separate workflows.
+New Lab projects combine all completed S8 proposals into one joint hypothesis in
+`run-integrated`, instead of ranking text length, headings, keyword counts, or the
+presence of a novelty report. Discussion mode includes a debate; independent mode
+joins the independently researched proposals without a debate. Reproduction and
+legacy independent projects retain their existing workflows.
 
 The integration uses the neutral project configuration and every direction's
 hypothesis and available novelty assessment. It records mechanism, evidence,
@@ -16,10 +17,29 @@ mechanisms, not a guarantee of scientific novelty or empirical improvement.
 `stage-08/integration_report.json` records coverage and source paths. All input
 S1–S8 artifacts are retained under `discussion/direction_artifacts/`; candidate
 papers, screened papers, and bibliography entries are combined for downstream
-use. Conflicting citation keys block integration. The original direction
+use. Conflicting citation identities block integration. URL-only variations with
+the same DOI and identical core fields are retained as one record, with both
+original entries in `stage-04/bibliography_merge.json`. The original direction
 workspaces are preserved. A persisted integration request lets a manual resume
 retry integration after interruption without restarting all literature research.
 Existing projects already past S8 are not migrated or restarted by deployment.
+
+S8 readiness is **design readiness**. The report must state `readiness=design_only`
+and `training_completed=false`, describe one implementable information-flow
+interface, record candidate-interface reconciliations, and list pending checks
+with stop conditions before training. Candidate implementation choices may be
+reconciled while preserving all required direction mechanisms and user constraints.
+Missing future source inspection, numerical tests, GPU access, or training results
+alone does not reject a research design; those checks belong to S9–S13. Genuine
+unresolved incompatibilities still stop the transition. Readiness is not evidence
+of novelty, effectiveness, completed preflight, or permission to bypass training
+validation. `hypotheses.md` carries the pending checks to downstream stages.
+
+`integration_inputs.json` records the bounded source summaries and their hashes;
+`integration_response.json` preserves the model response even when blocked or
+malformed. The blocked report and agent log state the actual failure reason.
+Unchanged condensed inputs can be reused on retry. A failed integration does not
+advance the checkpoint or enqueue an experiment.
 
 Literature collection no longer adds robot-specific queries to unrelated mixed
 Chinese/English topics. Seed references are saved as background only in

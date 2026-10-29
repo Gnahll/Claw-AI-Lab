@@ -1102,6 +1102,12 @@ def poll_agent(agent: LobsterAgent) -> list[dict]:
             else:
                 agent.status = "error"
                 agent.current_task = f"exit code={retcode}"
+                if getattr(agent, "_integrating_hypotheses", False):
+                    report = _read_json(run_dir / "stage-08/integration_report.json") or {}
+                    reason = report.get("reason")
+                    if reason:
+                        agent.current_task = f"S8 联合方案未就绪: {reason}"
+                        messages.append(msg_log(agent, agent.current_task, "error", 8))
                 messages.append(msg_agent_update(agent))
                 messages.append(msg_log(agent, f"进程异常 (code={retcode})", "error"))
             agent.process = None
@@ -1340,6 +1346,10 @@ def _project_workflow(state: BridgeState, project_id: str, run_dir: str = "") ->
 
 def _independent_joint_done(state: BridgeState, agent: LobsterAgent, meta: dict) -> list[dict]:
     """Independent S1-S8 research joins once, without a discussion subprocess."""
+    # A completed integration must be handed onward, not parked again as if
+    # it were another direction waiting for its peers.
+    if getattr(agent, "_integrating_hypotheses", False):
+        return _on_discussion_s8_done(state, agent)
     project = state.projects_dir() / agent.project_id
     group = state.discussion_groups.get(agent.project_id)
     if group is None:
@@ -3019,10 +3029,14 @@ def _on_discussion_s8_done(state: BridgeState, agent: LobsterAgent) -> list[dict
     if integrating:
         # Only a validated, complete joint result can advance to experiment design.
         report = _read_json(Path(agent.run_dir) / "stage-08/integration_report.json")
-        if not report or report.get("status") != "ready":
+        if (not report or report.get("status") != "ready"
+                or report.get("readiness") != "design_only"
+                or report.get("training_completed") is not False):
             agent.status = "error"
             agent.current_task = "Joint hypothesis missing or blocked; no experiment queued"
             return [msg_agent_update(agent)]
+        if group:
+            group.status = "done"
         group = None
 
     if group:
