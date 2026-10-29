@@ -3378,11 +3378,11 @@ def _execute_hypothesis_gen(
     # --- Novelty check (non-blocking) ---
     novelty_artifacts: tuple[str, ...] = ()
     try:
-        from researchclaw.literature.novelty import check_novelty  # noqa: PLC0415
+        from researchclaw.literature.bounded_novelty import check_novelty_bounded  # noqa: PLC0415
 
         candidates_text = _read_prior_artifact(run_dir, "candidates.jsonl") or ""
         papers_seen = _parse_jsonl_rows(candidates_text) if candidates_text else []
-        novelty_report = check_novelty(
+        novelty_report = check_novelty_bounded(
             topic=config.research.topic,
             hypotheses_text=hypotheses_md,
             papers_already_seen=papers_seen,
@@ -3394,7 +3394,7 @@ def _execute_hypothesis_gen(
         )
         novelty_artifacts = ("novelty_report.json",)
         logger.info(
-            "Novelty check: score=%.3f  assessment=%s  recommendation=%s",
+            "Novelty check: score=%s  assessment=%s  recommendation=%s",
             novelty_report["novelty_score"],
             novelty_report["assessment"],
             novelty_report["recommendation"],

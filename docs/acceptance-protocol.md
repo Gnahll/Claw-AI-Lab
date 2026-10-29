@@ -28,6 +28,11 @@ that a new method improves the baseline. Changes to GPU authorization invalidate
 an incompatible world-size or effective-batch plan; memory, batch/accumulation and
 runtime must be measured again rather than inferred by scaling an old estimate.
 
+The optional S8 novelty search has a 120-second total worker limit. A timeout,
+worker failure or insufficient search coverage is explicitly reported as
+incomplete, with no novelty score. Generated hypotheses are retained; an incomplete
+optional search does not establish novelty or block the entire research workflow.
+
 When an experiment deliberately returns `blocked_pretraining`, its measured
 failure reason is retained even if the process exits with code 1. This is a failed
 run requiring a design/protocol revision, not a completed experiment. The runtime
