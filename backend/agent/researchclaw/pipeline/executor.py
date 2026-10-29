@@ -3597,7 +3597,15 @@ def _execute_experiment_design(
             metric_direction=config.experiment.metric_direction,
             reference_paper_block=_ref_block,
         )
-        _implementation_handoff = (
+        from researchclaw.pipeline.acceptance import ACCEPTANCE_POLICY, registered_context
+        try:
+            _registered_definitions = registered_context(run_dir)
+        except (OSError, UnicodeError, ValueError) as exc:
+            from researchclaw.pipeline.acceptance import write_plan_blocker
+            error = write_plan_blocker(stage_dir, [str(exc)])
+            return StageResult(stage=Stage.EXPERIMENT_DESIGN, status=StageStatus.FAILED,
+                               artifacts=("acceptance_review.json",), decision="revise_design", error=error)
+        _implementation_handoff = ACCEPTANCE_POLICY + "\n" + _registered_definitions + (
             "\nIMPLEMENTATION HANDOFF: Define proposed-method constants, every diagnostic metric's "
             "formula/aggregation/edge cases, and fixed fixture inputs/reference distributions. "
             "Do not leave these as 'recover definitions' or 'freeze later' instructions that prevent "
@@ -3847,6 +3855,20 @@ def _execute_experiment_design(
                     "Stage 09: implementation_spec retry failed",
                     exc_info=True,
                 )
+
+    # Definitions must be implementable before spending a coding/training run.
+    from researchclaw.pipeline.acceptance import plan_issues, requirement_text, write_plan_blocker
+    _acceptance_errors = plan_issues(
+        plan, require_protocol=bool(llm is not None and getattr(config.experiment, "require_training", False)),
+        user_text=requirement_text(config, run_dir),
+    )
+    if _acceptance_errors:
+        (stage_dir / "exp_plan_draft.yaml").write_text(
+            yaml.safe_dump(plan, allow_unicode=True), encoding="utf-8")
+        error = write_plan_blocker(stage_dir, _acceptance_errors)
+        return StageResult(stage=Stage.EXPERIMENT_DESIGN, status=StageStatus.FAILED,
+                           artifacts=("exp_plan_draft.yaml", "acceptance_review.json"),
+                           decision="revise_design", error=error)
 
     # ── BA: BenchmarkAgent — intelligent dataset/baseline selection ──────
     # Retain a completed design even if optional recommendation is interrupted.

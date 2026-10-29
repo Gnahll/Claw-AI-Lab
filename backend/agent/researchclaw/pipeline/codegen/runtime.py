@@ -16,6 +16,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from researchclaw.adapters import AdapterBundle
 from researchclaw.config import RCConfig
 from researchclaw.pipeline.codegen.registry import StrategyRegistry, build_default_registry
@@ -398,6 +400,21 @@ class CodegenRuntime:
 
         # ── Phase 1: CONTEXT ─────────────────────────────────────────────
         ctx = self._build_context(config, run_dir, stage_dir, session)
+
+        # Legacy resumes also reject explicitly unresolved definitions, without
+        # forcing migration of an existing user's scientific gates.
+        from researchclaw.pipeline.acceptance import plan_issues, requirement_text, write_plan_blocker
+        try:
+            _acceptance_plan = yaml.safe_load(ctx.exp_plan or "{}")
+            _acceptance_errors = plan_issues(_acceptance_plan, user_text=requirement_text(config, run_dir))
+        except yaml.YAMLError as exc:
+            _acceptance_errors = [f"Invalid acceptance plan YAML: {exc}"]
+        if _acceptance_errors:
+            error = write_plan_blocker(stage_dir, _acceptance_errors)
+            session.log_error(CodegenPhase.CONTEXT, error)
+            session.persist()
+            return StageResult(stage=Stage.CODE_GENERATION, status=StageStatus.FAILED,
+                               artifacts=("acceptance_review.json",), decision="revise_design", error=error)
 
         preflight = ctx.resource_manifest.get("preflight", {})
         if preflight.get("required") and not preflight.get("ok"):

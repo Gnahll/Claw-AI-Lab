@@ -22,7 +22,7 @@ def declared_interface_gaps(files: dict[str, str], plan_text: str) -> list[str]:
     def walk(value):
         if isinstance(value, dict):
             for key, item in value.items():
-                if key == 'required_distinct_helpers' and isinstance(item, list):
+                if key in ('required_distinct_helpers', 'required_helpers') and isinstance(item, list):
                     required.update(name for name in item if isinstance(name, str)
                                     and re.fullmatch(r'[A-Za-z_]\w*', name))
                 else:

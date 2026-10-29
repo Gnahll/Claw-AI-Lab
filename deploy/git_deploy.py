@@ -189,7 +189,7 @@ def validate_candidate(root: Path, revision: str, destination: Path) -> None:
         archive.extractall(destination)
     environment = dict(os.environ, PYTHONPATH=str(destination / "backend/agent"),
                        PYTHONDONTWRITEBYTECODE="1", CUDA_VISIBLE_DEVICES="")
-    tests = ["test_research_details.py", "test_domain_detector.py", "test_implementation_readiness.py", "test_literature_recovery.py", "test_independent_joint.py", "test_first_run_contract.py", "test_verified_run_review.py", "test_research_integration.py", "test_literature_integrity.py", "test_literature_connectivity.py", "test_original_workflow_training.py", "test_claw_engine_executor.py", "test_coverage_data.py", "test_managed_training.py", "test_rc_config.py", "test_rc_cli.py",
+    tests = ["test_acceptance_protocol.py", "test_experiment_run_repair_guard.py", "test_research_details.py", "test_domain_detector.py", "test_implementation_readiness.py", "test_literature_recovery.py", "test_independent_joint.py", "test_first_run_contract.py", "test_verified_run_review.py", "test_research_integration.py", "test_literature_integrity.py", "test_literature_connectivity.py", "test_original_workflow_training.py", "test_claw_engine_executor.py", "test_coverage_data.py", "test_managed_training.py", "test_rc_config.py", "test_rc_cli.py",
              "test_resource_intake.py", "test_agent_bridge_reference_config.py", "test_bridge_auto_retry.py", "test_prediction_checks.py", "test_discussion_budget.py", "test_stage09_stage11_regressions.py",
              "test_git_deploy.py"]
     selected = [str(destination / "backend/agent/tests" / name) for name in tests

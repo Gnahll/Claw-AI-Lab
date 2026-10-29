@@ -61,6 +61,15 @@ class SanityCheckRuntime:
         session = StageSession(stage_dir=stage_dir, stage_name="sanity_check")
         session.log("INIT", "SanityCheckRuntime started")
 
+        from researchclaw.pipeline.acceptance import check_plan_file, write_plan_blocker
+        plan = run_dir / "stage-09" / "exp_plan.yaml"
+        if plan.is_file():
+            issues = check_plan_file(plan, run_dir, config)
+            if issues:
+                error = write_plan_blocker(stage_dir, issues)
+                return StageResult(stage=Stage.SANITY_CHECK, status=StageStatus.FAILED,
+                                   artifacts=("acceptance_review.json",), decision="revise_design", error=error)
+
         # Resolve coding LLM
         llm = self._resolve_coding_llm(llm, config)
         if llm is None:
@@ -181,6 +190,8 @@ class SanityCheckRuntime:
         # Save report
         report = {
             "passed": success,
+            "scope": "Engineering smoke only; not scientific acceptance or completed training",
+            "scientific_acceptance_evaluated": False,
             "execution": measured_smoke,
             "attempts": attempts,
             "iterations": turn_result.iterations,
