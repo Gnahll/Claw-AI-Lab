@@ -417,19 +417,20 @@ class TestHypothesisGenNoveltyIntegration:
         adapters = AdapterBundle()
 
         with patch(
-            "researchclaw.literature.search.search_papers_multi_query"
+            "researchclaw.literature.bounded_novelty.check_novelty_bounded"
         ) as mock_search:
-            mock_search.return_value = []
+            mock_search.return_value = {"novelty_score": 0.42, "assessment": "moderate",
+                                       "recommendation": "differentiate", "search_coverage": "full"}
             result = _execute_hypothesis_gen(stage_dir, run_dir, config, adapters)
 
         assert result.stage.name == "HYPOTHESIS_GEN"
         assert result.status.name == "DONE"
         # hypotheses.md always written
         assert (stage_dir / "hypotheses.md").exists()
-        # novelty_report.json should be written (API mocked as returning empty)
+        # The bounded worker's actual evidence is retained in the stage report.
         assert (stage_dir / "novelty_report.json").exists()
         report = json.loads((stage_dir / "novelty_report.json").read_text())
-        assert report["novelty_score"] == 1.0  # no similar papers → max novelty
+        assert report["novelty_score"] == 0.42
         assert "novelty_report.json" in result.artifacts
 
     def test_novelty_failure_does_not_block(self, tmp_path: Path) -> None:
@@ -465,7 +466,7 @@ class TestHypothesisGenNoveltyIntegration:
         adapters = AdapterBundle()
 
         with patch(
-            "researchclaw.literature.novelty.check_novelty",
+            "researchclaw.literature.bounded_novelty.check_novelty_bounded",
             side_effect=RuntimeError("Novelty check exploded"),
         ):
             result = _execute_hypothesis_gen(stage_dir, run_dir, config, adapters)
