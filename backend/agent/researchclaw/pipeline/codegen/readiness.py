@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import ast
+import hashlib
 import re
+from pathlib import Path
+
 import yaml
 
 
@@ -187,3 +190,18 @@ def declared_interface_gaps(files: dict[str, str], plan_text: str, *, require_tr
         gaps.append('No reachable training entrypoint: implement the default full-training path; '
                     'a smoke backward, audit-only main or unused training function is insufficient')
     return gaps
+
+
+def codegen_inputs_fingerprint(plan_text: str, run_dir: Path | None) -> dict[str, str]:
+    """Identify the plan and durable feedback an S11 attempt was generated from.
+
+    Hash the raw feedback log rather than calling the feedback loader, which
+    advances a consumption stamp and returns different text on each call.
+    """
+    feedback = b""
+    if run_dir is not None:
+        log = Path(run_dir) / "human_feedback.jsonl"
+        if log.is_file():
+            feedback = log.read_bytes()
+    return {"plan_sha256": hashlib.sha256((plan_text or "").encode("utf-8")).hexdigest(),
+            "feedback_sha256": hashlib.sha256(feedback).hexdigest()}

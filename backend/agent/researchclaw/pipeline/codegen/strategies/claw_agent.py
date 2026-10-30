@@ -36,6 +36,10 @@ class ClawAgentStrategy:
     max iterations are reached.
     """
 
+    # Each round re-checks the declared interfaces; stop early once a round
+    # makes no progress, so an unresolvable gap does not burn the budget.
+    _MAX_REPAIR_ROUNDS = 3
+
     @property
     def name(self) -> str:
         return "claw_agent"
@@ -71,6 +75,7 @@ class ClawAgentStrategy:
         # Prepare workspace
         workspace = self._prepare_workspace(ctx, session)
         session.log(CodegenPhase.GENERATE, f"Workspace: {workspace}")
+        previous_gaps = self._seed_previous_attempt(ctx, workspace, session)
 
         # Build system prompt (set workspace path so LLM knows the correct cwd)
         from researchclaw.pipeline.codegen.system_prompt import set_workspace_path
@@ -100,6 +105,13 @@ class ClawAgentStrategy:
         feedback_file = workspace / "CURRENT_FEEDBACK.md"
         if feedback_file.is_file():
             user_message += "\n\nLatest durable user feedback (supersedes conflicting historical topic clauses):\n" + feedback_file.read_text(encoding="utf-8")
+        if previous_gaps:
+            user_message += (
+                "\n\nThe previous S11 attempt for this same plan and feedback was rejected, and its files "
+                "are already in the workspace. Read them first and repair them; do not regenerate the "
+                "implementation from scratch. The remaining problems were:\n"
+                + "\n".join(f"- {gap}" for gap in previous_gaps)
+            )
 
         # Resolve python_path from config (experiment.sandbox.python_path)
         python_path = getattr(config.experiment.sandbox, "python_path", "") or ""
@@ -109,43 +121,46 @@ class ClawAgentStrategy:
             session.log(CodegenPhase.GENERATE, "No python_path in config — using system default")
 
         # Create and run turn loop
-        loop = ClawTurnLoop(
-            llm_config=llm_config,
-            workspace=workspace,
-            system_prompt=system_prompt,
-            session=session,
-            allowed_read_dirs=allowed_reads,
-            bash_timeout=120,  # S11 verifies via import + smoke mode; full experiment remains the default code path
-            max_iterations=40,
-            python_path=python_path,
-        )
+        def new_loop() -> ClawTurnLoop:
+            loop = ClawTurnLoop(
+                llm_config=llm_config,
+                workspace=workspace,
+                system_prompt=system_prompt,
+                session=session,
+                allowed_read_dirs=allowed_reads,
+                bash_timeout=120,  # S11 verifies via import + smoke mode; full experiment remains the default code path
+                max_iterations=40,
+                python_path=python_path,
+            )
+            loop.set_exp_plan(ctx.exp_plan)
+            return loop
 
-        loop.set_exp_plan(ctx.exp_plan)
+        loop = new_loop()
         session.log(CodegenPhase.GENERATE, "Starting turn loop...")
         turn_result = loop.run_turn(user_message)
         from researchclaw.pipeline.codegen.readiness import declared_interface_gaps
         require_training = bool(getattr(config.experiment, "require_training", False))
         gaps = declared_interface_gaps(turn_result.files, ctx.exp_plan, require_training=require_training)
-        if gaps and not turn_result.errors:
-            session.log(CodegenPhase.GENERATE, "Implementation incomplete; requesting one targeted repair: " + "; ".join(gaps))
-            repaired = loop.run_turn(
-                "The generated files do not implement the explicit plan interfaces:\n"
-                + "\n".join(gaps)
-                + "\nImplement the actual baseline and proposed method. An audit-only main.py or named stubs "
-                "do not complete S11. Preserve user budgets and scientific gates. If a protocol definition "
-                "cannot be resolved from the supplied plan and instructions, report it explicitly; do not "
-                "invent author settings, remove gates, or pretend the implementation is complete. "
-                "Read the actual author loss and the frozen operator equations. A function name, "
-                "feature scaling labelled attention, or random-tensor probes labelled H2/D2 do not "
-                "implement them. Check real fixture/cohort provenance and negative controls; do not "
-                "replace missing scientific checkers with engineering finite-value tests. Implement "
-                "the full default training path with the declared GPU count and effective batch."
-            )
+        repair_round = 0
+        while gaps and not turn_result.errors and repair_round < self._MAX_REPAIR_ROUNDS:
+            repair_round += 1
+            session.log(CodegenPhase.GENERATE, f"Implementation incomplete; targeted repair "
+                        f"{repair_round}/{self._MAX_REPAIR_ROUNDS}: " + "; ".join(gaps))
+            if repair_round > 1:
+                # The files are on disk. A fresh conversation keeps later repair
+                # prompts small instead of resending every earlier tool call.
+                loop = new_loop()
+            repaired = loop.run_turn(self._repair_message(gaps, fresh_conversation=repair_round > 1))
             repaired.iterations += turn_result.iterations
             repaired.tool_calls += turn_result.tool_calls
             repaired.elapsed_sec += turn_result.elapsed_sec
             turn_result = repaired
-            gaps = declared_interface_gaps(turn_result.files, ctx.exp_plan, require_training=require_training)
+            remaining = declared_interface_gaps(turn_result.files, ctx.exp_plan, require_training=require_training)
+            progressed = len(remaining) < len(gaps)
+            gaps = remaining
+            if gaps and not progressed:
+                session.log(CodegenPhase.GENERATE, "Targeted repair made no progress; stopping repairs")
+                break
 
         elapsed = time.monotonic() - t0
 
@@ -198,6 +213,66 @@ class ClawAgentStrategy:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _repair_message(gaps: list[str], *, fresh_conversation: bool) -> str:
+        prefix = ("You are continuing S11 code generation in this workspace. EXPERIMENT_PLAN.yaml, "
+                  "CODEGEN.md and CURRENT_FEEDBACK.md (if present) define the task; the existing files are "
+                  "a partial implementation. Edit them rather than starting over.\n") if fresh_conversation else ""
+        return (
+            prefix
+            + "The generated files do not implement the explicit plan interfaces:\n"
+            + "\n".join(gaps)
+            + "\nImplement the actual baseline and proposed method. An audit-only main.py or named stubs "
+            "do not complete S11. Preserve user budgets and scientific gates. If a protocol definition "
+            "cannot be resolved from the supplied plan and instructions, report it explicitly; do not "
+            "invent author settings, remove gates, or pretend the implementation is complete. "
+            "Read the actual author loss and the frozen operator equations. A function name, "
+            "feature scaling labelled attention, or random-tensor probes labelled H2/D2 do not "
+            "implement them. Check real fixture/cohort provenance and negative controls; do not "
+            "replace missing scientific checkers with engineering finite-value tests. Implement "
+            "the full default training path with the declared GPU count and effective batch. "
+            "A helper that cannot compute its result from real inputs must raise an error naming "
+            "the missing input; never return fixed numbers or a hard-coded status in its place."
+        )
+
+    @staticmethod
+    def _seed_previous_attempt(ctx: CodegenContext, workspace: Path, session: CodegenSession) -> list[str]:
+        """Carry a rejected attempt's files into a retry with unchanged inputs.
+
+        Without this every retry regenerates the implementation from scratch and
+        can trade one structural gap for another. Return the previous errors when
+        files were seeded, otherwise an empty list.
+        """
+        if not ctx.stage_dir or not ctx.run_dir:
+            return []
+        try:
+            report = json.loads((ctx.stage_dir / "implementation_readiness.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(report, dict) or report.get("ready") is not False or not report.get("errors"):
+            return []
+        from researchclaw.pipeline.codegen.readiness import codegen_inputs_fingerprint
+        if any(report.get(key) != value for key, value in codegen_inputs_fingerprint(ctx.exp_plan, ctx.run_dir).items()):
+            session.log(CodegenPhase.GENERATE, "Plan or feedback changed since the rejected attempt; regenerating")
+            return []
+        experiment = ctx.stage_dir / "experiment"
+        seeded = []
+        for name in report.get("files") or []:
+            rel = Path(str(name))
+            if rel.is_absolute() or ".." in rel.parts:
+                continue
+            source, target = experiment / rel, workspace / rel
+            # Inputs written by _prepare_workspace stay authoritative.
+            if not source.is_file() or source.is_symlink() or target.exists():
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+            seeded.append(rel.as_posix())
+        if "main.py" not in seeded:
+            return []
+        session.log(CodegenPhase.GENERATE, f"Seeded {len(seeded)} files from the rejected attempt for targeted repair")
+        return [str(error) for error in report["errors"]]
 
     @staticmethod
     def _resolve_llm_config(llm: Any, config: RCConfig) -> Any:
