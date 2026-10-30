@@ -18,6 +18,10 @@ CANDIDATE_FILE = "candidate.json"
 BINDING_FILE = "candidate_binding.json"
 HISTORY_FILE = "candidate_history.jsonl"
 CONTEXT_REGISTRY = "REGISTRY.json"
+# Measured reasons why earlier candidates' designs failed (S9 reads this file).
+DESIGN_FAILURES = "MEASURED_DESIGN_FAILURES.json"
+# Automatic S9 redesigns per run; after that the failure waits for a person.
+MAX_DESIGN_REVISIONS = 3
 # Executable code only; reports and outputs written by a run change legitimately.
 _CODE_SUFFIXES = (".py", ".sh")
 _SKIP_PARTS = ("outputs", "revision-context", "codebases", "datasets", "checkpoints", "__pycache__")
@@ -119,7 +123,7 @@ def history_context(run_dir: Path) -> set[str]:
         candidate_id = current(run_dir)["candidate_id"]
     except CandidateError:
         candidate_id = None
-    history = set()
+    history = {DESIGN_FAILURES} if (root / DESIGN_FAILURES).is_file() else set()
     for path in root.rglob("*") if root.is_dir() else ():
         if not path.is_file():
             continue
@@ -223,7 +227,7 @@ def rerun_stage(run_dir: Path, stage: int) -> int | None:
     return rerun_stage(run_dir, upstream) or upstream
 
 
-def rewind_checkpoint(run_dir: Path, rerun: int) -> None:
+def rewind_checkpoint(run_dir: Path, rerun: int, reason: str = "") -> None:
     """Make the next resume start at ``rerun``; never moves the checkpoint forward.
 
     The runner stops on a failed stage and resumes after the last completed
@@ -238,11 +242,42 @@ def rewind_checkpoint(run_dir: Path, rerun: int) -> None:
     from researchclaw.pipeline.stages import Stage
     previous = Stage(rerun - 1)
     data.update(last_completed_stage=int(previous), last_completed_name=previous.name,
-                rewound_for=f"candidate handoff: rerun S{rerun}",
+                rewound_for=reason or f"candidate handoff: rerun S{rerun}",
                 timestamp=time.strftime("%Y-%m-%dT%H:%M:%S%z"))
     tmp = path.with_suffix(".rewind.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     tmp.replace(path)
+
+
+def return_to_design(run_dir: Path, stage: int, error: str) -> str:
+    """Send a design failure measured by S11-S14 back to S9.
+
+    The failure is a property of the frozen plan, so rerunning the same stage
+    reproduces it. Record the measured conclusion where S9 reads it and make
+    the next resume start at S9. Gates are untouched. Returns the note to add
+    to the stage error.
+    """
+    path = run_dir / "revision-context" / DESIGN_FAILURES
+    data = _read_json(path) or {}
+    failures = [item for item in data.get("failures") or [] if isinstance(item, dict)]
+    if len(failures) >= MAX_DESIGN_REVISIONS:
+        return (f"{len(failures)} automatic redesigns already failed; "
+                "not rewinding again, a person must review the design")
+    try:
+        candidate_id = current(run_dir)["candidate_id"]
+    except CandidateError:
+        candidate_id = None
+    failures.append({"candidate_id": candidate_id, "stage": stage, "measured_failure": error[:6000],
+                     "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({
+        "note": "Measured failures of earlier candidate designs. The next design must address them "
+                "without removing or weakening mandatory gates; these are not results of the new candidate.",
+        "failures": failures}, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
+    rewind_checkpoint(run_dir, 9, f"measured design failure at S{stage}: redesign from S9")
+    return f"design failure recorded in revision-context/{DESIGN_FAILURES}; resume restarts at S9"
 
 
 def record_completion(run_dir: Path, stage: int, done: bool) -> None:
