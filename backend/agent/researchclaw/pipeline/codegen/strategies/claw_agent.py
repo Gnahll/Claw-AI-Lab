@@ -97,6 +97,9 @@ class ClawAgentStrategy:
 
         # Build user message
         user_message = single_run.apply(build_user_message(ctx), single_run.is_single_run(config))
+        feedback_file = workspace / "CURRENT_FEEDBACK.md"
+        if feedback_file.is_file():
+            user_message += "\n\nLatest durable user feedback (supersedes conflicting historical topic clauses):\n" + feedback_file.read_text(encoding="utf-8")
 
         # Resolve python_path from config (experiment.sandbox.python_path)
         python_path = getattr(config.experiment.sandbox, "python_path", "") or ""
@@ -199,6 +202,25 @@ class ClawAgentStrategy:
         """Create a clean workspace with symlinks to data directories."""
         ws = ctx.stage_dir / f"claw_workspace_{int(time.time())}_{os.getpid()}"
         ws.mkdir(parents=True, exist_ok=True)
+        # S9 may reference exact registered definitions rather than duplicate
+        # them in its YAML. Keep those inputs available to S11 and later exports.
+        if ctx.run_dir:
+            registered = ctx.run_dir / "revision-context"
+            if registered.is_symlink():
+                raise ValueError(f"Registered context must not be a symlink: {registered}")
+            if registered.is_dir():
+                for source in registered.rglob("*"):
+                    if source.is_symlink():
+                        raise ValueError(f"Registered context must be a regular file/directory: {source}")
+                    if source.is_file():
+                        target = ws / source.relative_to(ctx.run_dir)
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(source, target)
+            from researchclaw.pipeline.executor import _load_human_feedback
+            from researchclaw.pipeline.stages import Stage
+            feedback = _load_human_feedback(ctx.run_dir, Stage.CODE_GENERATION)
+            if feedback:
+                (ws / "CURRENT_FEEDBACK.md").write_text(feedback, encoding="utf-8")
 
         # Save experiment plan
         if ctx.exp_plan:
@@ -266,4 +288,15 @@ class ClawAgentStrategy:
         for d in (ctx.existing_project_dir, ctx.codebases_dir, ctx.datasets_dir, ctx.checkpoints_dir):
             if d and Path(d).is_dir():
                 dirs.append(Path(d))
+        # Registered fixtures can live outside the ordinary dataset directory.
+        # Permit only the explicitly declared, hash-verified fixture directory.
+        import hashlib
+        import yaml
+        plan = yaml.safe_load(ctx.exp_plan) if ctx.exp_plan else {}
+        fixtures = (plan or {}).get("fixed_inputs", {}).get("fixtures", {})
+        if fixtures.get("directory") and fixtures.get("registration_sha256"):
+            root = Path(fixtures["directory"])
+            registration = root / "registration.json"
+            if registration.is_file() and hashlib.sha256(registration.read_bytes()).hexdigest() == fixtures["registration_sha256"]:
+                dirs.append(root.resolve())
         return dirs
