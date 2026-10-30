@@ -959,6 +959,10 @@ class ClawTurnLoop:
             }
             if normalized in patterns:
                 return patterns[normalized]
+            # A prose explanation describes sampling; it is not a literal
+            # Python symbol which must be pasted into the implementation.
+            if not re.fullmatch(r'[A-Za-z_]\w*', normalized):
+                return tuple()
             return (re.escape(normalized),)
 
         def _model_edit_patterns(edit_name: str) -> tuple[str, ...]:

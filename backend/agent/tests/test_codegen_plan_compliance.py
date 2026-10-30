@@ -82,3 +82,15 @@ def test_fake_metric_in_helper_module_is_not_ignored(tmp_path):
     loop = ClawTurnLoop.__new__(ClawTurnLoop)
     loop._workspace = tmp_path
     assert 'FORBIDDEN mock/random metric' in loop._run_simulation_check()
+
+
+def test_data_pairing_description_is_not_required_as_literal_source_text(tmp_path):
+    errors = check(tmp_path, {'main.py': 'dataset = AuthorDataset(manifest)'},
+                   'proposed_methods:\n  - name: Method\n    implementation_spec:\n      required_data_pairing: Independent author-sampled image and mask triples.\n')
+    assert not any('MISSING DATA PAIRING' in e for e in errors)
+
+
+def test_explicit_named_pairing_requirement_is_still_checked(tmp_path):
+    errors = check(tmp_path, {'main.py': 'print("run")'},
+                   'proposed_methods:\n  - name: Method\n    implementation_spec:\n      required_data_pairing: intervention_pairs\n')
+    assert any('MISSING DATA PAIRING' in e for e in errors)
