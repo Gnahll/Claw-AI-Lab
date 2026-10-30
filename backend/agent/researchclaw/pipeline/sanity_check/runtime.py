@@ -28,6 +28,26 @@ from researchclaw import single_run
 logger = logging.getLogger(__name__)
 
 
+def _run_checked_smoke(workspace: Path, output_dir: Path, config: RCConfig, plan_text: str) -> dict:
+    """Do not accept a smoke repair that replaces mandatory checkers with stubs."""
+    from researchclaw.pipeline.codegen.readiness import declared_interface_gaps
+    from researchclaw.training.execution import run_experiment
+    files = {str(p.relative_to(workspace)): p.read_text(encoding="utf-8")
+             for p in workspace.rglob("*.py") if not p.is_symlink()
+             and not any(part.startswith('.') or part in ('outputs', '__pycache__')
+                         for part in p.relative_to(workspace).parts)}
+    gaps = declared_interface_gaps(files, plan_text)
+    if not gaps:
+        return run_experiment(workspace, output_dir, config, smoke=True, timeout=180)
+    report = {"success": False, "smoke": True, "require_training": False,
+              "execution_started": False, "results": None,
+              "errors": ["Implementation incomplete before smoke: " + gap for gap in gaps]}
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "execution.log").write_text("\n".join(report["errors"]), encoding="utf-8")
+    (output_dir / "execution_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return report
+
+
 def _iter_plan_sources(run_dir: Path):
     """Yield candidate paths for the experiment plan, best match first."""
     # S11 claw_workspace may contain the LLM-created EXPERIMENT_PLAN.yaml
@@ -151,12 +171,11 @@ class SanityCheckRuntime:
             trace_prefix="sanity",
         )
 
-        from researchclaw.training.execution import run_experiment
-
+        plan_text = plan.read_text(encoding="utf-8") if plan.is_file() else ""
         evidence_dir = stage_dir / "smoke_execution"
         session.log("EXECUTE", "Running main.py under pipeline supervision before repair")
         attempt_dir = evidence_dir / "attempt-1"
-        measured_smoke = run_experiment(workspace, attempt_dir, config, smoke=True, timeout=180)
+        measured_smoke = _run_checked_smoke(workspace, attempt_dir, config, plan_text)
         attempts = [measured_smoke]
         turn_result = TurnResult()
         if not measured_smoke["success"]:
@@ -173,7 +192,7 @@ class SanityCheckRuntime:
                 session.log("REPAIR", "Repair failed; preserving original failure without rerunning: " + "; ".join(turn_result.errors))
             else:
                 attempt_dir = evidence_dir / "attempt-2"
-                measured_smoke = run_experiment(workspace, attempt_dir, config, smoke=True, timeout=180)
+                measured_smoke = _run_checked_smoke(workspace, attempt_dir, config, plan_text)
                 attempts.append(measured_smoke)
 
         for filename in ("execution.log", "execution_report.json"):

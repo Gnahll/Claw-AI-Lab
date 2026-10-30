@@ -520,10 +520,10 @@ class CodegenRuntime:
         implementation_errors = declared_interface_gaps(files, ctx.exp_plan)
         if result.error:
             implementation_errors.insert(0, result.error)
+        report = stage_dir / "implementation_readiness.json"
+        report.write_text(json.dumps({"ready": not implementation_errors, "errors": implementation_errors,
+            "scope": "Structural implementation checks only; algorithm fidelity and measured runtime checks remain required"}, indent=2), encoding="utf-8")
         if implementation_errors:
-            report = stage_dir / "implementation_readiness.json"
-            report.write_text(json.dumps({"ready": False, "errors": implementation_errors,
-                "scope": "Named interfaces only; runtime and training verification remain required"}, indent=2), encoding="utf-8")
             session.log_error(CodegenPhase.VALIDATE, "; ".join(implementation_errors))
             session.persist()
             return StageResult(stage=Stage.CODE_GENERATION, status=StageStatus.FAILED,

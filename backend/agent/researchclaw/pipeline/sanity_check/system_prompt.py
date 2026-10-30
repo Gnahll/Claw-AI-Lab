@@ -40,6 +40,15 @@ and fix the code. Repeat until the smoke test passes cleanly.
 
 # Rules
 - NEVER delete or simplify the experiment logic to make the test pass
+- Read EXPERIMENT_PLAN.yaml and the actual source equations before repairing a method or checker.
+  Mandatory scientific checkers must use their registered fixtures, interventions and cohorts.
+  Random-tensor engineering probes cannot stand in for H2/D2 or be reported as scientific PASS.
+  If a scientific check cannot be implemented from the definitions, report that blocker;
+  do not invent a replacement test. Keep the author loss, attention operator, GPU count,
+  effective batch and full default training path consistent with the frozen plan.
+- Smoke metrics must be actual measurements on the permitted training/validation inputs.
+  A measured engineering loss may be labelled as such; never invent a task score to satisfy
+  the requirement for a numeric metric or promote engineering smoke to scientific acceptance.
 - NEVER replace real model loading with dummy models
 - NEVER catch and swallow exceptions to hide errors
 - NEVER remove evaluation metrics or training steps
