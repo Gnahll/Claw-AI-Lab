@@ -22,6 +22,7 @@ from researchclaw.pipeline.sanity_check.system_prompt import (
     build_system_prompt,
     build_user_message,
 )
+from researchclaw.pipeline.candidate import current_stage_dirs
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw import single_run
 
@@ -51,17 +52,16 @@ def _run_checked_smoke(workspace: Path, output_dir: Path, config: RCConfig, plan
 
 def _iter_plan_sources(run_dir: Path):
     """Yield candidate paths for the experiment plan, best match first."""
-    # S11 claw_workspace may contain the LLM-created EXPERIMENT_PLAN.yaml
+    # The frozen S9 plan is the candidate; workspace copies are fallbacks.
+    s9_plan = run_dir / "stage-09" / "exp_plan.yaml"
+    if s9_plan.is_file():
+        yield s9_plan
     s11 = run_dir / "stage-11"
     if s11.is_dir():
         for ws_dir in sorted(s11.glob("claw_workspace_*"), reverse=True):
             p = ws_dir / "EXPERIMENT_PLAN.yaml"
             if p.is_file():
                 yield p
-    # S9 canonical exp_plan.yaml
-    s9_plan = run_dir / "stage-09" / "exp_plan.yaml"
-    if s9_plan.is_file():
-        yield s9_plan
 
 
 class SanityCheckRuntime:
@@ -261,7 +261,7 @@ class SanityCheckRuntime:
     def _find_experiment_dir(run_dir: Path) -> Path | None:
         """Find the latest experiment/ directory from prior stages."""
         candidates = []
-        for stage_d in sorted(run_dir.glob("stage-*"), reverse=True):
+        for stage_d in current_stage_dirs(run_dir):
             exp_dir = stage_d / "experiment"
             if exp_dir.is_dir() and (exp_dir / "main.py").is_file():
                 candidates.append(exp_dir)
@@ -342,7 +342,7 @@ class SanityCheckRuntime:
     @staticmethod
     def _load_plan_summary(run_dir: Path) -> str:
         """Load experiment plan summary from prior stages."""
-        for stage_d in sorted(run_dir.glob("stage-*"), reverse=True):
+        for stage_d in current_stage_dirs(run_dir):
             plan_file = stage_d / "exp_plan.yaml"
             if plan_file.is_file():
                 try:

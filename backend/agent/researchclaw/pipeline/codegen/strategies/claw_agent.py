@@ -290,10 +290,15 @@ class ClawAgentStrategy:
             if registered.is_symlink():
                 raise ValueError(f"Registered context must not be a symlink: {registered}")
             if registered.is_dir():
+                from researchclaw.pipeline.candidate import history_context
+                history = history_context(ctx.run_dir)
+                if history:
+                    session.log(CodegenPhase.GENERATE, "Not copying earlier-candidate context: "
+                                + ", ".join(sorted(history)))
                 for source in registered.rglob("*"):
                     if source.is_symlink():
                         raise ValueError(f"Registered context must be a regular file/directory: {source}")
-                    if source.is_file():
+                    if source.is_file() and source.relative_to(registered).as_posix() not in history:
                         target = ws / source.relative_to(ctx.run_dir)
                         target.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(source, target)

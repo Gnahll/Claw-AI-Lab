@@ -22,6 +22,7 @@ from researchclaw.pipeline.experiment_run.system_prompt import (
     build_system_prompt,
     build_user_message,
 )
+from researchclaw.pipeline.candidate import current_stage_dirs, same_candidate_workspace, stamp_workspace
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.resources.intake import build_resource_manifest, render_resource_manifest
 from researchclaw.training.execution import EXECUTION_CONTRACT, run_experiment
@@ -309,7 +310,7 @@ class ExperimentRunRuntime:
 
     @staticmethod
     def _find_experiment_dir(run_dir: Path) -> Path | None:
-        for stage_d in sorted(run_dir.glob("stage-*"), reverse=True):
+        for stage_d in current_stage_dirs(run_dir):
             exp_dir = stage_d / "experiment"
             if exp_dir.is_dir() and (exp_dir / "main.py").is_file():
                 return exp_dir
@@ -384,14 +385,15 @@ class ExperimentRunRuntime:
                         pass
 
         (ws / "outputs").mkdir(exist_ok=True)
-        ExperimentRunRuntime._carry_over_outputs(stage_dir, ws)
+        ExperimentRunRuntime._carry_over_outputs(stage_dir, ws, run_dir)
+        stamp_workspace(run_dir, ws)
         return ws
 
     # Files whose presence means a workspace holds resumable progress.
     _PROGRESS_PATTERNS = ("*.pth", "*.pt", "*.ckpt", "*.safetensors", "results.json")
 
     @staticmethod
-    def _carry_over_outputs(stage_dir: Path, ws: Path) -> Path | None:
+    def _carry_over_outputs(stage_dir: Path, ws: Path, run_dir: Path) -> Path | None:
         """Copy outputs/ from the previous workspace with saved progress.
 
         Each S14 launch creates a fresh workspace, so a resumed project
@@ -400,11 +402,16 @@ class ExperimentRunRuntime:
         the workspace whose newest checkpoint/results file is newest; a
         workspace with only logs (a run that just started) is skipped.
         The source is copied, never moved, so it stays as a backup.
+        Only workspaces of the current candidate qualify: a redesigned
+        candidate trains from scratch instead of resuming old checkpoints.
         """
         best: tuple[float, Path] | None = None
         for old in stage_dir.glob("run_workspace_*"):
             outputs = old / "outputs"
             if old == ws or not outputs.is_dir():
+                continue
+            if not same_candidate_workspace(run_dir, old):
+                logger.info("Not carrying over %s: it belongs to another or unknown candidate", old)
                 continue
             newest = 0.0
             for pattern in ExperimentRunRuntime._PROGRESS_PATTERNS:
@@ -439,7 +446,7 @@ class ExperimentRunRuntime:
 
     @staticmethod
     def _load_sanity_results(run_dir: Path) -> str:
-        for stage_d in sorted(run_dir.glob("stage-*"), reverse=True):
+        for stage_d in current_stage_dirs(run_dir):
             report = stage_d / "sanity_report.json"
             if report.is_file():
                 try:

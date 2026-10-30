@@ -13,6 +13,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -509,6 +510,12 @@ class CodegenRuntime:
 
         # Write experiment directory
         exp_dir = stage_dir / "experiment"
+        if exp_dir.is_dir():
+            # Files of an earlier attempt or candidate must not survive next to
+            # the new code, where S12/S14 would run them as part of it.
+            superseded = stage_dir / f"superseded_experiment_{time.strftime('%Y%m%d_%H%M%S')}"
+            exp_dir.rename(superseded)
+            session.log(CodegenPhase.GENERATE, f"Moved previous experiment/ to {superseded.name}")
         exp_dir.mkdir(parents=True, exist_ok=True)
         for fname, code in files.items():
             file_path = exp_dir / fname
