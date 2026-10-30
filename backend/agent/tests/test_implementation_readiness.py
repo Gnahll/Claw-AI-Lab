@@ -124,6 +124,29 @@ def test_archived_copies_do_not_shadow_the_code_that_runs():
     assert declared_interface_gaps(files, '{}', require_training=True)
 
 
+def test_same_named_functions_in_copied_author_scripts_do_not_replace_mains_own():
+    # Seen on the server: upstream_contract/{train,test}.py each define main();
+    # sorted after main.py, they replaced main.py's main() in the call graph.
+    files = {'main.py': 'def train_condition():\n    scaler.step(optimizer)\n'
+                        'def main():\n    train_condition()\n'
+                        'if __name__ == "__main__":\n    main()',
+             'upstream_contract/test.py': 'def main():\n    evaluate()',
+             'upstream_contract/train.py': 'def main():\n    print("author entry")'}
+    assert declared_interface_gaps(files, '{}', require_training=True) == []
+    files['main.py'] = 'def main():\n    print("audit")\nmain()'
+    files['upstream_contract/train.py'] = 'def main():\n    optimizer.step()'
+    assert declared_interface_gaps(files, '{}', require_training=True)
+
+
+def test_explicit_imports_resolve_to_the_named_local_module():
+    files = {'main.py': 'from engine.loop import run\nrun()',
+             'engine/loop.py': 'def run():\n    optimizer.step()',
+             'tools/loop.py': 'def run():\n    print("probe")'}
+    assert declared_interface_gaps(files, '{}', require_training=True) == []
+    files['main.py'] = 'from tools.loop import run\nrun()'
+    assert declared_interface_gaps(files, '{}', require_training=True)
+
+
 def test_inference_tasks_do_not_require_optimizer_or_trainer():
     assert declared_interface_gaps({'main.py': 'model.predict(data)'}, '{}') == []
 

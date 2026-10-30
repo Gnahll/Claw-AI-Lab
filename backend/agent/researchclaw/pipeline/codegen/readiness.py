@@ -16,9 +16,15 @@ def _has_training_entrypoint(files: dict[str, str]) -> bool:
     A train function that is defined but never called does not satisfy this.
     Runtime observation remains authoritative for actual updates and budgets.
     """
-    functions: dict[str, ast.AST] = {}
-    imports: dict[str, str] = {}
+    # Names resolve per module: the module's own definitions first, then what it
+    # explicitly imports from a local file.  A bare-name table shared by all
+    # modules let copied author scripts (upstream_contract/train.py: main) replace
+    # main.py's own main() in the walk.
+    functions: dict[str, dict[str, ast.AST]] = {}
+    imports: dict[str, dict[str, str]] = {}
+    sources: dict[str, dict[str, tuple[str, str]]] = {}
     modules: dict[str, ast.Module] = {}
+    owner: dict[int, str] = {}
     for name, source in files.items():
         if not name.endswith('.py'):
             continue
@@ -26,19 +32,48 @@ def _has_training_entrypoint(files: dict[str, str]) -> bool:
             tree = ast.parse(source)
         except SyntaxError:
             continue
+        name = Path(name).as_posix()
         modules[name] = tree
+        owner[id(tree)] = name
+        defs, aliases, origins = {}, {}, {}
+        package = Path(name).parent
         for n in tree.body:
             if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                functions[n.name] = n
+                defs[n.name] = n
+                owner[id(n)] = name
             elif isinstance(n, ast.ImportFrom):
+                base = package
+                for _ in range(max(n.level - 1, 0)):
+                    base = base.parent
+                module_path = (base if n.level else Path()) / Path(*(n.module or '').split('.'))
                 for a in n.names:
-                    imports[a.asname or a.name] = f'{n.module}.{a.name}'.lower()
+                    aliases[a.asname or a.name] = f'{n.module}.{a.name}'.lower()
+                    origins[a.asname or a.name] = (module_path.as_posix(), a.name)
             elif isinstance(n, ast.Import):
                 for a in n.names:
-                    imports[a.asname or a.name] = a.name.lower()
+                    aliases[a.asname or a.name] = a.name.lower()
+        functions[name], imports[name], sources[name] = defs, aliases, origins
+    definers: dict[str, list[ast.AST]] = {}
+    for defs in functions.values():
+        for fname, node in defs.items():
+            definers.setdefault(fname, []).append(node)
+
+    def resolve(module: str, fname: str) -> ast.AST | None:
+        if fname in functions[module]:
+            return functions[module][fname]
+        if fname in sources[module]:
+            path, target = sources[module][fname]
+            for candidate in (f'{path}.py', f'{path}/__init__.py'):
+                if candidate in modules:
+                    return functions[candidate].get(target)
+        found = definers.get(fname, [])
+        # Star imports and similar: follow a name only when it is unambiguous.
+        return found[0] if len(found) == 1 else None
 
     class Calls(ast.NodeVisitor):
-        def __init__(self):
+        def __init__(self, module: str):
+            self.module = module
+            self.imports = imports[module]
             self.names: set[str] = set()
             self.training = False
 
@@ -51,14 +86,14 @@ def _has_training_entrypoint(files: dict[str, str]) -> bool:
                 self.names.add(node.func.id)
                 # A reusable author training routine is an opaque delegation;
                 # it is not grounds to reject an otherwise valid wrapper.
-                origin = imports.get(node.func.id, '')
-                if re.search(r'(?:^|\.)(?:train(?:ing|er|_[a-z0-9_]+)?)(?:$|\.)', origin) and node.func.id not in functions:
+                origin = self.imports.get(node.func.id, '')
+                if re.search(r'(?:^|\.)(?:train(?:ing|er|_[a-z0-9_]+)?)(?:$|\.)', origin) and node.func.id not in functions[self.module]:
                     self.training = True
             elif isinstance(node.func, ast.Attribute):
                 if node.func.attr in ('step', 'fit', 'train_one_epoch'):
                     self.training = True
                 elif isinstance(node.func.value, ast.Name):
-                    origin = imports.get(node.func.value.id, '')
+                    origin = self.imports.get(node.func.value.id, '')
                     if re.search(r'(?:^|\.)(?:train(?:ing|er|_[a-z0-9_]+)?)(?:$|\.)', origin) and node.func.attr in ('main', 'run', 'train'):
                         self.training = True
                     if node.func.value.id == 'trainer' and node.func.attr == 'train':
@@ -75,12 +110,12 @@ def _has_training_entrypoint(files: dict[str, str]) -> bool:
         if id(node) in seen:
             continue
         seen.add(id(node))
-        calls = Calls()
+        calls = Calls(owner[id(node)])
         for statement in node.body:
             calls.visit(statement)
         if calls.training:
             return True
-        pending.extend(functions[name] for name in calls.names if name in functions)
+        pending.extend(n for n in (resolve(calls.module, name) for name in calls.names) if n is not None)
     return False
 
 
