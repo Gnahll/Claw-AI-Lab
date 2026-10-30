@@ -83,6 +83,10 @@ Step 2 — DESIGN based on what you found:
 Step 3 — WRITE main.py using write_file:
   - Load the REAL pretrained model identified in Step 1
   - Implement genuinely different conditions (not just renamed copies)
+  - Implement the frozen equations and registered interventions, not only the named interfaces.
+    A feature multiplier is not key-logit attention. Random-tensor finite-value checks are not
+    substitutes for registered scientific cohorts. Reuse the author loss exactly when required;
+    compare its formula and reduction against the source before changing the forward path.
   - Use REAL evaluation metrics (FID via torchmetrics, CLIP score, etc.)
   - Training loss must be task-appropriate (diffusion loss, cross-entropy, etc.) — NOT `output.mean()`
   - `python3 main.py` must run the FULL experiment specified in `EXPERIMENT_PLAN.yaml`
@@ -97,7 +101,9 @@ Step 4 — VERIFY (quick smoke test only):
   - If that passes, run a SHORT smoke test: `timeout 30 env SMOKE_TEST=1 python3 main.py` (30 second limit)
   - The purpose is ONLY to catch import errors, syntax errors, and obvious crashes
   - Do NOT wait for the full experiment to finish during S11 verification
-  - If the 30-second test shows the model loading, evaluation starting, and training loop starting, that's SUFFICIENT
+  - A short smoke test proves only what it actually measured. It does not excuse unimplemented
+    mandatory checkers or a missing default full-training path. Before finishing, verify the
+    declared helper bodies, operator equations, author loss, GPU count and batch arithmetic.
   - Fix any import/syntax errors with edit_file, then move on
 
 Step 5 — ANTI-SIMULATION SELF-CHECK (mandatory before finishing):

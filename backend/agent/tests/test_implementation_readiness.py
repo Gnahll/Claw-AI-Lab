@@ -37,6 +37,53 @@ def test_generic_plan_without_named_interfaces_does_not_impose_architecture():
     assert declared_interface_gaps({'main.py': 'print("run actual baseline")'}, 'training: {epochs: 200}') == []
 
 
+@pytest.mark.parametrize('source', [
+    'def score_H2(*args): return {"measured": False, "status": "blocked"}',
+    'def score_H2(x): return x',
+    'def score_H2(x):\n    report = {"measured": True, "status": "PASS"}\n    return report',
+    'def score_H2(*args):\n    y = engineering_random_probe()\n    return {"status": "PASS", "response": float(y.mean())}',
+])
+def test_required_checker_rejects_metadata_identity_and_input_free_pass(source):
+    plan = 'acceptance_protocol: {checks: [{required_helpers: [score_H2]}]}'
+    errors = declared_interface_gaps({'main.py': source}, plan)
+    assert len(errors) == 1 and 'score_H2' in errors[0]
+
+
+@pytest.mark.parametrize('source', [
+    'def score_H2(x): return {"status": "PASS" if x.mean() >= .5 else "FAIL"}',
+    'def score_H2(x):\n    assert x.mean() >= .5\n    return {"status": "PASS"}',
+    'def score_H2(x): return registered_checker(x)',
+    'def score_H2():\n    fixtures = load_registered_fixtures()\n    return evaluate_cohorts(fixtures)',
+])
+def test_real_checkers_are_not_rejected_merely_for_returning_a_pass_record(source):
+    plan = 'acceptance_protocol: {checks: [{required_helpers: [score_H2]}]}'
+    assert declared_interface_gaps({'main.py': source}, plan) == []
+
+
+def test_s12_does_not_execute_or_accept_a_checker_replaced_by_random_probe(tmp_path, monkeypatch):
+    from researchclaw.pipeline.sanity_check.runtime import _run_checked_smoke
+    from researchclaw.training import execution
+    (tmp_path / 'main.py').write_text('def score_H2(*args):\n    y = random_probe()\n    return {"status": "PASS", "value": y.mean()}')
+    monkeypatch.setattr(execution, 'run_experiment', lambda *a, **kw: pytest.fail('must not run incomplete code'))
+    result = _run_checked_smoke(tmp_path, tmp_path/'attempt', None,
+                               'checks: [{required_helpers: [score_H2]}]')
+    assert not result['success'] and not result['execution_started']
+    assert 'unconditional PASS' in result['errors'][0]
+    assert (tmp_path/'attempt/execution_report.json').is_file()
+
+
+def test_s12_keeps_measured_smoke_execution_for_real_implementation(tmp_path, monkeypatch):
+    from researchclaw.pipeline.sanity_check.runtime import _run_checked_smoke
+    from researchclaw.training import execution
+    (tmp_path/'main.py').write_text('def score_H2(x): return evaluate_registered(x)')
+    def run(workspace, output_dir, config, **kwargs):
+        assert kwargs == {'smoke': True, 'timeout': 180}
+        return {'success': True, 'measured': True}
+    monkeypatch.setattr(execution, 'run_experiment', run)
+    assert _run_checked_smoke(tmp_path, tmp_path/'attempt', None,
+                             'checks: [{required_helpers: [score_H2]}]')['measured']
+
+
 def test_resource_blocker_records_current_gpu_and_never_starts_code(tmp_path, monkeypatch):
     from researchclaw.training import resources
     from researchclaw.pipeline.stages import Stage, StageStatus

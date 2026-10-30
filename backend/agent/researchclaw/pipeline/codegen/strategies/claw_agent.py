@@ -133,7 +133,12 @@ class ClawAgentStrategy:
                 + "\nImplement the actual baseline and proposed method. An audit-only main.py or named stubs "
                 "do not complete S11. Preserve user budgets and scientific gates. If a protocol definition "
                 "cannot be resolved from the supplied plan and instructions, report it explicitly; do not "
-                "invent author settings, remove gates, or pretend the implementation is complete."
+                "invent author settings, remove gates, or pretend the implementation is complete. "
+                "Read the actual author loss and the frozen operator equations. A function name, "
+                "feature scaling labelled attention, or random-tensor probes labelled H2/D2 do not "
+                "implement them. Check real fixture/cohort provenance and negative controls; do not "
+                "replace missing scientific checkers with engineering finite-value tests. Implement "
+                "the full default training path with the declared GPU count and effective batch."
             )
             repaired.iterations += turn_result.iterations
             repaired.tool_calls += turn_result.tool_calls
