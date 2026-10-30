@@ -146,6 +146,10 @@ def declared_interface_gaps(files: dict[str, str], plan_text: str, *, require_tr
     This is a structural handoff check, not proof of algorithm correctness,
     parameter updates, or scientific effectiveness. S12/S14 still execute code.
     """
+    # Archived copies (e.g. revision-context/<old>/main.py) do not run; their
+    # same-named functions must not shadow the code that does.
+    from researchclaw.pipeline.candidate import is_archived
+    files = {name: source for name, source in files.items() if not is_archived(Path(name))}
     try:
         plan = yaml.safe_load(plan_text) or {}
     except yaml.YAMLError:
