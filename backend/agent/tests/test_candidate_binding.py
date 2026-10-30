@@ -360,3 +360,56 @@ def test_s12_measured_block_goes_to_design_without_repair(tmp_path, monkeypatch)
 
     assert result.status == StageStatus.FAILED and result.decision == "revise_design"
     assert repairs == []
+
+
+def _workspace_report(run_dir: Path, name: str, relative: str, data: dict, mtime: float) -> Path:
+    workspace = run_dir / "stage-14" / name
+    path = workspace / "outputs" / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data), encoding="utf-8")
+    import os
+    os.utime(workspace, (mtime, mtime))
+    return path
+
+
+def test_design_failure_carries_the_failed_candidates_measured_values(tmp_path, stage_runner):
+    # Seen on the server: S9 only got "D2_connectivity_texture: FAIL", not that
+    # attention had collapsed onto itself (R ~1e-6), and redesigned the same mechanism.
+    from researchclaw.pipeline.acceptance import registered_context
+    run, _ = stage_runner
+    _through_s12(tmp_path)
+    _checkpoint(tmp_path, 13)
+    _workspace_report(tmp_path, "run_workspace_1", "full/scientific_measurements.json",
+                      {"aggregate": {"rectangle": {"R": [0.9]}}}, 1000)
+    _workspace_report(tmp_path, "run_workspace_2", "full/scientific_measurements.json",
+                      {"status": "FAIL", "aggregate": {"rectangle": {"R": [1e-6, 3e-6]}},
+                       "gate_results": {"rectangle": {"R": False}},
+                       "branch_head": {"0": {"T": [0.9]}, "1": {"T": [0.8]}}}, 2000)
+    _workspace_report(tmp_path, "run_workspace_2", "full/engineering.json", {"gradient_norm": 0.5}, 2000)
+
+    run(Stage.EXPERIMENT_RUN, decision="revise_design", error=_BLOCKED)
+
+    record = json.loads((tmp_path / "revision-context" / candidate.DESIGN_FAILURES).read_text(encoding="utf-8"))
+    values = record["failures"][0]["measured_values"]
+    assert "aggregate.rectangle.R: n=2 min=1e-06 max=3e-06" in values
+    assert "gate_results.rectangle.R: 0/1 true" in values and "status: FAIL" in values
+    assert "branch_head.T: n=2 min=0.8 max=0.9" in values
+    assert "aggregate.rectangle.R: 0.9" not in values and "gradient_norm" not in values
+    assert "aggregate.rectangle.R: n=2 min=1e-06" in registered_context(tmp_path)
+
+
+def test_failure_history_has_its_own_budget_and_never_truncates_the_protocol(tmp_path):
+    from researchclaw.pipeline.acceptance import registered_context
+    context = tmp_path / "revision-context"
+    context.mkdir()
+    (context / "FIXED_PROTOCOL.yaml").write_text("gate: x\n" + "#" * 59000 + "\nlast: kept\n", encoding="utf-8")
+    failures = [{"candidate_id": f"cand-{n}", "stage": 14, "measured_failure": f"gates failed {n}",
+                 "measured_values": f"values of {n}\n" + "v" * 3000} for n in range(3)]
+    (context / candidate.DESIGN_FAILURES).write_text(json.dumps({"failures": failures}), encoding="utf-8")
+
+    text = registered_context(tmp_path)
+
+    assert "last: kept" in text
+    assert text.index("cand-2") < text.index("cand-1") < text.index("cand-0")
+    assert "values of 2" in text and "values of 1" in text and "values of 0" not in text
+    assert "gates failed 0" in text and "measured values omitted for space" in text

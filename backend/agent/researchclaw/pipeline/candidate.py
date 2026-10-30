@@ -254,6 +254,81 @@ def rewind_checkpoint(run_dir: Path, rerun: int, reason: str = "") -> None:
     tmp.replace(path)
 
 
+# Reports whose numbers explain a scientific failure (not engineering logs).
+_MEASUREMENT_NAMES = ("scientific", "measurement", "failure", "readiness", "gate")
+_MEASUREMENT_FILE_LIMIT = 5_000_000
+MEASUREMENT_SUMMARY_CHARS = 3000
+
+
+def _numeric_groups(value: Any, path: tuple[str, ...], groups: dict[str, list]) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            # Per-branch/per-image keys ("0", "1", ...) are pooled like list items.
+            _numeric_groups(item, path if str(key).isdigit() else (*path, str(key)), groups)
+    elif isinstance(value, list):
+        for item in value:
+            _numeric_groups(item, path, groups)
+    elif isinstance(value, bool) or (isinstance(value, (int, float)) and value == value):
+        groups.setdefault(".".join(path), []).append(value)
+    elif isinstance(value, str) and path and path[-1] in ("status", "reason", "error"):
+        groups.setdefault(".".join(path), []).append(value[:120])
+
+
+def _describe(values: list) -> str:
+    if all(isinstance(v, bool) for v in values):
+        return f"{sum(values)}/{len(values)} true"
+    numbers = [float(v) for v in values if not isinstance(v, (bool, str))]
+    if not numbers:
+        return ", ".join(sorted({v for v in values if isinstance(v, str)})[:3])
+    if len(numbers) == 1:
+        return f"{numbers[0]:.4g}"
+    return (f"n={len(numbers)} min={min(numbers):.4g} max={max(numbers):.4g} "
+            f"mean={sum(numbers) / len(numbers):.4g}")
+
+
+def measured_values(run_dir: Path, stage: int, *, limit: int = MEASUREMENT_SUMMARY_CHARS) -> str:
+    """Summarise the numbers measured by the failed candidate's newest workspace.
+
+    The gate verdict alone ("D2 FAIL") does not tell S9 how the design failed
+    (e.g. attention collapsing onto itself versus being too weak), so the next
+    design repeats the same mechanism. Values are pooled per metric path
+    (count/min/max/mean), shallow paths first, within a fixed size.
+    """
+    pattern = {12: "stage-12/sanity_workspace_*", 14: "stage-14/run_workspace_*"}.get(stage)
+    if pattern is None:
+        return ""
+    workspaces = [path for path in run_dir.glob(pattern) if path.is_dir()]
+    if not workspaces:
+        return ""
+    outputs = max(workspaces, key=lambda path: path.stat().st_mtime) / "outputs"
+    if not outputs.is_dir():
+        return ""
+    reports = sorted((path for path in outputs.rglob("*.json") if path.is_file()
+                      and any(name in path.name.lower() for name in _MEASUREMENT_NAMES)
+                      and path.stat().st_size <= _MEASUREMENT_FILE_LIMIT),
+                     key=lambda path: path.stat().st_mtime, reverse=True)
+    lines, seen = [], set()
+    for report in reports:
+        data = report.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        try:
+            value = json.loads(data)
+        except ValueError:
+            continue
+        groups: dict[str, list] = {}
+        _numeric_groups(value, (), groups)
+        if not groups:
+            continue
+        lines.append(f"{report.relative_to(outputs).as_posix()}:")
+        lines.extend(f"  {key or '(value)'}: {_describe(values)}"
+                     for key, values in sorted(groups.items(), key=lambda item: (item[0].count("."), item[0])))
+    text = "\n".join(lines)
+    return text if len(text) <= limit else text[:limit].rsplit("\n", 1)[0] + "\n  ... (truncated)"
+
+
 def return_to_design(run_dir: Path, stage: int, error: str) -> str:
     """Send a design failure measured by S11-S14 back to S9.
 
@@ -272,8 +347,12 @@ def return_to_design(run_dir: Path, stage: int, error: str) -> str:
         candidate_id = current(run_dir)["candidate_id"]
     except CandidateError:
         candidate_id = None
-    failures.append({"candidate_id": candidate_id, "stage": stage, "measured_failure": error[:6000],
-                     "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")})
+    entry = {"candidate_id": candidate_id, "stage": stage, "measured_failure": error[:6000],
+             "recorded_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}
+    measurements = measured_values(run_dir, stage)
+    if measurements:
+        entry["measured_values"] = measurements
+    failures.append(entry)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps({
