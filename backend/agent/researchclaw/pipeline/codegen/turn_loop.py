@@ -751,6 +751,13 @@ class ClawTurnLoop:
                     result.append(str(rel))
         return result
 
+    def _experiment_source(self) -> str:
+        """Generated Python modules only, excluding reports and rejected drafts."""
+        return "\n\n".join(source for name, source in self._collect_workspace_files().items()
+                           if name.endswith('.py') and not any(
+                               part in ('outputs', 'repair_backup', 'revision-context')
+                               for part in name.replace('\\', '/').split('/')[:-1]))
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -764,7 +771,9 @@ class ClawTurnLoop:
         if not main_py.exists():
             return None
 
-        code = main_py.read_text(encoding="utf-8")
+        # Generated experiments can be multi-file. Do not demand that every
+        # model, loss and checker be duplicated in the thin main.py entrypoint.
+        code = self._experiment_source()
         lines = code.splitlines()
         violations: list[str] = []
 
@@ -870,7 +879,7 @@ class ClawTurnLoop:
         if not main_py.exists() or not self._exp_plan:
             return []
 
-        code = main_py.read_text(encoding="utf-8")
+        code = self._experiment_source()
         plan = self._exp_plan.lower()
         violations: list[str] = []
 
@@ -982,21 +991,18 @@ class ClawTurnLoop:
                 return patterns[normalized]
             return (re.escape(normalized),)
 
-        # Extract method names from plan (look for method definitions in YAML)
-        plan_methods = set()
-        for match in re.finditer(r'^\s{2}(\w+):\s*$', self._exp_plan, re.MULTILINE):
-            name = match.group(1)
-            if name not in (
-                "name", "source", "path", "format", "description", "algorithm",
-                "trainable_params", "notes", "class", "architecture",
-                "lora_target_modules",
-            ):
-                plan_methods.add(name)
+        # Only explicit condition sections define legacy condition IDs. YAML
+        # indentation also covers coordinates, datasets, losses, publication,
+        # etc.; those are not extra experimental conditions or helper names.
+        # baselines/proposed_methods have explicit implementation_spec contracts
+        # checked below, rather than guessed functions from display titles.
+        plan_methods = {name for section in ('methods', 'conditions')
+                        for name, _ in _iter_named_entries(section)}
 
         # Check each plan method has a corresponding function in code
         for method in plan_methods:
             # Look for def method_name or def run_method_name etc
-            if method not in code.lower().replace("-", "_"):
+            if method.lower().replace('-', '_') not in code.lower().replace("-", "_"):
                 violations.append(
                     f"MISSING CONDITION: Plan defines '{method}' but no matching "
                     f"function found in code. You must implement ALL conditions from the plan."
@@ -1079,11 +1085,14 @@ class ClawTurnLoop:
                 break
 
         # 2g. Detect outputs that claim methods were implemented without being executed.
-        planned_method_names = set(re.findall(r"name:\s*([A-Za-z0-9_]+)", plan))
+        planned_method_names = plan_methods
         if planned_method_names:
             executed_methods: set[str] = set()
             for method_name in planned_method_names:
-                if f'condition == "{method_name}"' in code or f"condition == '{method_name}'" in code:
+                symbol = re.sub(r'\W+', '_', method_name)
+                if _symbol_is_called(symbol):
+                    executed_methods.add(method_name)
+                elif f'condition == "{method_name}"' in code or f"condition == '{method_name}'" in code:
                     executed_methods.add(method_name)
                 elif f'"{method_name}"' in code and "conditions = [" in code:
                     list_pos = code.find("conditions = [")
