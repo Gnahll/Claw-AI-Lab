@@ -95,6 +95,11 @@ def current(run_dir: Path) -> dict[str, Any]:
     return record
 
 
+def is_archived(rel: Path) -> bool:
+    """Copies kept for reference (revision-context, outputs, ...), not code that runs."""
+    return any(part.startswith(".") or part in _SKIP_PARTS for part in rel.parts[:-1])
+
+
 def code_manifest(experiment_dir: Path) -> dict[str, str]:
     files: dict[str, str] = {}
     if not experiment_dir.is_dir():
@@ -102,7 +107,7 @@ def code_manifest(experiment_dir: Path) -> dict[str, str]:
     for path in sorted(experiment_dir.rglob("*")):
         rel = path.relative_to(experiment_dir)
         if (path.suffix not in _CODE_SUFFIXES or path.is_symlink() or not path.is_file()
-                or any(part.startswith(".") or part in _SKIP_PARTS for part in rel.parts[:-1])):
+                or is_archived(rel)):
             continue
         files[rel.as_posix()] = _sha256(path)
     return files

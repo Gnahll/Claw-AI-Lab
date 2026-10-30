@@ -112,6 +112,18 @@ def test_training_reachability_does_not_start_from_an_unused_helper_module():
     assert declared_interface_gaps(files, '{}', require_training=True)
 
 
+def test_archived_copies_do_not_shadow_the_code_that_runs():
+    # Seen on the server: S11 kept earlier versions under revision-context/;
+    # their run_full_training (no update) replaced the real one in the call graph.
+    files = {'main.py': 'from training_impl import run_full_training\nrun_full_training()',
+             'training_impl.py': 'def run_full_training():\n    optimizer.step()',
+             'revision-context/repair_old/training_impl.py': 'def run_full_training():\n    return audit()',
+             'revision-context/repair_old/main.py': 'print("old audit")'}
+    assert declared_interface_gaps(files, '{}', require_training=True) == []
+    del files['training_impl.py']
+    assert declared_interface_gaps(files, '{}', require_training=True)
+
+
 def test_inference_tasks_do_not_require_optimizer_or_trainer():
     assert declared_interface_gaps({'main.py': 'model.predict(data)'}, '{}') == []
 
