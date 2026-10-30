@@ -237,6 +237,8 @@ class ExperimentRunRuntime:
             status=StageStatus.DONE if success else StageStatus.FAILED,
             artifacts=("runs/",),
             error=None if success else "; ".join(verified_run["errors"]),
+            decision="proceed" if success or verified_run.get("failure_type") != "pretraining_blocked"
+            else "revise_design",
             evidence_refs=("runs/",),
         )
 

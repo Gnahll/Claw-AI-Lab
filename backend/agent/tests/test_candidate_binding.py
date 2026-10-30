@@ -153,10 +153,11 @@ def stage_runner(tmp_path, monkeypatch):
     cfg = RCConfig.from_dict(_valid_config_data(), project_root=tmp_path, check_paths=False)
     calls = []
 
-    def run(stage):
+    def run(stage, **fields):
         def fake(stage_dir, run_dir, config, adapters, **kwargs):
             calls.append(stage)
-            return executor.StageResult(stage=stage, status=StageStatus.FAILED, error="fixture boundary")
+            return executor.StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(),
+                                        **{"error": "fixture boundary", **fields})
         monkeypatch.setitem(executor._STAGE_EXECUTORS, stage, fake)
         return executor.execute_stage(stage, run_dir=tmp_path, run_id="candidate-test", config=cfg,
                                       adapters=AdapterBundle(), auto_approve_gates=True)
@@ -287,3 +288,75 @@ def test_new_candidate_gets_no_legacy_adoption(tmp_path):
     candidate.record_completion(tmp_path, 9, True)
     assert "S12 has no completed result" in candidate.handoff_errors(tmp_path, 14)[0]
     assert not candidate.same_candidate_workspace(tmp_path, old)
+
+
+_BLOCKED = ("Smoke test did not pass: Pretraining acceptance blocked: H2_failed; "
+            "checks={\"H2\": \"FAIL\"}. Revise the experiment design; mandatory gates were not changed.")
+
+
+def test_measured_design_failure_returns_to_s9_with_conclusion(tmp_path, stage_runner):
+    from researchclaw.pipeline.acceptance import registered_context
+    run, calls = stage_runner
+    _through_s12(tmp_path)
+    _checkpoint(tmp_path, 11)
+    cand = candidate.current(tmp_path)["candidate_id"]
+
+    result = run(Stage.SANITY_CHECK, decision="revise_design", error=_BLOCKED)
+
+    assert calls == [Stage.SANITY_CHECK] and "resume restarts at S9" in result.error
+    assert _last_completed(tmp_path) == 8
+    record = json.loads((tmp_path / "revision-context" / candidate.DESIGN_FAILURES).read_text(encoding="utf-8"))
+    assert record["failures"] == [{**record["failures"][0], "candidate_id": cand, "stage": 12,
+                                   "measured_failure": _BLOCKED}]
+    # S9 reads the measured conclusion; S11 does not get it as current evidence.
+    assert "H2_failed" in registered_context(tmp_path)
+    assert candidate.DESIGN_FAILURES in candidate.history_context(tmp_path)
+
+
+def test_engineering_failure_still_retries_the_same_stage(tmp_path, stage_runner):
+    run, _ = stage_runner
+    _through_s12(tmp_path)
+    _checkpoint(tmp_path, 11)
+
+    result = run(Stage.SANITY_CHECK, decision="retry", error="Smoke test did not pass: CUDA error")
+
+    assert "S9" not in result.error and _last_completed(tmp_path) == 11
+    assert not (tmp_path / "revision-context" / candidate.DESIGN_FAILURES).exists()
+
+
+def test_automatic_redesign_is_bounded(tmp_path, stage_runner):
+    run, _ = stage_runner
+    _through_s12(tmp_path)
+    for _ in range(candidate.MAX_DESIGN_REVISIONS):
+        _checkpoint(tmp_path, 13)
+        run(Stage.EXPERIMENT_RUN, decision="revise_design", error=_BLOCKED)
+        assert _last_completed(tmp_path) == 8
+        _through_s12(tmp_path)
+    _checkpoint(tmp_path, 13)
+
+    result = run(Stage.EXPERIMENT_RUN, decision="revise_design", error=_BLOCKED)
+
+    assert "a person must review the design" in result.error and _last_completed(tmp_path) == 13
+
+
+def test_s12_measured_block_goes_to_design_without_repair(tmp_path, monkeypatch):
+    from researchclaw.pipeline.sanity_check import runtime as rt
+    cfg = RCConfig.from_dict(_valid_config_data(), project_root=tmp_path, check_paths=False)
+    _code(tmp_path)
+    repairs = []
+
+    def blocked_smoke(workspace, output_dir, config, plan_text):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for name in ("execution.log", "execution_report.json"):
+            (output_dir / name).write_text("{}", encoding="utf-8")
+        return {"success": False, "failure_type": "pretraining_blocked", "errors": [_BLOCKED]}
+
+    monkeypatch.setattr(rt, "_run_checked_smoke", blocked_smoke)
+    monkeypatch.setattr(rt.SanityCheckRuntime, "_resolve_coding_llm",
+                        staticmethod(lambda llm, config: SimpleNamespace(config=SimpleNamespace(primary_model="m"))))
+    monkeypatch.setattr(rt, "AgentTurnLoop", lambda **kwargs: SimpleNamespace(run_turn=repairs.append))
+
+    result = rt.SanityCheckRuntime().execute(tmp_path / "stage-12", tmp_path, cfg, AdapterBundle())
+
+    assert result.status == StageStatus.FAILED and result.decision == "revise_design"
+    assert repairs == []

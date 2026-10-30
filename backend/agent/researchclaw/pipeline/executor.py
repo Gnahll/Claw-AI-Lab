@@ -7,7 +7,7 @@ import math
 import os
 import re
 import time as _time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace as _dc_replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -11063,6 +11063,16 @@ def execute_stage(
                         evidence_refs=result.evidence_refs,
                     )
                     break
+
+    # A design problem measured downstream of S9 is not fixed by rerunning the
+    # same stage: record it for S9 and resume from S9.
+    if (int(stage) in (11, 12, 14) and result.status == StageStatus.FAILED
+            and result.decision == "revise_design"):
+        try:
+            _note = _candidate.return_to_design(run_dir, int(stage), result.error or "")
+        except OSError as exc:
+            _note = f"could not record design failure: {exc}"
+        result = _dc_replace(result, error=f"{result.error}; {_note}")
 
     try:
         _candidate.record_completion(run_dir, int(stage), result.status == StageStatus.DONE)

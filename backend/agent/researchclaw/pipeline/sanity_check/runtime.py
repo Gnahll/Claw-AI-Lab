@@ -179,7 +179,12 @@ class SanityCheckRuntime:
         measured_smoke = _run_checked_smoke(workspace, attempt_dir, config, plan_text)
         attempts = [measured_smoke]
         turn_result = TurnResult()
-        if not measured_smoke["success"]:
+        blocked = measured_smoke.get("failure_type") == "pretraining_blocked"
+        if blocked:
+            # The candidate's own acceptance checks failed on measured data:
+            # a design result, not a bug for the repair agent to work around.
+            session.log("EXECUTE", "Acceptance checks blocked training; no repair, returning to design")
+        if not measured_smoke["success"] and not blocked:
             failure_log = (attempt_dir / "execution.log").read_text(encoding="utf-8", errors="replace")[-12000:]
             session.log("REPAIR", "Supervised smoke failed; sending measured errors to the repair agent")
             turn_result = loop.run_turn(
@@ -199,6 +204,7 @@ class SanityCheckRuntime:
         for filename in ("execution.log", "execution_report.json"):
             shutil.copy2(attempt_dir / filename, evidence_dir / filename)
         success = measured_smoke["success"]
+        blocked = not success and measured_smoke.get("failure_type") == "pretraining_blocked"
         fixed_count = self._copy_fixes_back(workspace, experiment_dir, session) if success else 0
         session.log(
             "RESULT",
@@ -230,7 +236,7 @@ class SanityCheckRuntime:
             status=StageStatus.DONE if success else StageStatus.FAILED,
             artifacts=("sanity_report.json",),
             error=None if success else "Smoke test did not pass: " + "; ".join(measured_smoke["errors"]),
-            decision="proceed" if success else "retry",
+            decision="proceed" if success else "revise_design" if blocked else "retry",
             evidence_refs=("experiment/",),
         )
 

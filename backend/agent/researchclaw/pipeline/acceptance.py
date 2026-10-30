@@ -66,7 +66,7 @@ def requirement_text(config: Any, run_dir: Path) -> str:
 def registered_context(run_dir: Path, *, max_chars: int = 60000) -> str:
     """Read authoritative definitions for plain-chat S9; never truncate requirements."""
     parts = []
-    for name in ("FIXED_PROTOCOL.yaml", "scientific_readiness.json"):
+    for name in ("FIXED_PROTOCOL.yaml", "scientific_readiness.json", "MEASURED_DESIGN_FAILURES.json"):
         path = run_dir / "revision-context" / name
         if path.is_file():
             data = path.read_bytes()
