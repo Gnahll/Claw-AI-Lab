@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from researchclaw.config import RCConfig
-from researchclaw.pipeline import executor
+from researchclaw.pipeline import candidate, executor
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.adapters import AdapterBundle
 from .test_rc_config import _valid_config_data
@@ -49,6 +49,8 @@ def test_details_reach_stages_and_resume_without_mutating_original(tmp_path, mon
         return executor.StageResult(stage=stage, status=StageStatus.FAILED, error='fixture boundary')
     monkeypatch.setitem(executor._STAGE_EXECUTORS, stage, capture)
     monkeypatch.setattr(executor, '_read_prior_artifact', lambda *args: 'fixture input')
+    # Candidate handoff has its own tests; this one checks only the topic text.
+    monkeypatch.setattr(candidate, 'handoff_errors', lambda *args: [])
     monkeypatch.setattr(executor.LLMClient, 'from_rc_config', lambda *args: SimpleNamespace(
         config=SimpleNamespace(base_url='', api_key='')))
     for _ in range(2):

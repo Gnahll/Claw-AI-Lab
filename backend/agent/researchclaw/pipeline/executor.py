@@ -10971,6 +10971,22 @@ def execute_stage(
                 _write_stage_meta(stage_dir, stage, run_id, result)
                 return result
 
+    # S10-S14 run on one frozen candidate: no unfinished plan, and no code or
+    # report inherited from another candidate or from unchecked code.
+    from researchclaw.pipeline import candidate as _candidate
+    _handoff = _candidate.handoff_errors(run_dir, int(stage))
+    if _handoff:
+        _rerun = _candidate.rerun_stage(run_dir, int(stage))
+        if _rerun is not None:
+            _candidate.rewind_checkpoint(run_dir, _rerun)
+            _handoff.append(f"resume restarts at S{_rerun}")
+        result = StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(),
+                             error="Candidate handoff rejected: " + "; ".join(_handoff),
+                             decision="revise_design" if int(stage) in (10, 11) else "retry")
+        _candidate.record_completion(run_dir, int(stage), False)
+        _write_stage_meta(stage_dir, stage, run_id, result)
+        return result
+
     bridge = config.openclaw_bridge
     if bridge.use_message and config.notifications.on_stage_start:
         adapters.message.notify(
@@ -11047,6 +11063,13 @@ def execute_stage(
                         evidence_refs=result.evidence_refs,
                     )
                     break
+
+    try:
+        _candidate.record_completion(run_dir, int(stage), result.status == StageStatus.DONE)
+    except _candidate.CandidateError as exc:
+        result = StageResult(stage=stage, status=StageStatus.FAILED, artifacts=result.artifacts,
+                             error=f"Candidate binding failed: {exc}", decision="retry",
+                             evidence_refs=result.evidence_refs)
 
     # --- MetaClaw PRM quality gate evaluation ---
     try:
