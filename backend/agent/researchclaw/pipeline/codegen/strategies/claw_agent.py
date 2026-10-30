@@ -124,7 +124,8 @@ class ClawAgentStrategy:
         session.log(CodegenPhase.GENERATE, "Starting turn loop...")
         turn_result = loop.run_turn(user_message)
         from researchclaw.pipeline.codegen.readiness import declared_interface_gaps
-        gaps = declared_interface_gaps(turn_result.files, ctx.exp_plan)
+        require_training = bool(getattr(config.experiment, "require_training", False))
+        gaps = declared_interface_gaps(turn_result.files, ctx.exp_plan, require_training=require_training)
         if gaps and not turn_result.errors:
             session.log(CodegenPhase.GENERATE, "Implementation incomplete; requesting one targeted repair: " + "; ".join(gaps))
             repaired = loop.run_turn(
@@ -144,7 +145,7 @@ class ClawAgentStrategy:
             repaired.tool_calls += turn_result.tool_calls
             repaired.elapsed_sec += turn_result.elapsed_sec
             turn_result = repaired
-            gaps = declared_interface_gaps(turn_result.files, ctx.exp_plan)
+            gaps = declared_interface_gaps(turn_result.files, ctx.exp_plan, require_training=require_training)
 
         elapsed = time.monotonic() - t0
 

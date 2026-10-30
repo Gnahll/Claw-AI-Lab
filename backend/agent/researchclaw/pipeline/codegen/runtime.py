@@ -517,7 +517,8 @@ class CodegenRuntime:
         session.log(CodegenPhase.GENERATE, f"Wrote {len(files)} files to {exp_dir}")
 
         from researchclaw.pipeline.codegen.readiness import declared_interface_gaps
-        implementation_errors = declared_interface_gaps(files, ctx.exp_plan)
+        implementation_errors = declared_interface_gaps(files, ctx.exp_plan,
+            require_training=bool(getattr(config.experiment, "require_training", False)))
         if result.error:
             implementation_errors.insert(0, result.error)
         report = stage_dir / "implementation_readiness.json"

@@ -36,7 +36,8 @@ def _run_checked_smoke(workspace: Path, output_dir: Path, config: RCConfig, plan
              for p in workspace.rglob("*.py") if not p.is_symlink()
              and not any(part.startswith('.') or part in ('outputs', '__pycache__')
                          for part in p.relative_to(workspace).parts)}
-    gaps = declared_interface_gaps(files, plan_text)
+    gaps = declared_interface_gaps(files, plan_text,
+        require_training=bool(getattr(getattr(config, "experiment", None), "require_training", False)))
     if not gaps:
         return run_experiment(workspace, output_dir, config, smoke=True, timeout=180)
     report = {"success": False, "smoke": True, "require_training": False,
