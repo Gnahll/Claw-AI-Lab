@@ -6,6 +6,81 @@ import re
 import yaml
 
 
+def _has_training_entrypoint(files: dict[str, str]) -> bool:
+    """Conservative call reachability, not proof of completed training.
+
+    Recognize explicit optimizer updates and common delegated trainer APIs.
+    A train function that is defined but never called does not satisfy this.
+    Runtime observation remains authoritative for actual updates and budgets.
+    """
+    functions: dict[str, ast.AST] = {}
+    imports: dict[str, str] = {}
+    modules: dict[str, ast.Module] = {}
+    for name, source in files.items():
+        if not name.endswith('.py'):
+            continue
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            continue
+        modules[name] = tree
+        for n in tree.body:
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                functions[n.name] = n
+            elif isinstance(n, ast.ImportFrom):
+                for a in n.names:
+                    imports[a.asname or a.name] = f'{n.module}.{a.name}'.lower()
+            elif isinstance(n, ast.Import):
+                for a in n.names:
+                    imports[a.asname or a.name] = a.name.lower()
+
+    class Calls(ast.NodeVisitor):
+        def __init__(self):
+            self.names: set[str] = set()
+            self.training = False
+
+        def visit_FunctionDef(self, node): pass
+        def visit_AsyncFunctionDef(self, node): pass
+        def visit_ClassDef(self, node): pass
+
+        def visit_Call(self, node):
+            if isinstance(node.func, ast.Name):
+                self.names.add(node.func.id)
+                # A reusable author training routine is an opaque delegation;
+                # it is not grounds to reject an otherwise valid wrapper.
+                origin = imports.get(node.func.id, '')
+                if re.search(r'(?:^|\.)(?:train(?:ing|er|_[a-z0-9_]+)?)(?:$|\.)', origin) and node.func.id not in functions:
+                    self.training = True
+            elif isinstance(node.func, ast.Attribute):
+                if node.func.attr in ('step', 'fit', 'train_one_epoch'):
+                    self.training = True
+                elif isinstance(node.func.value, ast.Name):
+                    origin = imports.get(node.func.value.id, '')
+                    if re.search(r'(?:^|\.)(?:train(?:ing|er|_[a-z0-9_]+)?)(?:$|\.)', origin) and node.func.attr in ('main', 'run', 'train'):
+                        self.training = True
+                    if node.func.value.id == 'trainer' and node.func.attr == 'train':
+                        self.training = True
+                    if origin == 'subprocess' and node.func.attr in ('run', 'Popen', 'check_call', 'check_output'):
+                        self.training |= any(isinstance(n, ast.Constant) and isinstance(n.value, str)
+                                             and 'train' in n.value.lower() for n in ast.walk(node))
+            self.generic_visit(node)
+
+    pending: list[ast.AST] = [modules['main.py']] if 'main.py' in modules else list(modules.values())
+    seen: set[int] = set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        calls = Calls()
+        for statement in node.body:
+            calls.visit(statement)
+        if calls.training:
+            return True
+        pending.extend(functions[name] for name in calls.names if name in functions)
+    return False
+
+
 def _placeholder_reason(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
     body = [s for s in node.body if not (
         isinstance(s, ast.Expr) and isinstance(s.value, ast.Constant)
@@ -62,7 +137,7 @@ def _placeholder_reason(node: ast.FunctionDef | ast.AsyncFunctionDef) -> str | N
     return None
 
 
-def declared_interface_gaps(files: dict[str, str], plan_text: str) -> list[str]:
+def declared_interface_gaps(files: dict[str, str], plan_text: str, *, require_training: bool = False) -> list[str]:
     """Honor named helper contracts; an audit script is not their implementation.
 
     This is a structural handoff check, not proof of algorithm correctness,
@@ -105,6 +180,10 @@ def declared_interface_gaps(files: dict[str, str], plan_text: str) -> list[str]:
                     placeholders[node.name] = reason
             elif isinstance(node, ast.ImportFrom):
                 implemented.update(alias.asname or alias.name for alias in node.names)
-    return [f"Missing declared implementation helper: {name}"
+    gaps = [f"Missing declared implementation helper: {name}"
             + (f" ({placeholders[name]})" if name in placeholders else "")
             for name in sorted(required - implemented)]
+    if require_training and not _has_training_entrypoint(files):
+        gaps.append('No reachable training entrypoint: implement the default full-training path; '
+                    'a smoke backward, audit-only main or unused training function is insufficient')
+    return gaps

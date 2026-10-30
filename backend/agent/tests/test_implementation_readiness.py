@@ -84,6 +84,38 @@ def test_s12_keeps_measured_smoke_execution_for_real_implementation(tmp_path, mo
                              'checks: [{required_helpers: [score_H2]}]')['measured']
 
 
+@pytest.mark.parametrize('source', [
+    'def main(): print("audit only")\nmain()',
+    'def train(): optimizer.step()\ndef main(): print("blocked")\nmain()',
+    'def smoke(): loss.backward()\ndef main(): smoke()\nmain()',
+    'from pretrained import load_model\nload_model()',
+])
+def test_training_task_rejects_no_update_path_even_with_named_train_function(source):
+    errors = declared_interface_gaps({'main.py': source}, '{}', require_training=True)
+    assert len(errors) == 1 and 'No reachable training entrypoint' in errors[0]
+
+
+@pytest.mark.parametrize('source', [
+    'def train(): optimizer.step()\ndef main(): train()\nmain()',
+    'trainer.fit(model, data)',
+    'trainer.train()',
+    'from author.train import main as train_author\ntrain_author()',
+    'import author.training as engine\nengine.run()',
+    'import subprocess\nsubprocess.run(["python", "author_train.py"])',
+])
+def test_training_task_accepts_reachable_updates_or_author_training_delegation(source):
+    assert declared_interface_gaps({'main.py': source}, '{}', require_training=True) == []
+
+
+def test_training_reachability_does_not_start_from_an_unused_helper_module():
+    files = {'main.py': 'print("audit")', 'unused.py': 'optimizer.step()'}
+    assert declared_interface_gaps(files, '{}', require_training=True)
+
+
+def test_inference_tasks_do_not_require_optimizer_or_trainer():
+    assert declared_interface_gaps({'main.py': 'model.predict(data)'}, '{}') == []
+
+
 def test_resource_blocker_records_current_gpu_and_never_starts_code(tmp_path, monkeypatch):
     from researchclaw.training import resources
     from researchclaw.pipeline.stages import Stage, StageStatus
