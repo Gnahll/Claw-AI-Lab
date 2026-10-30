@@ -164,6 +164,28 @@ def binding(run_dir: Path, stage: int) -> dict[str, Any] | None:
     return _read_json(run_dir / f"stage-{stage:02d}" / BINDING_FILE)
 
 
+def _adopt_legacy_binding(run_dir: Path, stage: int, record: dict[str, Any]) -> dict[str, Any] | None:
+    """Bind a stage that completed before bindings existed.
+
+    Only for a legacy candidate (a run that predates candidates), whose
+    completed stages cannot be verified after the fact and are adopted as they
+    are. The code is recorded as it is now; from here on S14 requires exactly
+    the code S12 checked. A newly frozen candidate never takes this path.
+    """
+    if not record.get("legacy"):
+        return None
+    if (_read_json(run_dir / f"stage-{stage:02d}" / "decision.json") or {}).get("status") != "done":
+        return None
+    if stage in _UPSTREAM:
+        upstream = _UPSTREAM[stage][0]
+        if (binding(run_dir, upstream) or _adopt_legacy_binding(run_dir, upstream, record)) is None:
+            return None
+    result = bind(run_dir, stage)
+    result["legacy"] = True
+    (run_dir / f"stage-{stage:02d}" / BINDING_FILE).write_text(json.dumps(result, indent=2), encoding="utf-8")
+    return result
+
+
 def handoff_errors(run_dir: Path, stage: int) -> list[str]:
     """Why ``stage`` must not start on the current plan, code and reports."""
     if not 10 <= stage <= 14:
@@ -175,7 +197,7 @@ def handoff_errors(run_dir: Path, stage: int) -> list[str]:
     if stage not in _UPSTREAM:
         return []
     upstream, same_code = _UPSTREAM[stage]
-    bound = binding(run_dir, upstream)
+    bound = binding(run_dir, upstream) or _adopt_legacy_binding(run_dir, upstream, record)
     if bound is None:
         return [f"S{upstream} has no completed result for candidate {record['candidate_id']}; rerun S{upstream}"]
     if bound.get("candidate_id") != record["candidate_id"] or bound.get("plan_sha256") != record["plan_sha256"]:
@@ -255,7 +277,11 @@ def same_candidate_workspace(run_dir: Path, workspace: Path) -> bool:
     so the code hash is recorded for audit but does not block resuming.
     """
     try:
-        candidate_id = current(run_dir)["candidate_id"]
+        record = current(run_dir)
     except CandidateError:
         return False
-    return (_read_json(workspace / WORKSPACE_STAMP) or {}).get("candidate_id") == candidate_id
+    stamp = _read_json(workspace / WORKSPACE_STAMP)
+    if stamp is None:
+        # Workspaces from before stamping belong to the adopted legacy plan.
+        return bool(record.get("legacy"))
+    return stamp.get("candidate_id") == record["candidate_id"]

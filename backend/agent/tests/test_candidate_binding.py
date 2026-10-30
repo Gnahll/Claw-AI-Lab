@@ -246,3 +246,44 @@ def test_unfinished_plan_rewinds_to_s9_and_never_moves_forward(tmp_path):
     _checkpoint(tmp_path, 7)
     candidate.rewind_checkpoint(tmp_path, 9)
     assert _last_completed(tmp_path) == 7
+
+
+def _legacy_run(run_dir: Path) -> Path:
+    """A run that reached S14 before candidates existed."""
+    _plan(run_dir)
+    _code(run_dir)
+    for stage in (9, 11, 12, 13):
+        (run_dir / f"stage-{stage:02d}").mkdir(exist_ok=True)
+        (run_dir / f"stage-{stage:02d}" / "decision.json").write_text(json.dumps({"status": "done"}), encoding="utf-8")
+    old = run_dir / "stage-14" / "run_workspace_1_1"
+    (old / "outputs").mkdir(parents=True)
+    (old / "outputs" / "checkpoint.pth").write_text("epoch 80", encoding="utf-8")
+    return old
+
+
+def test_legacy_run_resumes_training_instead_of_regenerating(tmp_path, stage_runner):
+    run, calls = stage_runner
+    old = _legacy_run(tmp_path)
+    _checkpoint(tmp_path, 13)
+
+    assert candidate.handoff_errors(tmp_path, 14) == []
+    assert candidate.binding(tmp_path, 11)["legacy"] and candidate.binding(tmp_path, 12)["legacy"]
+    assert candidate.same_candidate_workspace(tmp_path, old)
+    result = run(Stage.EXPERIMENT_RUN)
+    assert calls == [Stage.EXPERIMENT_RUN] and "handoff" not in (result.error or "")
+    assert _last_completed(tmp_path) == 13
+
+
+def test_legacy_adoption_requires_completed_stages(tmp_path):
+    _legacy_run(tmp_path)
+    (tmp_path / "stage-11" / "decision.json").write_text(json.dumps({"status": "failed"}), encoding="utf-8")
+    assert "S12 has no completed result" in candidate.handoff_errors(tmp_path, 14)[0]
+    assert candidate.rerun_stage(tmp_path, 14) == 11
+
+
+def test_new_candidate_gets_no_legacy_adoption(tmp_path):
+    old = _legacy_run(tmp_path)
+    _plan(tmp_path, "plan: redesigned\n")
+    candidate.record_completion(tmp_path, 9, True)
+    assert "S12 has no completed result" in candidate.handoff_errors(tmp_path, 14)[0]
+    assert not candidate.same_candidate_workspace(tmp_path, old)
