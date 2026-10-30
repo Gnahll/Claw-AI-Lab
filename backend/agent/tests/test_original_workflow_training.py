@@ -199,6 +199,47 @@ def test_watchdog_kills_a_run_that_never_uses_its_gpu(tmp_path, monkeypatch, sam
         assert "idle and unused" in result["errors"][0]
 
 
+@pytest.mark.parametrize("script,accepted", [
+    # Seen on the server: a resumable full data audit wrote its cache for 70 min before
+    # touching the GPU, and was killed at 30 min as idle; each retry restarted the stage.
+    ("for i in range(8):\n with open('outputs/audit.sqlite','a') as f: f.write('x'*100)\n time.sleep(0.5)\n", True),
+    ("open('outputs/audit.sqlite','w').write('x')\ntime.sleep(60)\n", False),   # stopped writing: a hang
+])
+def test_watchdog_allows_cpu_preparation_that_keeps_writing_before_training(tmp_path, monkeypatch,
+                                                                            script, accepted):
+    from researchclaw.training import execution
+
+    idle = {"utilization": 0.0, "memory_mib": 0.0, "process_memory_mib": 0.0, "process_on_gpu": False}
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", GPU_UUID)
+    monkeypatch.setattr(execution, "_gpu_sample", lambda uuid, pid: dict(idle))
+    (tmp_path / "outputs").mkdir()
+    (tmp_path / "main.py").write_text("import json,time\n" + script +
+                                      "open('results.json','w').write(json.dumps({'metric': 1.0}))\n")
+    result = run_experiment(tmp_path, tmp_path / "evidence", watched(stall=2, gpu_idle=2))
+    assert result["success"] == accepted, result
+    assert result["elapsed_sec"] < 15
+
+
+def test_output_growth_does_not_excuse_an_idle_gpu_once_training_started(tmp_path, monkeypatch):
+    from researchclaw.training import execution
+
+    idle = {"utilization": 0.0, "memory_mib": 0.0, "process_memory_mib": 0.0, "process_on_gpu": False}
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", GPU_UUID)
+    monkeypatch.setattr(execution, "_gpu_sample", lambda uuid, pid: dict(idle))
+    (tmp_path / "outputs").mkdir()
+    steps = tmp_path / "evidence" / "training_observation.jsonl"
+    (tmp_path / "main.py").write_text(
+        "import json,time,pathlib\n"
+        f"steps=pathlib.Path({str(steps)!r})\n"
+        "for i in range(12):\n"
+        " steps.open('a').write('{}\\n')\n"
+        " open('outputs/epoch.log','a').write('x')\n"
+        " time.sleep(0.5)\n"
+        "open('results.json','w').write(json.dumps({'metric': 1.0}))\n")
+    result = run_experiment(tmp_path, tmp_path / "evidence", watched(gpu_idle=2))
+    assert not result["success"] and "idle and unused" in result["errors"][0]
+
+
 GPU_UUID_2 = "GPU-66666666-7777-8888-9999-000000000000"
 
 

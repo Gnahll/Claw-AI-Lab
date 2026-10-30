@@ -73,6 +73,9 @@ per-GPU batch times WORLD_SIZE; report both. Only rank 0 evaluates or gathers re
 checkpoints (model.module.state_dict()), predictions and results.json; other ranks wait at
 dist.barrier() and must not write them. Every GPU must take part in training. When WORLD_SIZE
 is unset (smoke test, single GPU, CPU), run as one ordinary process with no process group.
+Long CPU-only preparation before the first optimizer step (e.g. a full data audit) must keep
+writing measurable progress under outputs/ (a resumable cache or a progress file); until training
+starts, that growth counts as progress and idle GPUs are not counted against it.
 """
 
 
@@ -140,7 +143,8 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
                                        start_new_session=os.name != "nt")
             report["pid"] = process.pid
             report["returncode"] = _supervise(process, max(1, budget), config.experiment, output_dir,
-                                              evidence_path.with_suffix(".jsonl"), report)
+                                              evidence_path.with_suffix(".jsonl"), report,
+                                              workspace / "outputs")
             # A deliberate, measured pretraining refusal commonly exits 1. Read
             # its fresh root report before replacing it with a generic exit code.
             if result_path.is_file() and not result_path.is_symlink():
@@ -280,12 +284,29 @@ def _gpu_sample(gpu_uuid, pid):
             "process_memory_mib": float(own[0][2]) if own else 0.0, "process_on_gpu": bool(own)}
 
 
-def _supervise(process, budget, experiment, output_dir, steps_path, report):
+def _outputs_marker(outputs: Path | None) -> tuple[int, int, int]:
+    """File count, bytes and newest mtime under outputs/, without following links."""
+    count = size = newest = 0
+    if outputs is None or not outputs.is_dir():
+        return count, size, newest
+    for root, dirs, names in os.walk(outputs):
+        for name in names:
+            try:
+                st = os.lstat(os.path.join(root, name))
+            except OSError:
+                continue
+            count, size, newest = count + 1, size + st.st_size, max(newest, st.st_mtime_ns)
+    return count, size, newest
+
+
+def _supervise(process, budget, experiment, output_dir, steps_path, report, outputs=None):
     """Wait for the experiment while checking that it is alive, progressing and using its GPU.
 
     Progress means new execution.log output or new optimizer steps. A hung run (deadlock,
     stuck data loader) or a run that silently never touches one of its allocated GPUs is
-    killed instead of occupying the budget.
+    killed instead of occupying the budget. Before the first optimizer step, growth under
+    outputs/ is progress too: a resumable CPU preparation (a full data audit) that keeps
+    writing is not a hang, so its idle GPUs are not counted until training starts.
     """
     stall_timeout = int(getattr(experiment, "stall_timeout_sec", 1800) or 0)
     gpu_timeout = int(getattr(experiment, "gpu_idle_timeout_sec", 1800) or 0)
@@ -294,7 +315,7 @@ def _supervise(process, budget, experiment, output_dir, steps_path, report):
     log_path = output_dir / "execution.log"
     start = last_progress = time.monotonic()
     gpu_last_used = dict.fromkeys(gpu_uuids, start)
-    last_marker = None
+    last_marker = last_outputs = None
     monitor = report["monitor"] = {"samples": 0, "gpu_seen": False, "max_steps": 0}
     with (output_dir / "training_monitor.jsonl").open("w", encoding="utf-8") as samples:
         while True:
@@ -313,16 +334,25 @@ def _supervise(process, budget, experiment, output_dir, steps_path, report):
             marker = (log_path.stat().st_size if log_path.is_file() else 0, steps)
             if marker != last_marker:
                 last_marker, last_progress = marker, now
+            preparing = False
+            if steps == 0:
+                written = _outputs_marker(outputs)
+                preparing = last_outputs is not None and written != last_outputs
+                last_outputs = written
+                if preparing:
+                    last_progress = now
             sample = {"elapsed_sec": round(now - start, 1), "alive": process.poll() is None,
                       "log_bytes": marker[0], "optimizer_steps": steps,
                       "since_progress_sec": round(now - last_progress, 1)}
+            if preparing:
+                sample["preparation_progress"] = True
             for gpu_uuid in gpu_uuids:
                 gpu = _gpu_sample(gpu_uuid, process.pid)
                 if len(gpu_uuids) == 1:
                     sample["gpu"] = gpu
                 else:
                     sample.setdefault("gpus", {})[gpu_uuid] = gpu
-                if "error" in gpu or gpu["process_on_gpu"] or gpu["utilization"] > 0:
+                if "error" in gpu or gpu["process_on_gpu"] or gpu["utilization"] > 0 or preparing:
                     gpu_last_used[gpu_uuid] = now  # Do not kill on a monitoring failure.
                 monitor["gpu_seen"] = monitor["gpu_seen"] or bool(gpu.get("process_on_gpu"))
             samples.write(json.dumps(sample) + "\n")
