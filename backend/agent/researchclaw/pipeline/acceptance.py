@@ -63,10 +63,15 @@ def requirement_text(config: Any, run_dir: Path) -> str:
     return text
 
 
-def registered_context(run_dir: Path, *, max_chars: int = 60000) -> str:
-    """Read authoritative definitions for plain-chat S9; never truncate requirements."""
+def registered_context(run_dir: Path, *, max_chars: int = 60000, failure_chars: int = 8000) -> str:
+    """Read authoritative definitions for plain-chat S9; never truncate requirements.
+
+    Earlier candidates' measured failures get their own bounded budget: they
+    are history, not requirements, so older entries drop their measured
+    values first instead of pushing the protocol over its limit.
+    """
     parts = []
-    for name in ("FIXED_PROTOCOL.yaml", "scientific_readiness.json", "MEASURED_DESIGN_FAILURES.json"):
+    for name in ("FIXED_PROTOCOL.yaml", "scientific_readiness.json"):
         path = run_dir / "revision-context" / name
         if path.is_file():
             data = path.read_bytes()
@@ -76,7 +81,38 @@ def registered_context(run_dir: Path, *, max_chars: int = 60000) -> str:
     if len(text) > max_chars:
         raise ValueError("Registered acceptance definitions exceed the design context budget; "
                          "supply a complete bounded protocol, not a silently truncated one")
-    return text
+    failures = design_failure_context(run_dir, max_chars=failure_chars)
+    return "\n\n".join(part for part in (text, failures) if part)
+
+
+def design_failure_context(run_dir: Path, *, max_chars: int = 8000) -> str:
+    """Earlier candidates' failures, newest first, with their measured values."""
+    path = run_dir / "revision-context" / "MEASURED_DESIGN_FAILURES.json"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return ""
+    failures = [item for item in (data.get("failures") if isinstance(data, dict) else None) or []
+                if isinstance(item, dict)]
+    if not failures:
+        return ""
+    header = ("Measured failures of earlier candidate designs (MEASURED_DESIGN_FAILURES.json, newest first). "
+              f"{data.get('note', '')}\nUse the measured values to identify how each design failed; "
+              "do not resubmit a mechanism that failed the same way.")
+    blocks, used = [], len(header)
+    for number, item in enumerate(reversed(failures), 1):
+        head = (f"\n[{number}] candidate {item.get('candidate_id')} failed at S{item.get('stage')} "
+                f"({item.get('recorded_at')}): {str(item.get('measured_failure', ''))[:1500]}")
+        values = item.get("measured_values")
+        block = head + (f"\n  measured values:\n{values}" if isinstance(values, str) and values else "")
+        if used + len(block) > max_chars:
+            block = head + ("\n  (measured values omitted for space; see the file)" if values else "")
+        if used + len(block) > max_chars:
+            blocks.append(f"\n... {len(failures) - number + 1} older failures omitted for space; see the file")
+            break
+        blocks.append(block)
+        used += len(block)
+    return header + "".join(blocks)
 
 
 def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "") -> list[str]:
