@@ -182,7 +182,7 @@ class ExperimentRunRuntime:
                                 "optimizer updates")
         verified_run, turn_result = self._supervised_run(
             workspace, stage_dir, config, loop, user_message, session, resumed=carried.is_file(),
-            prior_training=prior_training,
+            prior_training=prior_training, plan_path=plan if plan.is_file() else None, run_dir=run_dir,
         )
 
         # Copy results back
@@ -270,6 +270,8 @@ class ExperimentRunRuntime:
         *,
         resumed: bool = False,
         prior_training: dict[str, Any] | None = None,
+        plan_path: Path | None = None,
+        run_dir: Path | None = None,
     ) -> tuple[dict[str, Any], TurnResult]:
         """Run main.py; on failure let the agent repair it once and rerun.
 
@@ -283,6 +285,12 @@ class ExperimentRunRuntime:
         first = run_experiment(workspace, runs / "attempt-1", config, prior_training=prior_training)
         if first["success"]:
             return first, TurnResult()
+        if plan_path is not None and run_dir is not None:
+            from researchclaw.pipeline.acceptance import release_record_only
+            released = release_record_only(first, plan_path, run_dir, config)
+            if released:
+                session.log("EXECUTE", "Failed pretraining checks are record-only; repairing to record "
+                                       "them and train: " + ", ".join(map(str, released)))
         if first.get("failure_type") == "pretraining_blocked":
             session.log("EXECUTE", "Acceptance checks blocked training; no repair or execution retry")
             return first, TurnResult()
@@ -297,6 +305,9 @@ class ExperimentRunRuntime:
             session.log("EXECUTE", "Repair turn failed; not rerunning: " + "; ".join(turn_result.errors))
             return {**first, "errors": [*first["errors"], *(f"Repair aborted: {e}" for e in turn_result.errors)]}, turn_result
         second = run_experiment(workspace, runs / "attempt-2", config, prior_training=prior_training)
+        if plan_path is not None and run_dir is not None:
+            from researchclaw.pipeline.acceptance import release_record_only
+            release_record_only(second, plan_path, run_dir, config)
         if not second["success"]:
             second = {**second, "errors": [*second["errors"], *(f"attempt-1: {e}" for e in first["errors"])]}
         return second, turn_result
