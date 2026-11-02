@@ -5587,7 +5587,8 @@ def _verified_execution_audit(run_dir: Path) -> dict[str, Any]:
         "source": report_path.relative_to(run_dir).as_posix(),
         "verified_by": "platform run_experiment (re-executed main.py under supervision)",
     }
-    for key in ("success", "returncode", "elapsed_sec", "gpu_id", "source_sha256", "results_sha256", "errors"):
+    for key in ("success", "returncode", "elapsed_sec", "gpu_id", "source_sha256", "results_sha256", "errors",
+                "resumed_completed_run"):
         if key in report:
             audit[key] = report[key]
     training = report.get("training")
