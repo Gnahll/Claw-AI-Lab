@@ -132,3 +132,28 @@ Path('trained_once.txt').write_text('one supervised execution')
     reviewed = runtime.IterativeRefineRuntime().execute(run / 'stage-15', run, config, None)
     assert reviewed.status == StageStatus.DONE
     assert (workspace / 'trained_once.txt').stat().st_mtime_ns == marker_time
+
+
+def test_analysis_only_refine_adopts_verified_run_without_retraining(tmp_path, monkeypatch):
+    run, workspace, experiment, config, receipt = verified(tmp_path)
+    stage = run / 'stage-15'
+    stage.mkdir()
+    (stage / REFINE_REQUEST_FILE).write_text(
+        '## Decision\nREFINE\n\n## Refine Scope\nANALYSIS_ONLY\n\nAnalyse the bottom-decile failures.')
+    monkeypatch.setattr(runtime, 'run_experiment', lambda *a, **kw: pytest.fail('Must not retrain'))
+    result = runtime.IterativeRefineRuntime().execute(stage, run, config, None)
+    assert result.status == StageStatus.DONE
+    log = json.loads((stage / 'refinement_log.json').read_text())
+    assert log['refine_scope'] == 'analysis_only' and not log['retrained']
+
+
+@pytest.mark.parametrize('text, scope', [
+    ('## Refine Scope\n**NEW_EXPERIMENTS**\nAdd a baseline.', 'new_experiments'),
+    ('## Refine Scope\nanalysis-only', 'analysis_only'),
+    ('Use existing predictions. No further training is warranted.', 'analysis_only'),
+    ('Do not retrain completed conditions; run the missing baseline.', 'new_experiments'),
+    ('Add another baseline', 'new_experiments'),
+])
+def test_refine_scope(text, scope):
+    from researchclaw.pipeline.stages import refine_scope
+    assert refine_scope(text) == scope
