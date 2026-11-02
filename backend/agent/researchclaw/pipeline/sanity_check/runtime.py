@@ -179,6 +179,12 @@ class SanityCheckRuntime:
         measured_smoke = _run_checked_smoke(workspace, attempt_dir, config, plan_text)
         attempts = [measured_smoke]
         turn_result = TurnResult()
+        if plan.is_file():
+            from researchclaw.pipeline.acceptance import release_record_only
+            released = release_record_only(measured_smoke, plan, run_dir, config)
+            if released:
+                session.log("EXECUTE", "Failed pretraining checks are record-only; repairing to record "
+                                       "them and train: " + ", ".join(map(str, released)))
         blocked = measured_smoke.get("failure_type") == "pretraining_blocked"
         if blocked:
             # The candidate's own acceptance checks failed on measured data:
@@ -199,6 +205,8 @@ class SanityCheckRuntime:
             else:
                 attempt_dir = evidence_dir / "attempt-2"
                 measured_smoke = _run_checked_smoke(workspace, attempt_dir, config, plan_text)
+                if plan.is_file():
+                    release_record_only(measured_smoke, plan, run_dir, config)
                 attempts.append(measured_smoke)
 
         for filename in ("execution.log", "execution_report.json"):
