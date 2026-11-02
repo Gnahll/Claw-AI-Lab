@@ -146,6 +146,33 @@ MAX_DECISION_LOOPS: dict[str, int] = {
 # Written into the new S15 directory when S17 asks for REFINE.
 REFINE_REQUEST_FILE = "refine_request.md"
 
+# Phrases with which a REFINE decision states that the completed runs suffice.
+_NO_RETRAINING_PHRASES = (
+    "no further training is warranted", "no further training is needed", "no further training is required",
+    "no new training is needed", "no additional training is needed", "do not require new parameter updates",
+)
+
+
+def refine_scope(text: str) -> str:
+    """Return "analysis_only" or "new_experiments" for a REFINE request.
+
+    S17 states the scope on a "## Refine Scope" line (ANALYSIS_ONLY or
+    NEW_EXPERIMENTS).  Older decisions without that line count as analysis-only
+    only when they say explicitly that no further training is needed.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.strip().lstrip("#").strip().lower() == "refine scope":
+            for value in lines[index + 1:index + 4]:
+                value = value.strip().strip("*`").strip().upper().replace("-", "_").replace(" ", "_")
+                if value.startswith("ANALYSIS_ONLY"):
+                    return "analysis_only"
+                if value.startswith("NEW_EXPERIMENTS"):
+                    return "new_experiments"
+    lowered = " ".join(text.lower().replace("\u2019", "'").split())
+    return "analysis_only" if any(phrase in lowered for phrase in _NO_RETRAINING_PHRASES) else "new_experiments"
+
+
 # ---------------------------------------------------------------------------
 # Noncritical stages — can be skipped on failure without aborting pipeline
 # ---------------------------------------------------------------------------

@@ -22,7 +22,7 @@ from researchclaw.pipeline.result_analysis.system_prompt import (
     build_system_prompt,
     build_user_message,
 )
-from researchclaw.pipeline.stages import Stage, StageStatus
+from researchclaw.pipeline.stages import REFINE_REQUEST_FILE, Stage, StageStatus
 from researchclaw import single_run
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,16 @@ class ResultAnalysisRuntime:
             metric_direction=metric_direction,
             topic=topic,
         )
+
+        request = self._analysis_refine_request(run_dir)
+        if request:
+            user_message += (
+                "\nThe research decision asked for the following analysis of the completed runs "
+                "(no new training). Address every requested item in analysis.md and "
+                "experiment_summary.json using the existing result files and saved predictions; "
+                "report concrete counts and values, and say so explicitly if a needed file is absent.\n\n"
+                + request[:6000] + "\n")
+            session.log("INIT", "Added the S17 analysis-only REFINE request")
 
         _single = single_run.is_single_run(config)
         system_prompt = single_run.apply(system_prompt, _single, append_policy=True)
@@ -200,6 +210,18 @@ class ResultAnalysisRuntime:
             return create_llm_client(new_config)
         except Exception:
             return llm
+
+    @staticmethod
+    def _analysis_refine_request(run_dir: Path) -> str:
+        """The S17 request that S15 adopted as analysis-only, if any."""
+        stage15 = run_dir / f"stage-{int(Stage.ITERATIVE_REFINE):02d}"
+        try:
+            log = json.loads((stage15 / "refinement_log.json").read_text(encoding="utf-8"))
+            if log.get("refine_scope") != "analysis_only":
+                return ""
+            return (stage15 / REFINE_REQUEST_FILE).read_text(encoding="utf-8")
+        except (OSError, ValueError, AttributeError):
+            return ""
 
     @staticmethod
     def _prepare_workspace(

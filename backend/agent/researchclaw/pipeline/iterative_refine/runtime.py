@@ -22,7 +22,7 @@ from researchclaw.pipeline.iterative_refine.system_prompt import (
     build_system_prompt,
     build_user_message,
 )
-from researchclaw.pipeline.stages import REFINE_REQUEST_FILE, Stage, StageStatus
+from researchclaw.pipeline.stages import REFINE_REQUEST_FILE, Stage, StageStatus, refine_scope
 from researchclaw.training.execution import EXECUTION_CONTRACT, run_experiment
 from researchclaw import single_run
 
@@ -512,10 +512,14 @@ class IterativeRefineRuntime:
         path = run_dir / "stage-14/runs/verified_run_receipt.json"
         if not path.is_file():
             return None  # Legacy runs retain the existing verification path.
+        request_path = stage_dir / REFINE_REQUEST_FILE
+        scope = None
         try:
-            if (stage_dir / REFINE_REQUEST_FILE).is_file():
-                raise ValueError("S17 requested additional experiments; preserve completed S14 and "
-                                 "review the added scope instead of automatically retraining every condition")
+            if request_path.is_file():
+                scope = refine_scope(request_path.read_text(encoding="utf-8"))
+                if scope != "analysis_only":
+                    raise ValueError("S17 requested additional experiments; preserve completed S14 and "
+                                     "review the added scope instead of automatically retraining every condition")
             experiment_dir = run_dir / "stage-11/experiment"
             if not experiment_dir.is_dir():
                 experiment_dir = self._find_experiment_dir(run_dir)
@@ -534,7 +538,12 @@ class IterativeRefineRuntime:
         shutil.copy2(workspace / "results.json", stage_dir / "results.json")
         log = {"adopted": True, "improved": False, "retrained": False,
                "verification_mode": "verified_s14_integrity_review", "source_receipt": str(path),
-               "source_workspace": str(workspace), "refine_loop": False}
+               "source_workspace": str(workspace), "refine_loop": scope is not None}
+        if scope:
+            # S16 reads the request from here and does the requested analysis.
+            log["refine_scope"] = scope
+            log["refine_request"] = REFINE_REQUEST_FILE
+            session.log("VERIFY", "S17 REFINE needs no new training; the analysis is handed to S16")
         (stage_dir / "refinement_log.json").write_text(json.dumps(log, indent=2), encoding="utf-8")
         session.log("VERIFY", "S14 source, protocol, results, weights and predictions unchanged; no retraining")
         return StageResult(stage=Stage.ITERATIVE_REFINE, status=StageStatus.DONE,
