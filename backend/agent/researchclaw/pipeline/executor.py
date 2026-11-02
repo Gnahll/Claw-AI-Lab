@@ -3332,7 +3332,7 @@ def _execute_hypothesis_gen(
     # --- Inject prior knowledge from shared knowledge base ---
     _shared_dir = getattr(config.experiment, "shared_results_dir", "") or ""
     _prior_knowledge = ""
-    if _shared_dir:
+    if _shared_dir and getattr(config.experiment, "share_cross_project_knowledge", False):
         _kb_index = Path(_shared_dir) / "knowledge_base" / "knowledge_index.jsonl"
         if _kb_index.exists():
             try:

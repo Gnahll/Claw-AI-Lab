@@ -1723,6 +1723,36 @@ class TestHypothesisGenDebate:
         # No perspectives directory when no LLM
         assert not (stage_dir / "perspectives").exists()
 
+    @pytest.mark.parametrize("opt_in", [False, True])
+    def test_hypothesis_gen_cross_project_knowledge_is_opt_in(
+        self, tmp_path: Path, rc_config: RCConfig, adapters: AdapterBundle, opt_in: bool
+    ) -> None:
+        import dataclasses
+
+        shared = tmp_path / "shared"
+        (shared / "knowledge_base").mkdir(parents=True)
+        (shared / "knowledge_base" / "knowledge_index.jsonl").write_text(
+            json.dumps({"topic": "OTHER-PROJECT-OCBI", "conclusions": ["AN-NA helps"]}) + "\n",
+            encoding="utf-8",
+        )
+        config = dataclasses.replace(
+            rc_config,
+            experiment=dataclasses.replace(
+                rc_config.experiment,
+                shared_results_dir=str(shared),
+                share_cross_project_knowledge=opt_in,
+            ),
+        )
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        stage_dir = run_dir / "stage-08"
+        stage_dir.mkdir(parents=True)
+        _write_prior_artifact(run_dir, 7, "synthesis.md", "# Synthesis\nGap found.")
+        fake_llm = FakeLLMClient("## H1\nTest")
+        rc_executor._execute_hypothesis_gen(stage_dir, run_dir, config, adapters, llm=fake_llm)
+        sent = "\n".join(m["content"] for call in fake_llm.calls for m in call)
+        assert ("OTHER-PROJECT-OCBI" in sent) is opt_in
+
 
 class TestResultAnalysisDebate:
     def test_result_analysis_with_llm_creates_perspectives(

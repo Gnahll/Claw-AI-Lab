@@ -335,6 +335,9 @@ class ExperimentConfig:
     checkpoints_dir: str = ""
     codebases_dir: str = ""
     shared_results_dir: str = ""
+    # Cross-project prior knowledge is opt-in: injecting other projects' conclusions
+    # into S8 silently steers new hypotheses toward old methods.
+    share_cross_project_knowledge: bool = False
     paper_length: str = "medium"
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     docker: DockerSandboxConfig = field(default_factory=DockerSandboxConfig)
@@ -685,6 +688,7 @@ def _parse_experiment_config(data: dict[str, Any]) -> ExperimentConfig:
         checkpoints_dir=data.get("checkpoints_dir", ""),
         codebases_dir=data.get("codebases_dir", ""),
         shared_results_dir=data.get("shared_results_dir", ""),
+        share_cross_project_knowledge=bool(data.get("share_cross_project_knowledge", False)),
         paper_length=data.get("paper_length", "medium"),
         sandbox=SandboxConfig(
             python_path=sandbox_data.get("python_path", ".venv/bin/python3"),
