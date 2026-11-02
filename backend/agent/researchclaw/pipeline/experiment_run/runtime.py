@@ -25,7 +25,7 @@ from researchclaw.pipeline.experiment_run.system_prompt import (
 from researchclaw.pipeline.candidate import current_stage_dirs, same_candidate_workspace, stamp_workspace
 from researchclaw.pipeline.stages import Stage, StageStatus
 from researchclaw.resources.intake import build_resource_manifest, render_resource_manifest
-from researchclaw.training.execution import EXECUTION_CONTRACT, run_experiment
+from researchclaw.training.execution import EXECUTION_CONTRACT, observed_updates, run_experiment
 from researchclaw.pipeline.claw_engine.turn_loop import TurnResult
 from researchclaw import single_run
 
@@ -176,8 +176,13 @@ class ExperimentRunRuntime:
         )
 
         session.log("EXECUTE", "Running main.py under pipeline supervision")
+        prior_training = self._prior_training(stage_dir, workspace) if carried.is_file() else None
+        if prior_training:
+            session.log("INIT", f"Earlier launches of this run observed {prior_training['prior_optimizer_steps']} "
+                                "optimizer updates")
         verified_run, turn_result = self._supervised_run(
             workspace, stage_dir, config, loop, user_message, session, resumed=carried.is_file(),
+            prior_training=prior_training,
         )
 
         # Copy results back
@@ -264,6 +269,7 @@ class ExperimentRunRuntime:
         session: StageSession,
         *,
         resumed: bool = False,
+        prior_training: dict[str, Any] | None = None,
     ) -> tuple[dict[str, Any], TurnResult]:
         """Run main.py; on failure let the agent repair it once and rerun.
 
@@ -273,7 +279,8 @@ class ExperimentRunRuntime:
         attempt-1 errors are kept in the reported errors.
         """
         runs = stage_dir / "runs"
-        first = run_experiment(workspace, runs / "attempt-1", config)
+        ExperimentRunRuntime._archive_previous_launch(runs)
+        first = run_experiment(workspace, runs / "attempt-1", config, prior_training=prior_training)
         if first["success"]:
             return first, TurnResult()
         if first.get("failure_type") == "pretraining_blocked":
@@ -289,10 +296,76 @@ class ExperimentRunRuntime:
         if turn_result.errors:
             session.log("EXECUTE", "Repair turn failed; not rerunning: " + "; ".join(turn_result.errors))
             return {**first, "errors": [*first["errors"], *(f"Repair aborted: {e}" for e in turn_result.errors)]}, turn_result
-        second = run_experiment(workspace, runs / "attempt-2", config)
+        second = run_experiment(workspace, runs / "attempt-2", config, prior_training=prior_training)
         if not second["success"]:
             second = {**second, "errors": [*second["errors"], *(f"attempt-1: {e}" for e in first["errors"])]}
         return second, turn_result
+
+    @staticmethod
+    def _archive_previous_launch(runs: Path) -> Path | None:
+        """Move the previous launch's attempts to runs/history/ instead of overwriting them.
+
+        A relaunch reuses attempt-1/attempt-2; overwriting them would erase the
+        only supervised evidence of training done by the earlier launch.
+        """
+        names = [p for p in sorted(runs.glob("attempt-*")) if p.is_dir()]
+        names += [runs / n for n in ("run_report.json", "verified_run_receipt.json") if (runs / n).is_file()]
+        if not names:
+            return None
+        label = ""
+        try:
+            label = Path(json.loads((runs / "attempt-1/execution_report.json").read_text(
+                encoding="utf-8")).get("workspace", "")).name
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        label = label or "launch_" + time.strftime("%Y%m%d_%H%M%S", time.localtime(names[0].stat().st_mtime))
+        target = runs / "history" / label
+        suffix = 1
+        while target.exists():
+            suffix += 1
+            target = runs / "history" / f"{label}_{suffix}"
+        target.mkdir(parents=True)
+        for path in names:
+            shutil.move(str(path), str(target / path.name))
+        logger.info("Archived previous S14 launch evidence to %s", target)
+        return target
+
+    @staticmethod
+    def _prior_training(stage_dir: Path, workspace: Path) -> dict[str, Any] | None:
+        """Parameter updates observed by earlier launches this workspace resumed from.
+
+        Follows outputs/CARRIED_OVER_FROM.txt back through every resumed workspace
+        and sums the updates recorded in their supervised execution reports, so
+        only the lineage of the carried-over checkpoints counts.
+        """
+        lineage: list[str] = []
+        current = workspace
+        while True:
+            marker = current / "outputs" / "CARRIED_OVER_FROM.txt"
+            if not marker.is_file():
+                break
+            source = Path(marker.read_text(encoding="utf-8").strip()).parent
+            if str(source.resolve()) in lineage or source.resolve() == workspace.resolve():
+                break
+            lineage.append(str(source.resolve()))
+            current = source
+        evidence = []
+        for report_path in sorted((stage_dir / "runs").rglob("execution_report.json")):
+            try:
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(report, dict) or report.get("smoke") or not report.get("workspace"):
+                continue
+            if str(Path(report["workspace"]).resolve()) not in lineage:
+                continue
+            steps = observed_updates(report_path.parent)
+            if steps > 0:
+                evidence.append({"report": report_path.relative_to(stage_dir).as_posix(),
+                                 "optimizer_steps": steps, "workspace": report["workspace"]})
+        if not evidence:
+            return None
+        return {"prior_optimizer_steps": sum(item["optimizer_steps"] for item in evidence), "evidence": evidence}
 
     @staticmethod
     def _resolve_coding_llm(llm: Any, config: RCConfig) -> Any:

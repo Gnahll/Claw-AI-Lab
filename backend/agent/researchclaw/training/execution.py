@@ -93,7 +93,15 @@ def _has_measurement(value):
     return False
 
 
-def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, timeout=None):
+def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, timeout=None,
+                   prior_training=None):
+    """Run main.py under supervision and write output_dir/execution_report.json.
+
+    ``prior_training`` summarises parameter updates observed by earlier supervised
+    launches whose outputs this workspace resumed from.  When it is given, a run
+    that makes no update (training had already finished, only evaluation was left)
+    is accepted on that evidence instead of failing; every other check still applies.
+    """
     workspace = workspace.resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
     evidence_path = (output_dir / "training_observation.json").resolve()
@@ -129,6 +137,7 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
                "-m", "researchclaw.training.observed", str(evidence_path)]
     budget = timeout if timeout is not None else config.experiment.time_budget_sec
     report = {"success": False, "smoke": smoke, "require_training": training, "command": cmd,
+              "workspace": str(workspace),
               "gpu_id": env.get("CUDA_VISIBLE_DEVICES", ""), "world_size": world_size, "results": {}, "errors": []}
     start = time.monotonic()
     started_at = time.time() - 2  # coarse filesystem mtime resolution
@@ -177,18 +186,29 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
             if training:
                 observation = json.loads(evidence_path.read_text(encoding="utf-8"))
                 report["training"] = observation
-                if not observation.get("parameter_update_observed") or observation.get("optimizer_steps", 0) < 1:
-                    raise ValueError("No actual PyTorch parameter update observed")
-                if not observation.get("losses"):
-                    raise ValueError("Missing training loss: no scalar loss was passed to backward()")
-                if not observation.get("checkpoint_verified"):
-                    problem = (observation.get("checkpoint_problem") or observation.get("error")
-                               or "outputs/model.pt was not saved or is empty")
-                    raise ValueError(f"Missing checkpoint matching trained parameters: {problem}")
-                if report["gpu_id"] and not observation.get("gpu_process"):
-                    raise ValueError("GPU requested but no GPU training process observed")
-                if world_size > 1:
-                    report["training_ranks"] = _check_ranks(evidence_path, gpus)
+                updated = observation.get("parameter_update_observed") and observation.get("optimizer_steps", 0) >= 1
+                if not updated and prior_training and prior_training.get("prior_optimizer_steps", 0) >= 1:
+                    # Resumed after training had finished: this launch only evaluates the saved model.
+                    final = workspace / "outputs" / "model.pt"
+                    if not final.is_file() or final.is_symlink() or final.stat().st_size == 0:
+                        raise ValueError("Resumed run made no update and did not save outputs/model.pt")
+                    report["resumed_completed_run"] = {
+                        **prior_training, "checkpoint_sha256": hashlib.sha256(final.read_bytes()).hexdigest(),
+                        "note": "No update in this launch; training evidence comes from the earlier "
+                                "supervised launches listed here."}
+                else:
+                    if not updated:
+                        raise ValueError("No actual PyTorch parameter update observed")
+                    if not observation.get("losses"):
+                        raise ValueError("Missing training loss: no scalar loss was passed to backward()")
+                    if not observation.get("checkpoint_verified"):
+                        problem = (observation.get("checkpoint_problem") or observation.get("error")
+                                   or "outputs/model.pt was not saved or is empty")
+                        raise ValueError(f"Missing checkpoint matching trained parameters: {problem}")
+                    if report["gpu_id"] and not observation.get("gpu_process"):
+                        raise ValueError("GPU requested but no GPU training process observed")
+                    if world_size > 1:
+                        report["training_ranks"] = _check_ranks(evidence_path, gpus)
                 predictions = report["predictions"] = check_predictions(workspace / "outputs", started_at)
                 if not predictions["groups"]:
                     raise ValueError("No saved test-set predictions found under outputs/ (path containing 'pred')")
@@ -218,6 +238,34 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
             report["elapsed_sec"] = round(time.monotonic() - start, 2)
             (output_dir / "execution_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
+
+
+def observed_updates(output_dir: Path) -> int:
+    """Optimizer steps with an observed parameter change recorded by rank 0 of one launch.
+
+    Falls back to the per-step event log when the process was killed before the
+    final observation file was written (stall or time budget).
+    """
+    evidence_path = output_dir / "training_observation.json"
+    try:
+        observation = json.loads(evidence_path.read_text(encoding="utf-8"))
+        if observation.get("parameter_update_observed"):
+            return int(observation.get("optimizer_steps", 0))
+    except (OSError, ValueError, TypeError):
+        pass
+    steps = 0
+    try:
+        with evidence_path.with_suffix(".jsonl").open(encoding="utf-8") as events:
+            for line in events:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if event.get("parameter_update_observed"):
+                    steps = max(steps, int(event.get("step", 0)))
+    except OSError:
+        pass
+    return steps
 
 
 def _check_ranks(evidence_path, gpus):

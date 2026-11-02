@@ -42,9 +42,12 @@ def config_contract(config) -> dict:
 def create_receipt(workspace: Path, run_dir: Path, report_path: Path, config) -> dict:
     report = json.loads(report_path.read_text(encoding='utf-8'))
     training = report.get('training', {})
+    trained = (training.get('parameter_update_observed') and training.get('checkpoint_verified')
+               and training.get('optimizer_steps', 0) >= 1)
+    # A resumed launch that only evaluated an already trained model carries the earlier evidence.
+    resumed = (report.get('resumed_completed_run') or {}).get('prior_optimizer_steps', 0) >= 1
     if (report.get('success') is not True or report.get('smoke') or not report.get('require_training')
-            or not training.get('parameter_update_observed') or not training.get('checkpoint_verified')
-            or training.get('optimizer_steps', 0) < 1):
+            or not (trained or resumed)):
         raise ValueError('Only successful supervised training can create a verified-run receipt')
     sources = source_manifest(workspace)
     if sources != report.get('source_manifest'):
