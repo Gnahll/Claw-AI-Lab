@@ -6185,6 +6185,8 @@ def _write_paper_sections(
     except (KeyError, Exception):  # noqa: BLE001
         _writing_structure = ""
 
+    _fidelity = _implementation_fidelity_block(run_dir)
+
     _overlay = _get_evolution_overlay(run_dir, "paper_draft")
     system = pm.for_stage(
         "paper_draft",
@@ -6316,6 +6318,7 @@ def _write_paper_sections(
         "NEVER put method names longer than 20 characters in table cells.\n\n"
         f"{figure_prompt_instruction}\n\n"
         f"Outline:\n{outline}\n\n"
+        f"{_fidelity}"
         "Output markdown with ## headers. Continue from where Part 1 ended."
     )
     try:
@@ -6375,6 +6378,7 @@ def _write_paper_sections(
         "- All numbers must be rounded to 4 decimal places maximum\n"
         "- Every table MUST have a descriptive caption (not just 'Table 1')\n"
         "- Use \\begin{algorithm} or pseudocode notation, NOT \\begin{verbatim}\n\n"
+        f"{_fidelity}"
         "Output markdown with ## headers. Do NOT include a References section."
     )
     try:
@@ -8371,6 +8375,146 @@ Generated: {_utcnow_iso()}
     )
 
 
+_METHOD_FILE_HINTS = ("model", "operator", "module", "method", "layer", "attention", "net", "block", "head")
+_PAPER_SOURCE_SKIP_DIRS = {"__pycache__", "outputs", "datasets", "checkpoints", "codebases", "repair_backup", "tests"}
+
+
+def _final_code_dir(run_dir: Path) -> Path | None:
+    for name in ("experiment_final/", "experiment/"):
+        found = _read_prior_artifact(run_dir, name)
+        if found and Path(found).is_dir():
+            return Path(found)
+    return None
+
+
+def _implementation_sources(run_dir: Path, budget: int = 16000) -> str:
+    """The experiment's own source files, model/operator files first, within *budget* chars.
+
+    The paper's Method section and the reviewer need the code that produced the
+    results; the hypotheses and outline describe what was planned, not what ran.
+    """
+    code_dir = _final_code_dir(run_dir)
+    if code_dir is None:
+        return ""
+    files = [path for path in code_dir.rglob("*.py")
+             if not any(part.startswith(".") or part in _PAPER_SOURCE_SKIP_DIRS
+                        for part in path.relative_to(code_dir).parts[:-1])]
+
+    def priority(path: Path) -> tuple[int, int, str]:
+        name = path.stem.lower()
+        if name == "main":
+            rank = 2
+        elif any(hint in name for hint in _METHOD_FILE_HINTS):
+            rank = 0
+        else:
+            rank = 1
+        return rank, path.stat().st_size, path.as_posix()
+
+    parts: list[str] = []
+    remaining = budget
+    for path in sorted(files, key=priority):
+        if remaining < 400:
+            parts.append(f"(further files omitted: see {code_dir.name}/)")
+            break
+        try:
+            code = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = path.relative_to(code_dir).as_posix()
+        take = code[: min(len(code), remaining - 100, 7000)]
+        suffix = "" if len(take) == len(code) else f"\n# ... truncated ({len(code)} chars total)"
+        parts.append(f"#### {rel}\n```python\n{take}{suffix}\n```")
+        remaining -= len(take) + 100
+    return "\n\n".join(parts)
+
+
+def _flatten_measurements(value: Any, prefix: str = "", out: list[str] | None = None,
+                          limit: int = 400) -> list[str]:
+    out = [] if out is None else out
+    if len(out) >= limit:
+        return out
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _flatten_measurements(item, f"{prefix}.{key}" if prefix else str(key), out, limit)
+    elif isinstance(value, list):
+        if value and all(isinstance(item, (int, float, str, bool)) or item is None for item in value):
+            out.append(f"{prefix} = {json.dumps(value[:8], ensure_ascii=False)}"
+                       + (f" ... ({len(value)} items)" if len(value) > 8 else ""))
+        else:
+            for index, item in enumerate(value[:20]):
+                _flatten_measurements(item, f"{prefix}[{index}]", out, limit)
+    elif isinstance(value, float):
+        out.append(f"{prefix} = {value:.6g}")
+    elif value is not None and not isinstance(value, str) or (isinstance(value, str) and len(value) <= 80):
+        out.append(f"{prefix} = {value}")
+    return out
+
+
+def _adopted_workspace(run_dir: Path) -> Path | None:
+    """The S14 workspace whose results were adopted (receipt first, else the newest one)."""
+    receipt = run_dir / "stage-14" / "runs" / "verified_run_receipt.json"
+    try:
+        workspace = Path(json.loads(receipt.read_text(encoding="utf-8"))["workspace"])
+        if workspace.is_dir():
+            return workspace
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    workspaces = sorted((run_dir / "stage-14").glob("run_workspace_*"), key=lambda p: p.stat().st_mtime)
+    return workspaces[-1] if workspaces else None
+
+
+def _result_inventory(run_dir: Path, budget: int = 12000) -> str:
+    """Everything that was measured or recorded: results.json entries and output record files."""
+    lines: list[str] = []
+    results_text = _read_prior_artifact(run_dir, "results.json")
+    try:
+        results = json.loads(results_text) if results_text else None
+    except ValueError:
+        results = None
+    if isinstance(results, dict):
+        lines.append("results.json entries:")
+        lines += _flatten_measurements(results)
+    records: list[str] = []
+    workspace = _adopted_workspace(run_dir)
+    outputs = workspace / "outputs" if workspace else None
+    if outputs is not None and outputs.is_dir():
+        for path in sorted(outputs.rglob("*")):
+            if (path.is_file() and path.suffix.lower() in {".json", ".jsonl", ".csv", ".md", ".txt"}
+                    and "pred" not in path.name.lower()):
+                records.append(path.relative_to(workspace).as_posix())
+            if len(records) >= 80:
+                break
+    if records:
+        lines.append("\nRecorded output files of the adopted run (data for analysis exists in these):")
+        lines += [f"- {name}" for name in records]
+    text = "\n".join(lines)
+    return text[:budget] + ("\n... (truncated)" if len(text) > budget else "")
+
+
+def _implementation_fidelity_block(run_dir: Path | None) -> str:
+    if run_dir is None:
+        return ""
+    sources = _implementation_sources(run_dir)
+    inventory = _result_inventory(run_dir)
+    if not sources and not inventory:
+        return ""
+    block = ["\n\nIMPLEMENTATION FIDELITY (HARD RULE): The Method section describes the code that was "
+             "actually run, shown below. Take every operation, tensor size, number of heads/keys/bands, "
+             "temperature, kernel size, which parameters are shared or separate, and every new parameter "
+             "from this code. Do not describe components, equations or projections that the code does not "
+             "contain; when the outline or hypotheses differ from the code, follow the code. Optimizer, "
+             "learning-rate schedule, loss weights, seeds and data-corruption implementations in the "
+             "Experiments section also come from this code."]
+    if sources:
+        block.append("### Implementation sources\n" + sources)
+    if inventory:
+        block.append("DATA AVAILABILITY (HARD RULE): everything listed below was measured or recorded. Never "
+                     "write that a setting, a baseline score, a corruption result, a failure analysis or any "
+                     "other listed item is unavailable, missing or not provided; report it instead.\n"
+                     "### Measured results and recorded files\n" + inventory)
+    return "\n\n".join(block) + "\n"
+
+
 def _collect_experiment_evidence(run_dir: Path) -> str:
     """Collect actual experiment parameters and results for peer review."""
     evidence_parts: list[str] = []
@@ -8380,14 +8524,15 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
 
     # 1. Read experiment code to find actual trial count, methods used.
     # Prefer the refined final code (ITERATIVE_REFINE) over the initial draft.
-    for _code_dir_name in ("experiment_final/", "experiment/"):
-        exp_dir = _read_prior_artifact(run_dir, _code_dir_name)
-        if exp_dir and Path(exp_dir).is_dir():
-            main_py = Path(exp_dir) / "main.py"
-            if main_py.exists():
-                code = main_py.read_text(encoding="utf-8")
-                evidence_parts.append(f"### Actual Experiment Code (main.py)\n```python\n{code[:3000]}\n```")
-                break
+    _sources = _implementation_sources(run_dir)
+    if _sources:
+        evidence_parts.append(
+            "### Actual Experiment Code (check that the Method section matches it)\n" + _sources)
+    _inventory = _result_inventory(run_dir)
+    if _inventory:
+        evidence_parts.append(
+            "### Measured Results and Recorded Files (flag any claim that these are unavailable)\n"
+            + _inventory)
 
     # 2. Read sandbox run results (actual metrics, runtime, stderr)
     runs_text = _read_prior_artifact(run_dir, "runs/")
