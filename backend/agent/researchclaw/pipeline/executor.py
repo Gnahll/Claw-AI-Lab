@@ -3857,8 +3857,10 @@ def _execute_experiment_design(
                 )
 
     # Definitions must be implementable before spending a coding/training run.
-    from researchclaw.pipeline.acceptance import plan_issues, resource_plan_issues, requirement_text, write_plan_blocker
-    _acceptance_warnings: list[str] = []
+    from researchclaw.pipeline.acceptance import (
+        fill_missing_helpers, plan_issues, resource_plan_issues, requirement_text, write_plan_blocker,
+    )
+    _acceptance_warnings: list[str] = fill_missing_helpers(plan)
     _acceptance_errors = plan_issues(
         plan, require_protocol=bool(llm is not None and getattr(config.experiment, "require_training", False)),
         user_text=requirement_text(config, run_dir), warnings=_acceptance_warnings,

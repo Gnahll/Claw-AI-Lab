@@ -1,4 +1,4 @@
-"""A nonblocking user-required check without a quote is a warning, not a failed S9 design."""
+"""A user-required check that cannot stop training without a quote is a warning, not a failed S9 design."""
 from researchclaw.pipeline.acceptance import may_block_training, plan_issues, quote_found
 
 
@@ -23,7 +23,7 @@ TOPIC = ("Optional experiments were selected by the user; follow this choice exa
 def test_nonblocking_check_without_quote_is_only_a_warning():
     warnings: list[str] = []
     assert plan_issues(_plan(), user_text=TOPIC, warnings=warnings) == []
-    assert len(warnings) == 1 and "nonblocking" in warnings[0]
+    assert len(warnings) == 1 and "cannot stop training" in warnings[0]
     assert plan_issues(_plan(), user_text=TOPIC) == []
 
 
@@ -41,9 +41,30 @@ def test_blocking_user_check_still_needs_its_quote():
     assert any("exact user_requirement_quote" in issue for issue in plan_issues(plan, user_text=TOPIC))
 
 
+def test_after_training_check_marked_blocking_is_only_a_warning():
+    warnings: list[str] = []
+    plan = _plan(blocking=True, user_requirement_quote="保存训练损失、验证指标、模型权重、实验记录")
+    assert plan_issues(plan, user_text=TOPIC, warnings=warnings) == []
+    assert len(warnings) == 1 and "cannot stop training" in warnings[0]
+
+
 def test_invented_quote_never_matches_and_cannot_block():
     assert not quote_found("The user approved a 0.30 threshold before training.", TOPIC)
     check = _plan(blocking=True, phase="before_training", required_helpers=["h"],
                   user_requirement_quote="The user approved R >= 0.30 before training.",
                   definition=_definition(threshold=0.30))["acceptance_protocol"]["checks"][1]
     assert not may_block_training(check, TOPIC)
+
+
+def test_missing_helpers_are_named_from_check_id():
+    from researchclaw.pipeline.acceptance import fill_missing_helpers
+    plan = _plan()
+    plan["acceptance_protocol"]["checks"][0].pop("required_helpers")
+    plan["acceptance_protocol"]["checks"].append(
+        {"id": "split-protocol", "kind": "engineering", "phase": "before_training", "blocking": True,
+         "required_helpers": ["check_split"], "definition": _definition()})
+    notes = fill_missing_helpers(plan)
+    checks = plan["acceptance_protocol"]["checks"]
+    assert checks[0]["required_helpers"] == ["check_finite_gradients"]
+    assert checks[2]["required_helpers"] == ["check_split"] and "required_helpers" not in checks[1]
+    assert len(notes) == 1 and plan_issues(plan, user_text=TOPIC) == []
