@@ -68,3 +68,13 @@ def test_missing_helpers_are_named_from_check_id():
     assert checks[0]["required_helpers"] == ["check_finite_gradients"]
     assert checks[2]["required_helpers"] == ["check_split"] and "required_helpers" not in checks[1]
     assert len(notes) == 1 and plan_issues(plan, user_text=TOPIC) == []
+
+
+def test_recorded_ratio_check_may_run_after_training():
+    plan = _plan()
+    ratio = {"id": "relative_resource_cost", "kind": "engineering", "phase": "after_training", "blocking": False,
+             "definition": _definition(metric="Complete-method divided by baseline wall-time and peak-memory ratios.")}
+    plan["acceptance_protocol"]["checks"].append(ratio)
+    assert plan_issues(plan, user_text=TOPIC) == []
+    ratio["definition"]["metric"] = "peak GPU memory"
+    assert any("engineering prerequisites must block" in i for i in plan_issues(plan, user_text=TOPIC))
