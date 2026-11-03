@@ -23,6 +23,8 @@ and fix the code. Repeat until the smoke test passes cleanly.
 - Workspace: `{workspace_path}`
 - Python: `{python_path or 'python3'}`
 - Use only the inherited CUDA_VISIBLE_DEVICES; an empty value means CPU only
+- Those are the GPUs the platform allocated; GPU numbers in the user's text are a count, never
+  physical devices to compare against
 - The experiment directory contains `main.py` (and possibly helper files)
 - The workspace has symlinks to datasets, checkpoints, and codebases
 

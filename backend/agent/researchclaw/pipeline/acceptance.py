@@ -57,6 +57,10 @@ measured engineering scope, never all scientific prerequisites or completed trai
 When blocked, write workspace-root results.json with status=blocked_pretraining, reason
 and required_gate_status (keyed by the check ids above) in blocker, and measured evidence
 paths. Stop without modifying the frozen protocol. Do not remove mandatory checks or label this as successful training.
+GPU numbers written by the user ("GPU1、2", "GPUs 4 and 5") state how many GPUs and how much memory
+the experiment may use, not which physical devices. The platform allocates the devices and exposes
+exactly them through CUDA_VISIBLE_DEVICES. Never compare physical indices or UUIDs with the user's
+numbers; resource checks verify the visible device count and the per-device memory budget.
 """
 
 
@@ -250,6 +254,54 @@ def normalize_plan(plan: Any, user_text: str = "") -> list[str]:
                 if not fixed:
                     check.pop("required_helpers")
     return notes + fill_missing_helpers(plan)
+
+
+def normalize_gpu_budget(plan: Any, config: Any) -> list[str]:
+    """Replace physical GPU numbers in compute_budget with the platform allocation.
+
+    The user's GPU numbers are a count; the platform picks the devices, so a
+    plan pinned to physical indices refuses the GPUs it is actually given.
+    """
+    budget = plan.get("compute_budget") if isinstance(plan, dict) else None
+    allocated = [item.strip() for item in
+                 (getattr(getattr(config, "experiment", None), "gpu_uuid", "") or "").split(",") if item.strip()]
+    if not isinstance(budget, dict) or not allocated:
+        return []
+    notes = []
+    for key in ("authorized_gpus", "gpu_ids", "gpus"):
+        value = budget.get(key)
+        if isinstance(value, list) and value and all(isinstance(v, (int, str)) for v in value) and value != allocated:
+            notes.append(f"compute_budget.{key} {value!r} replaced: the platform allocates "
+                         f"{len(allocated)} GPU(s) via CUDA_VISIBLE_DEVICES; physical numbers are not checked")
+            budget[key] = f"{len(allocated)} platform-allocated GPU(s) exposed via CUDA_VISIBLE_DEVICES"
+            budget.setdefault("gpu_count", len(allocated))
+    return notes
+
+
+# Device identity (physical numbers, indices, UUIDs), not a memory or count measurement.
+_GPU_IDENTITY = re.compile(r"physical\W+(\w+\W+){0,3}(GPU|device|ind(ex|ices))"
+                           r"|GPU\w*\W+(\w+\W+){0,3}(ind(ex|ices)|uuids?)\b"
+                           r"|GPUs?\s*#?\d+\s*(and|,|、|&|/)\s*\d+", re.I)
+
+
+def release_gpu_identity(report: dict[str, Any], config: Any) -> bool:
+    """Make a refusal of the platform-allocated GPUs a code repair, not a design failure.
+
+    Generated code sometimes checks that the visible devices are the physical
+    numbers in the user's text. The platform chooses the devices, so the fix is
+    to drop that comparison and check count and memory; the plan stays frozen.
+    """
+    if report.get("failure_type") != "pretraining_blocked" or not _GPU_IDENTITY.search(str(report.get("reason", ""))):
+        return False
+    count = len([item for item in (getattr(getattr(config, "experiment", None), "gpu_uuid", "") or "").split(",")
+                 if item.strip()])
+    report.update(failure_type="gpu_identity_blocked", retryable=True, next_action="repair_gpu_check")
+    report["errors"] = [*report.get("errors", []),
+        "Platform GPU policy: the platform allocated the GPUs for this run and exposes exactly them via "
+        f"CUDA_VISIBLE_DEVICES ({count or 'the inherited'} device(s)). GPU numbers in the user's text are a count, "
+        "not physical devices. Remove every comparison of physical indices or UUIDs with those numbers; check "
+        "only the visible device count and per-device memory, then continue. Do not change the frozen plan."]
+    return True
 
 
 def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "",

@@ -286,7 +286,9 @@ class ExperimentRunRuntime:
         if first["success"]:
             return first, TurnResult()
         if plan_path is not None and run_dir is not None:
-            from researchclaw.pipeline.acceptance import release_record_only
+            from researchclaw.pipeline.acceptance import release_gpu_identity, release_record_only
+            if release_gpu_identity(first, config):
+                session.log("EXECUTE", "Code refused the platform-allocated GPUs; repairing the GPU check")
             released = release_record_only(first, plan_path, run_dir, config)
             if released:
                 session.log("EXECUTE", "Failed pretraining checks are record-only; repairing to record "
@@ -306,7 +308,8 @@ class ExperimentRunRuntime:
             return {**first, "errors": [*first["errors"], *(f"Repair aborted: {e}" for e in turn_result.errors)]}, turn_result
         second = run_experiment(workspace, runs / "attempt-2", config, prior_training=prior_training)
         if plan_path is not None and run_dir is not None:
-            from researchclaw.pipeline.acceptance import release_record_only
+            from researchclaw.pipeline.acceptance import release_gpu_identity, release_record_only
+            release_gpu_identity(second, config)
             release_record_only(second, plan_path, run_dir, config)
         if not second["success"]:
             second = {**second, "errors": [*second["errors"], *(f"attempt-1: {e}" for e in first["errors"])]}
