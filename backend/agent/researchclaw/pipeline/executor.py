@@ -3858,11 +3858,12 @@ def _execute_experiment_design(
 
     # Definitions must be implementable before spending a coding/training run.
     from researchclaw.pipeline.acceptance import (
-        normalize_plan, plan_issues, resource_plan_issues, requirement_text, write_plan_blocker,
+        normalize_gpu_budget, normalize_plan, plan_issues, resource_plan_issues, requirement_text,
+        write_plan_blocker,
     )
     # Labelling mistakes are corrected and recorded; only unrunnable definitions fail S9.
     _requirement = requirement_text(config, run_dir)
-    _acceptance_warnings: list[str] = normalize_plan(plan, _requirement)
+    _acceptance_warnings: list[str] = normalize_plan(plan, _requirement) + normalize_gpu_budget(plan, config)
     _acceptance_errors = plan_issues(
         plan, require_protocol=bool(llm is not None and getattr(config.experiment, "require_training", False)),
         user_text=_requirement, warnings=_acceptance_warnings,

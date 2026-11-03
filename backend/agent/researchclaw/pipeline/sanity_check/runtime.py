@@ -180,7 +180,9 @@ class SanityCheckRuntime:
         attempts = [measured_smoke]
         turn_result = TurnResult()
         if plan.is_file():
-            from researchclaw.pipeline.acceptance import release_record_only
+            from researchclaw.pipeline.acceptance import release_gpu_identity, release_record_only
+            if release_gpu_identity(measured_smoke, config):
+                session.log("EXECUTE", "Code refused the platform-allocated GPUs; repairing the GPU check")
             released = release_record_only(measured_smoke, plan, run_dir, config)
             if released:
                 session.log("EXECUTE", "Failed pretraining checks are record-only; repairing to record "
@@ -206,6 +208,7 @@ class SanityCheckRuntime:
                 attempt_dir = evidence_dir / "attempt-2"
                 measured_smoke = _run_checked_smoke(workspace, attempt_dir, config, plan_text)
                 if plan.is_file():
+                    release_gpu_identity(measured_smoke, config)
                     release_record_only(measured_smoke, plan, run_dir, config)
                 attempts.append(measured_smoke)
 
