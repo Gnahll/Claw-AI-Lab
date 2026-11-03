@@ -209,7 +209,8 @@ def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "
             errors.append(f"{where}: research hypotheses cannot become automatic training gates")
         if kind == "engineering":
             engineering = True
-            if phase != "before_training" or blocking is not True:
+            # A baseline ratio is only recorded, so it may be measured after training.
+            if (phase != "before_training" or blocking is not True) and not _relative_resource(check):
                 errors.append(f"{where}: engineering prerequisites must block before training")
         if kind == "user_required":
             if not quote_found(check.get("user_requirement_quote"), user_text):
