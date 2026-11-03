@@ -127,8 +127,26 @@ def design_failure_context(run_dir: Path, *, max_chars: int = 8000) -> str:
     return header + "".join(blocks)
 
 
-def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "") -> list[str]:
-    """Validate definitions, not empirical pass/fail or unmeasured batch decisions."""
+_LIST_MARKER = re.compile(r"(?m)^[ \t]*(?:[-*•]|\d+[.)])[ \t]+")
+
+
+def _normalized(text: str) -> str:
+    return " ".join(_LIST_MARKER.sub("", text).split())
+
+
+def quote_found(quote: Any, user_text: str) -> bool:
+    """The quote occurs in the user's text, ignoring line breaks, spacing and list markers."""
+    return (isinstance(quote, str) and len(quote.strip()) >= 8
+            and _normalized(quote) in _normalized(user_text))
+
+
+def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "",
+                warnings: list[str] | None = None) -> list[str]:
+    """Validate definitions, not empirical pass/fail or unmeasured batch decisions.
+
+    A nonblocking user-required check without a matching quote cannot stop
+    anything, so it is reported in ``warnings`` instead of failing the design.
+    """
     if not isinstance(plan, dict):
         return ["Experiment plan must be a mapping"]
     errors = []
@@ -172,9 +190,13 @@ def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "
             if phase != "before_training" or blocking is not True:
                 errors.append(f"{where}: engineering prerequisites must block before training")
         if kind == "user_required":
-            quote = check.get("user_requirement_quote")
-            if not isinstance(quote, str) or len(quote.strip()) < 8 or quote not in user_text:
-                errors.append(f"{where}: user-required check needs an exact user_requirement_quote from topic/details/feedback")
+            if not quote_found(check.get("user_requirement_quote"), user_text):
+                message = f"{where}: user-required check needs an exact user_requirement_quote from topic/details/feedback"
+                if blocking is False:
+                    if warnings is not None:
+                        warnings.append(message + " (nonblocking: recorded, not a design failure)")
+                else:
+                    errors.append(message)
         definition = check.get("definition")
         if not isinstance(definition, dict) or any(not definition.get(key) for key in ("metric", "inputs", "aggregation", "failure_action")):
             errors.append(f"{where}.definition must specify metric, inputs, aggregation and failure_action")
@@ -244,7 +266,7 @@ def _user_states_numbers(check: dict, user_text: str) -> bool:
     from S8 hypotheses or from a platform question does not qualify.
     """
     quote = check.get("user_requirement_quote")
-    if not isinstance(quote, str) or len(quote.strip()) < 8 or quote not in user_text:
+    if not quote_found(quote, user_text):
         return False
     definition = check.get("definition") if isinstance(check.get("definition"), dict) else {}
     required = _numbers(definition.get("threshold")) + _numbers(definition.get("thresholds"))
