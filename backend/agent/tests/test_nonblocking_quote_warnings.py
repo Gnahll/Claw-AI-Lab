@@ -77,4 +77,5 @@ def test_recorded_ratio_check_may_run_after_training():
     plan["acceptance_protocol"]["checks"].append(ratio)
     assert plan_issues(plan, user_text=TOPIC) == []
     ratio["definition"]["metric"] = "peak GPU memory"
+    ratio["phase"] = "before_training"
     assert any("engineering prerequisites must block" in i for i in plan_issues(plan, user_text=TOPIC))

@@ -523,23 +523,33 @@ class CodegenRuntime:
             file_path.write_text(code, encoding="utf-8")
         session.log(CodegenPhase.GENERATE, f"Wrote {len(files)} files to {exp_dir}")
 
-        from researchclaw.pipeline.codegen.readiness import codegen_inputs_fingerprint, declared_interface_gaps
+        from researchclaw.pipeline.codegen.readiness import (
+            codegen_inputs_fingerprint, declared_interface_gaps, repeated_helper_gaps,
+        )
         implementation_errors = declared_interface_gaps(files, ctx.exp_plan,
             require_training=bool(getattr(config.experiment, "require_training", False)))
         if result.error:
             implementation_errors.insert(0, result.error)
         report = stage_dir / "implementation_readiness.json"
+        fingerprint = codegen_inputs_fingerprint(ctx.exp_plan, run_dir)
+        repeated = repeated_helper_gaps(report, implementation_errors, fingerprint)
         # The fingerprint and file list let a retry with unchanged inputs repair
         # these files instead of regenerating the implementation from scratch.
         report.write_text(json.dumps({"ready": not implementation_errors, "errors": implementation_errors,
             "scope": "Structural implementation checks only; algorithm fidelity and measured runtime checks remain required",
-            "files": sorted(files), **codegen_inputs_fingerprint(ctx.exp_plan, run_dir)}, indent=2), encoding="utf-8")
+            "files": sorted(files), **fingerprint}, indent=2), encoding="utf-8")
         if implementation_errors:
             session.log_error(CodegenPhase.VALIDATE, "; ".join(implementation_errors))
             session.persist()
+            error = "Implementation is incomplete: " + "; ".join(implementation_errors)
+            if repeated:
+                # A second attempt on the same plan left the same declared helpers
+                # unimplemented: the plan names checks the code cannot provide.
+                error += ("; the same plan failed twice on declared helpers " + ", ".join(repeated)
+                          + ": S9 must redefine these checks or the method so they can be implemented")
             return StageResult(stage=Stage.CODE_GENERATION, status=StageStatus.FAILED,
-                artifacts=("experiment/", "implementation_readiness.json"), decision="retry",
-                error="Implementation is incomplete: " + "; ".join(implementation_errors))
+                artifacts=("experiment/", "implementation_readiness.json"),
+                decision="revise_design" if repeated else "retry", error=error)
 
         # ── Phase 6: FINALIZE ────────────────────────────────────────────
         artifacts = self._finalize(files, ctx, config, stage_dir, exp_dir, session)

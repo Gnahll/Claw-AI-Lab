@@ -3858,12 +3858,14 @@ def _execute_experiment_design(
 
     # Definitions must be implementable before spending a coding/training run.
     from researchclaw.pipeline.acceptance import (
-        fill_missing_helpers, plan_issues, resource_plan_issues, requirement_text, write_plan_blocker,
+        normalize_plan, plan_issues, resource_plan_issues, requirement_text, write_plan_blocker,
     )
-    _acceptance_warnings: list[str] = fill_missing_helpers(plan)
+    # Labelling mistakes are corrected and recorded; only unrunnable definitions fail S9.
+    _requirement = requirement_text(config, run_dir)
+    _acceptance_warnings: list[str] = normalize_plan(plan, _requirement)
     _acceptance_errors = plan_issues(
         plan, require_protocol=bool(llm is not None and getattr(config.experiment, "require_training", False)),
-        user_text=requirement_text(config, run_dir), warnings=_acceptance_warnings,
+        user_text=_requirement, warnings=_acceptance_warnings,
     ) + resource_plan_issues(plan, config)
     if _acceptance_warnings:
         logger.warning("Stage 09: acceptance warnings (nonblocking): %s", "; ".join(_acceptance_warnings))

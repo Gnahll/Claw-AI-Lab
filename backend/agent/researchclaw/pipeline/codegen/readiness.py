@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import re
 from pathlib import Path
 
@@ -244,3 +245,27 @@ def codegen_inputs_fingerprint(plan_text: str, run_dir: Path | None) -> dict[str
             feedback = log.read_bytes()
     return {"plan_sha256": hashlib.sha256((plan_text or "").encode("utf-8")).hexdigest(),
             "feedback_sha256": hashlib.sha256(feedback).hexdigest()}
+
+
+_HELPER_GAP = re.compile(r"Missing declared implementation helper: (\w+)")
+
+
+def repeated_helper_gaps(report: Path, errors: list[str], fingerprint: dict[str, str]) -> list[str]:
+    """Helpers missing again after an earlier attempt from the same plan and feedback.
+
+    ``report`` is the previous attempt's implementation_readiness.json, read
+    before it is overwritten. Only names missing both times are returned.
+    """
+    current = {m.group(1) for e in errors for m in [_HELPER_GAP.match(e)] if m}
+    if not current:
+        return []
+    try:
+        previous = json.loads(report.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if (not isinstance(previous, dict) or previous.get("ready") is not False
+            or any(previous.get(key) != value for key, value in fingerprint.items())):
+        return []
+    before = {m.group(1) for e in previous.get("errors") or [] if isinstance(e, str)
+              for m in [_HELPER_GAP.match(e)] if m}
+    return sorted(current & before)
