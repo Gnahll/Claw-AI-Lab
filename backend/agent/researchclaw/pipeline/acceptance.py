@@ -140,12 +140,34 @@ def quote_found(quote: Any, user_text: str) -> bool:
             and _normalized(quote) in _normalized(user_text))
 
 
+def fill_missing_helpers(plan: Any) -> list[str]:
+    """Name a checker for each blocking pretraining check that omits required_helpers.
+
+    The name is derived from the check id, so S11 still has to implement and call it.
+    Returns one note per filled check.
+    """
+    protocol = plan.get("acceptance_protocol") if isinstance(plan, dict) else None
+    checks = protocol.get("checks") if isinstance(protocol, dict) else None
+    notes = []
+    for index, check in enumerate(checks if isinstance(checks, list) else []):
+        if (not isinstance(check, dict) or check.get("blocking") is not True
+                or check.get("phase") != "before_training" or check.get("required_helpers")):
+            continue
+        stem = re.sub(r"\W+", "_", str(check.get("id") or "")).strip("_").lower()
+        if not stem.isascii() or not stem:
+            stem = f"acceptance_{index}"
+        check["required_helpers"] = [f"check_{stem}"]
+        notes.append(f"acceptance_protocol.checks[{index}]: required_helpers missing, set to check_{stem}")
+    return notes
+
+
 def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "",
                 warnings: list[str] | None = None) -> list[str]:
     """Validate definitions, not empirical pass/fail or unmeasured batch decisions.
 
-    A nonblocking user-required check without a matching quote cannot stop
-    anything, so it is reported in ``warnings`` instead of failing the design.
+    A user-required check that cannot stop training (nonblocking, or checked
+    after training) without a matching quote is reported in ``warnings``
+    instead of failing the design.
     """
     if not isinstance(plan, dict):
         return ["Experiment plan must be a mapping"]
@@ -192,9 +214,11 @@ def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "
         if kind == "user_required":
             if not quote_found(check.get("user_requirement_quote"), user_text):
                 message = f"{where}: user-required check needs an exact user_requirement_quote from topic/details/feedback"
-                if blocking is False:
+                # Only a blocking pretraining check can stop anything; after training the
+                # check is measured and reported whatever the quote says.
+                if blocking is False or phase == "after_training":
                     if warnings is not None:
-                        warnings.append(message + " (nonblocking: recorded, not a design failure)")
+                        warnings.append(message + " (cannot stop training: recorded, not a design failure)")
                 else:
                     errors.append(message)
         definition = check.get("definition")
