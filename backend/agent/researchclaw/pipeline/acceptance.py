@@ -61,8 +61,13 @@ paths. Stop without modifying the frozen protocol. Do not remove mandatory check
 
 
 def requirement_text(config: Any, run_dir: Path) -> str:
+    from researchclaw import single_run
+
     research = getattr(config, "research", None)
     text = getattr(research, "prompt_topic", getattr(research, "topic", ""))
+    if single_run.is_single_run(config):
+        # runs_per_condition: 1 is the user's own setting; its policy text is quotable.
+        text += "\n" + single_run.SINGLE_RUN_POLICY
     path = run_dir / "human_feedback.jsonl"
     if path.is_file():
         for line in path.read_text(encoding="utf-8").splitlines():
