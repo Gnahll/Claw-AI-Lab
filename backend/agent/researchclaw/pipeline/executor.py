@@ -3858,10 +3858,16 @@ def _execute_experiment_design(
 
     # Definitions must be implementable before spending a coding/training run.
     from researchclaw.pipeline.acceptance import plan_issues, resource_plan_issues, requirement_text, write_plan_blocker
+    _acceptance_warnings: list[str] = []
     _acceptance_errors = plan_issues(
         plan, require_protocol=bool(llm is not None and getattr(config.experiment, "require_training", False)),
-        user_text=requirement_text(config, run_dir),
+        user_text=requirement_text(config, run_dir), warnings=_acceptance_warnings,
     ) + resource_plan_issues(plan, config)
+    if _acceptance_warnings:
+        logger.warning("Stage 09: acceptance warnings (nonblocking): %s", "; ".join(_acceptance_warnings))
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        (stage_dir / "acceptance_warnings.json").write_text(
+            json.dumps({"warnings": _acceptance_warnings}, ensure_ascii=False, indent=2), encoding="utf-8")
     if _acceptance_errors:
         (stage_dir / "exp_plan_draft.yaml").write_text(
             yaml.safe_dump(plan, allow_unicode=True), encoding="utf-8")
