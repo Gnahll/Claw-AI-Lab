@@ -61,6 +61,11 @@ GPU numbers written by the user ("GPU1、2", "GPUs 4 and 5") state how many GPUs
 the experiment may use, not which physical devices. The platform allocates the devices and exposes
 exactly them through CUDA_VISIBLE_DEVICES. Never compare physical indices or UUIDs with the user's
 numbers; resource checks verify the visible device count and the per-device memory budget.
+A fallback batch declared in the plan or by the user (e.g. per-GPU batch 25 with accumulation 2
+instead of 50 with accumulation 1, same effective batch) is part of the frozen plan. The code must
+implement it: when the primary setting runs out of memory, switch every condition to the fallback
+together, record both measurements, and continue. Report a resource blocker only when no fallback
+is declared or the fallback also runs out of memory.
 """
 
 
@@ -302,6 +307,79 @@ def release_gpu_identity(report: dict[str, Any], config: Any) -> bool:
         "not physical devices. Remove every comparison of physical indices or UUIDs with those numbers; check "
         "only the visible device count and per-device memory, then continue. Do not change the frozen plan."]
     return True
+
+
+# "每卡batch50、累积1步", "batch 25, accumulation 2", "25 per GPU with accumulation 2"
+_BATCH_PAIR = (re.compile(r"batch\s*[=:]?\s*(\d+)[^\d\n]{0,30}?(?:accumulation|accum|累积)[\s:=-]*(\d+)", re.I),
+               re.compile(r"(\d+)[- ]?per[- ]?(?:GPU|device)[^\d\n]{0,20}?(?:accumulation|accum)[\s:=-]*(\d+)", re.I))
+_BATCH_KEYS = ("per_device_batch", "per_gpu_batch", "per_device_batch_size", "per_gpu_batch_size", "micro_batch")
+_ACCUMULATION_KEYS = ("gradient_accumulation", "gradient_accumulation_steps", "accumulation", "accumulation_steps")
+_OOM = re.compile(r"out of memory|\bOOM\b|OutOfMemory", re.I)
+
+
+def _mapping_settings(value: Any, pairs: list[tuple[int, int]]) -> None:
+    if isinstance(value, dict):
+        batch = next((value[k] for k in _BATCH_KEYS if type(value.get(k)) is int), None)
+        accumulation = next((value[k] for k in _ACCUMULATION_KEYS if type(value.get(k)) is int), None)
+        if batch and accumulation and batch > 0 and accumulation > 0 and (batch, accumulation) not in pairs:
+            pairs.append((batch, accumulation))
+        for item in value.values():
+            _mapping_settings(item, pairs)
+    elif isinstance(value, list):
+        for item in value:
+            _mapping_settings(item, pairs)
+
+
+def declared_batch_settings(text: str) -> list[tuple[int, int]]:
+    """Distinct (per-GPU batch, accumulation) pairs declared in a plan or the user's text.
+
+    Structured plan entries are read as YAML mappings; prose is matched by pattern.
+    """
+    pairs: list[tuple[int, int]] = []
+    try:
+        _mapping_settings(yaml.safe_load(text or ""), pairs)
+    except yaml.YAMLError:
+        pass
+    for pattern in _BATCH_PAIR:
+        for batch, accumulation in pattern.findall(text or ""):
+            pair = (int(batch), int(accumulation))
+            if pair[0] > 0 and pair[1] > 0 and pair not in pairs:
+                pairs.append(pair)
+    return pairs
+
+
+def release_batch_fallback(report: dict[str, Any], plan_path: Path, run_dir: Path, config: Any) -> list[tuple[int, int]]:
+    """Make an OOM block a code repair when the plan already declares a fallback batch.
+
+    Switching to a declared setting with the same effective batch follows the
+    frozen plan; redesigning from S9 would only write the same fallback again.
+    Returns the declared settings, or [] when the block stays a design failure.
+    """
+    if report.get("failure_type") != "pretraining_blocked":
+        return []
+    if not _OOM.search(str(report.get("reason", "")) + " " + " ".join(map(str, report.get("errors") or []))):
+        return []
+    try:
+        plan_text = plan_path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    settings = declared_batch_settings(plan_text)
+    settings += [pair for pair in declared_batch_settings(requirement_text(config, run_dir))
+                 if pair not in settings]
+    products = {batch * accumulation for batch, accumulation in settings}
+    if len(settings) < 2 or len(products) != 1:
+        return []
+    settings.sort(key=lambda pair: -pair[0])
+    listed = ", ".join(f"per-GPU batch {b} x accumulation {a}" for b, a in settings)
+    report.update(failure_type="declared_fallback_oom", retryable=True, next_action="repair_use_declared_fallback",
+                  declared_batch_settings=[list(pair) for pair in settings])
+    report["errors"] = [*report.get("errors", []),
+        f"Platform batch policy: the frozen plan declares these settings with the same effective batch: {listed}. "
+        "The setting that was tried ran out of memory. Implement the declared fallback: switch every condition to "
+        "the next smaller declared per-GPU batch together, record the measured peak memory of both settings in outputs/ and results.json, "
+        "and continue to training. This follows the plan; do not change effective batch, learning rate, epochs or "
+        "data. Report a resource blocker only if the last declared setting also runs out of memory."]
+    return settings
 
 
 def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "",
