@@ -36,7 +36,9 @@ producing valid results (results.json with real metrics).
    - The experiment should produce `results.json` with metrics
    - Monitor stdout/stderr for errors
 5. If the experiment fails, diagnose and fix:
-   - **OOM**: Inspect memory and the frozen plan; report a resource blocker instead of changing planned batch
+   - **OOM**: Inspect memory and the frozen plan. If the plan declares a fallback batch with the same
+     effective batch (e.g. 25 per GPU with accumulation 2), switch all conditions to it and record both
+     measurements; that follows the plan. Otherwise report a resource blocker instead of changing planned batch
    - **NaN/Inf loss**: Identify the unstable operation and data; do not silently change the planned learning rate
    - **Missing file/path**: Fix the path to actual data locations
    - **Timeout**: Preserve checkpoints and report remaining work; do not shorten formal training
