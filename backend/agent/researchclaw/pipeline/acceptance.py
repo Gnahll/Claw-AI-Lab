@@ -166,6 +166,92 @@ def fill_missing_helpers(plan: Any) -> list[str]:
     return notes
 
 
+_KINDS = {"engineering": "engineering", "hypothesis": "hypothesis", "scientific": "hypothesis",
+          "research": "hypothesis", "user_required": "user_required", "user": "user_required"}
+_PHASES = {"before_training": "before_training", "pre_training": "before_training", "pretraining": "before_training",
+           "before": "before_training", "preflight": "before_training", "after_training": "after_training",
+           "post_training": "after_training", "posttraining": "after_training", "after": "after_training"}
+_BOOLS = {"true": True, "yes": True, "1": True, "false": False, "no": False, "0": False}
+
+
+def _token(value: Any) -> str:
+    return re.sub(r"[\s-]+", "_", str(value).strip().lower()) if isinstance(value, str) else ""
+
+
+def normalize_plan(plan: Any, user_text: str = "") -> list[str]:
+    """Correct how checks are labelled so S9 fails only on definitions that cannot run.
+
+    Labels (kind, phase, blocking, ids, helper names) follow fixed platform rules,
+    so they are set here instead of sending the whole design back. Definitions,
+    missing protocols and preserved legacy gates are left to ``plan_issues``.
+    Returns one note per correction, ending with ``fill_missing_helpers``.
+    """
+    protocol = plan.get("acceptance_protocol") if isinstance(plan, dict) else None
+    if not isinstance(protocol, dict) or not isinstance(protocol.get("checks"), list):
+        return []
+    notes = []
+    if protocol.get("version") != 1 or type(protocol.get("version")) is not int:
+        notes.append(f"acceptance_protocol.version {protocol.get('version')!r} set to 1")
+        protocol["version"] = 1
+    ids: set[str] = set()
+    for index, check in enumerate(protocol["checks"]):
+        if not isinstance(check, dict):
+            continue
+        where = f"acceptance_protocol.checks[{index}]"
+
+        def note(field: str, new: Any, why: str = "") -> None:
+            notes.append(f"{where}.{field} {check.get(field)!r} set to {new!r}" + (f": {why}" if why else ""))
+            check[field] = new
+
+        identifier = check.get("id")
+        if not isinstance(identifier, str) or not identifier.strip() or identifier in ids:
+            base = identifier.strip() if isinstance(identifier, str) and identifier.strip() else f"check_{index}"
+            new, suffix = base, 2
+            while new in ids:
+                new, suffix = f"{base}_{suffix}", suffix + 1
+            note("id", new, "ids must be unique")
+        ids.add(check["id"])
+        kind = check.get("kind")
+        if kind not in ("engineering", "hypothesis", "user_required"):
+            # An unknown kind is recorded only; it cannot become a gate by guesswork.
+            note("kind", _KINDS.get(_token(kind), "hypothesis"))
+            kind = check["kind"]
+        phase = check.get("phase")
+        if phase not in ("before_training", "after_training"):
+            default = "before_training" if kind == "engineering" else "after_training"
+            note("phase", _PHASES.get(_token(phase), default))
+        blocking = check.get("blocking")
+        if type(blocking) is not bool:
+            text = _token(blocking) if isinstance(blocking, str) else str(blocking).lower()
+            note("blocking", _BOOLS.get(text, kind == "engineering"))
+        if kind == "hypothesis" and check["blocking"] is not False:
+            note("blocking", False, "hypotheses are measured and reported, never gates")
+        if (kind == "engineering" and check["phase"] == "before_training" and check["blocking"] is not True
+                and not _relative_resource(check)):
+            note("blocking", True, "engineering prerequisites stop training")
+        if kind == "engineering" and check["phase"] == "after_training" and not _relative_resource(check):
+            notes.append(f"{where}: engineering check measured after training; recorded, it cannot stop training")
+        if (kind == "user_required" and check["phase"] == "before_training" and check["blocking"] is True
+                and not quote_found(check.get("user_requirement_quote"), user_text)):
+            note("blocking", False, "no exact user_requirement_quote, so it is measured and reported")
+        helpers = check.get("required_helpers")
+        if isinstance(helpers, str):
+            helpers = [helpers]
+        if isinstance(helpers, list) and helpers:
+            fixed = []
+            for name in helpers:
+                stem = re.sub(r"\W+", "_", str(name)).strip("_")
+                if stem and stem[0].isdigit():
+                    stem = "check_" + stem
+                if stem.isidentifier() and stem.isascii() and not keyword.iskeyword(stem):
+                    fixed.append(stem)
+            if fixed != check.get("required_helpers"):
+                note("required_helpers", fixed or None, "helpers must be Python function names")
+                if not fixed:
+                    check.pop("required_helpers")
+    return notes + fill_missing_helpers(plan)
+
+
 def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "",
                 warnings: list[str] | None = None) -> list[str]:
     """Validate definitions, not empirical pass/fail or unmeasured batch decisions.
@@ -213,10 +299,11 @@ def plan_issues(plan: Any, *, require_protocol: bool = False, user_text: str = "
         if kind == "hypothesis" and blocking is not False:
             errors.append(f"{where}: research hypotheses cannot become automatic training gates")
         if kind == "engineering":
-            engineering = True
-            # A baseline ratio is only recorded, so it may be measured after training.
-            if (phase != "before_training" or blocking is not True) and not _relative_resource(check):
+            # An after-training engineering check (artifacts written, run completed) is
+            # measured and reported; a baseline ratio is only recorded.
+            if phase == "before_training" and blocking is not True and not _relative_resource(check):
                 errors.append(f"{where}: engineering prerequisites must block before training")
+            engineering = engineering or phase == "before_training"
         if kind == "user_required":
             if not quote_found(check.get("user_requirement_quote"), user_text):
                 message = f"{where}: user-required check needs an exact user_requirement_quote from topic/details/feedback"
@@ -308,7 +395,8 @@ def may_block_training(check: dict, user_text: str) -> bool:
     """Whether a failed pretraining check may stop training; otherwise it is recorded."""
     if check.get("kind") == "engineering":
         # Existing plans may hold a ratio inside a blocking engineering check; it is still recorded.
-        return check.get("blocking") is not False and not _relative_resource(check)
+        return (check.get("blocking") is not False and check.get("phase") != "after_training"
+                and not _relative_resource(check))
     if check.get("kind") == "user_required" and check.get("blocking") is True:
         return not _relative_resource(check) and _user_states_numbers(check, user_text)
     return False
