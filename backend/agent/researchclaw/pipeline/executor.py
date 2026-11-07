@@ -7492,6 +7492,38 @@ def _detect_result_contradictions(
     return advisories
 
 
+def _all_experiment_results_are_simulated(run_dir: Path) -> bool:
+    """Return true only when experiment artifacts explicitly say simulated.
+
+    ``results.json`` is the authoritative output of S14, including resumed and
+    manually completed runs.  The previous paper guard skipped that filename
+    and initialized ``all_simulated`` to true, so a directory containing only a
+    real ``results.json`` was blocked by vacuous truth.  Missing/failed evidence
+    is handled by the separate no-metrics guard; it must not be called
+    simulated unless an artifact explicitly declares that mode.
+    """
+    saw_simulated = False
+    saw_real = False
+    for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
+        for run_file in sorted(stage_subdir.glob("*.json")):
+            try:
+                payload = json.loads(run_file.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            status = str(payload.get("status") or "").strip().lower()
+            mode = str(payload.get("mode") or "").strip().lower()
+            if status == "simulated" or mode == "simulated":
+                saw_simulated = True
+            elif status or mode or any(
+                key in payload
+                for key in ("metrics", "conditions", "measurements", "training")
+            ):
+                saw_real = True
+    return saw_simulated and not saw_real
+
+
 def _execute_paper_draft(
     stage_dir: Path,
     run_dir: Path,
@@ -7826,22 +7858,7 @@ def _execute_paper_draft(
                 logger.warning("P10: Contradiction advisories: %s", _contradictions)
 
     # R10: HARD BLOCK — refuse to write paper when all data is simulated
-    all_simulated = True
-    for stage_subdir in sorted(run_dir.glob("stage-*/runs")):
-        for run_file in sorted(stage_subdir.glob("*.json")):
-            if run_file.name == "results.json":
-                continue
-            try:
-                _payload = json.loads(run_file.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            if isinstance(_payload, dict) and _payload.get("status") != "simulated":
-                all_simulated = False
-                break
-        if not all_simulated:
-            break
-
-    if all_simulated:
+    if _all_experiment_results_are_simulated(run_dir):
         logger.error(
             "BLOCKED: All experiment data is simulated (mode='simulated'). "
             "Cannot write a paper based on formulaic fake data. "

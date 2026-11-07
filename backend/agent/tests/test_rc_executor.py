@@ -2939,6 +2939,77 @@ class TestTimeoutAwareRefine:
 class TestDataIntegrityBlock:
     """Test paper draft blocked when no metrics exist (R4-2a)."""
 
+    def test_paper_draft_accepts_authoritative_real_results_json(
+        self, tmp_path: Path, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        _write_prior_artifact(
+            run_dir,
+            16,
+            "experiment_summary.json",
+            json.dumps({"metrics_summary": {"macro_pixel_f1": {"mean": 0.72}}}),
+        )
+        runs_dir = run_dir / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps({
+                "status": "incomplete_evaluation",
+                "mode": "full",
+                "conditions": {
+                    "baseline": {"macro_pixel_f1": 0.73},
+                    "complete": {"macro_pixel_f1": 0.72},
+                },
+            }),
+            encoding="utf-8",
+        )
+
+        stage_dir = run_dir / "stage-20"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        llm = FakeLLMClient("# Paper Title\n## Abstract\nReal-result draft.")
+        result = rc_executor._execute_paper_draft(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.DONE
+        assert len(llm.calls) >= 1
+        assert "Paper Draft Blocked" not in (
+            stage_dir / "paper_draft.md"
+        ).read_text(encoding="utf-8")
+
+    def test_paper_draft_blocks_explicitly_simulated_results_json(
+        self, tmp_path: Path, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle
+    ) -> None:
+        _write_prior_artifact(run_dir, 16, "outline.md", "# Outline\n## Abstract\n")
+        _write_prior_artifact(
+            run_dir,
+            16,
+            "experiment_summary.json",
+            json.dumps({"metrics_summary": {"score": {"mean": 0.33}}}),
+        )
+        runs_dir = run_dir / "stage-14" / "runs"
+        runs_dir.mkdir(parents=True, exist_ok=True)
+        (runs_dir / "results.json").write_text(
+            json.dumps({
+                "status": "simulated",
+                "mode": "simulated",
+                "metrics": {"score": 0.33},
+            }),
+            encoding="utf-8",
+        )
+
+        stage_dir = run_dir / "stage-20"
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        llm = FakeLLMClient("should not be called")
+        result = rc_executor._execute_paper_draft(
+            stage_dir, run_dir, rc_config, adapters, llm=llm
+        )
+
+        assert result.status == StageStatus.FAILED
+        assert len(llm.calls) == 0
+        assert "All experiment results are from simulated mode" in (
+            stage_dir / "paper_draft.md"
+        ).read_text(encoding="utf-8")
+
     def test_paper_draft_blocked_with_no_metrics(
         self, tmp_path: Path, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle
     ) -> None:
