@@ -130,7 +130,7 @@ do_start() {
             --agent-dir "$BASE/backend/agent" \
             --runs-dir "$BASE/backend/runs" \
             --pool-idea 3 --pool-exp 2 --pool-code 3 --pool-exec 4 --pool-write 2 \
-            --total-gpus "${TOTAL_GPUS:-8}" --gpus-per-project 1 \
+            --total-gpus "${TOTAL_GPUS:-8}" --gpus-per-project "${GPUS_PER_PROJECT:-4}" \
             --discussion-mode --discussion-rounds 2 \
             --discussion-models "$DISCUSSION_MODELS" \
             ${AUTO_LOOP:+--auto-loop} \

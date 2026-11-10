@@ -14,7 +14,7 @@ import hashlib
 import json
 from pathlib import Path
 
-ARRAY_SUFFIXES = {".npy", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
+ARRAY_SUFFIXES = {".npy", ".npz", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}
 TABLE_SUFFIXES = {".json", ".csv"}
 MAX_FILES_PER_GROUP = 500
 
@@ -28,6 +28,16 @@ def _load_array(path: Path):
 
     if path.suffix.lower() == ".npy":
         return np.load(path, allow_pickle=False)
+    if path.suffix.lower() == ".npz":
+        with np.load(path, allow_pickle=False) as bundle:
+            preferred = ("pred_masks", "packed_masks", "mask_logits", "masks", "predictions")
+            keys = [key for key in preferred if key in bundle.files]
+            keys += [key for key in bundle.files if key not in keys]
+            for key in keys:
+                values = bundle[key]
+                if values.dtype.kind in "biufc" and values.size:
+                    return values
+        raise ValueError("NPZ has no nonempty numeric prediction array")
     from PIL import Image
 
     with Image.open(path) as image:
@@ -59,6 +69,7 @@ def check_predictions(outputs_dir: Path, since: float = 0.0) -> dict:
         for path in sorted(outputs_dir.rglob("*")):
             suffix = path.suffix.lower()
             if (path.is_file() and not path.is_symlink() and suffix in ARRAY_SUFFIXES | TABLE_SUFFIXES
+                    and not (suffix == ".npz" and path.stem.lower() == "ap_per_threshold")
                     and _is_prediction(path.relative_to(outputs_dir)) and path.stat().st_mtime >= since):
                 groups.setdefault((path.parent, suffix), []).append(path)
 

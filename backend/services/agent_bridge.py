@@ -1812,6 +1812,19 @@ def list_all_projects(state: BridgeState) -> list[dict]:
         if a.project_id and a.process is not None and a.process.poll() is None:
             running_project_ids.add(a.project_id)
 
+    # Include independently resumed researchclaw jobs in the project list.
+    # The guard refreshes this snapshot each minute; require live PIDs as well.
+    guard_path = projects_dir.parent / 'experiment_guard_status.json'
+    if guard_path.is_file() and time.time() - guard_path.stat().st_mtime < 120:
+        try:
+            for row in json.loads(guard_path.read_text(encoding='utf-8')).get('projects', []):
+                if row.get('state') != 'running':
+                    continue
+                if any(Path('/proc', str(pid), 'cmdline').is_file() for pid in row.get('pids', [])):
+                    running_project_ids.add(row['project_id'])
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+
     queued_project_ids: set[str] = set()
     for q in state.queues.values():
         for t in q.tasks:
@@ -1846,16 +1859,28 @@ def list_all_projects(state: BridgeState) -> list[dict]:
         total_stages = TOTAL_STAGES
         completed_threshold = total_stages
 
+        short_training_done = False
+        for run_name in ('run-ppt-four-scale-revision3-20261110',
+                         'run-ppt-four-scale-revision2-20261110'):
+            decision = _read_json(proj_dir / run_name / 'stage-14' / 'decision.json')
+            if decision and decision.get('status') == 'done':
+                short_training_done = True
+                break
+
         if last_stage >= completed_threshold:
-            status = "completed"
+            status = 'completed'
         elif project_id in running_project_ids:
-            status = "running"
+            status = 'running'
         elif project_id in queued_project_ids:
-            status = "queued"
+            status = 'queued'
+        elif short_training_done:
+            status = 'engineering_complete'
+            last_stage = max(last_stage, 14)
+            last_name = '四卡短程工程训练完成；正式训练暂缓'
         elif last_stage > 0:
-            status = "interrupted"
+            status = 'interrupted'
         else:
-            status = "new"
+            status = 'new'
 
         topic = ""
         config_path = ""
