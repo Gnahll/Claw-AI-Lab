@@ -1833,7 +1833,7 @@ def _external_execution_agent(project_dir: Path):
     if isinstance(progress, dict) and progress.get('condition') not in result.get('conditions', {}):
         condition = progress.get('condition')
         if condition:
-            steps = progress.get('completed_optimizer_steps', progress.get('completed_optimizer_executions', progress.get('step', 0)))
+            steps = progress.get('completed_optimizer_steps', progress.get('completed_steps', progress.get('completed_optimizer_executions', progress.get('step', 0))))
             rows.append(f'{condition}: {steps}/{target}')
     exit_code = None
     try:
@@ -1846,14 +1846,21 @@ def _external_execution_agent(project_dir: Path):
     if status == 'error':
         task = '训练已停止，需检查日志；' + task
     elif status == 'done':
-        task = '150步短程训练完成；' + task
+        task = f'{target}步训练完成；' + task
+    epochs = marker.get('target_epochs')
+    label = f'{epochs}轮试验训练' if isinstance(epochs, int) and epochs > 0 else f'{target}步工程训练'
+    pending = _read_json(project_dir / 'next_external_execution.json') or {}
+    if pending.get('run_dir') and pending['run_dir'] != str(run):
+        pending_epochs, pending_steps = pending.get('target_epochs'), pending.get('target_steps')
+        if isinstance(pending_epochs, int) and isinstance(pending_steps, int):
+            task += f'；下一阶段：{pending_epochs}轮、每条件{pending_steps}步，待当前任务结束'
     return LobsterAgent(
         id='external-' + hashlib.sha256(project_dir.name.encode()).hexdigest()[:12],
         name='四卡训练（恢复运行）', layer='execution',
         run_id=run.name, run_dir=str(run), config_path='',
         project_id=project_dir.name, status=status, current_stage=14,
         current_task=task, stage_progress={14: 'running' if alive else 'completed' if finished else 'failed'},
-        role_tag='150步工程训练',
+        role_tag=label,
     )
 
 
