@@ -22,6 +22,7 @@ const zh: Record<string, string> = {
   'project.status.running': '运行中',
   'project.status.queued': '排队中',
   'project.status.completed': '已完成',
+  'project.status.engineering_complete': '短程训练完成',
   'project.status.interrupted': '已中断',
   'project.status.new': '新建',
   'project.mode.lab': 'Lab 探索',

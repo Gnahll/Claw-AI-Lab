@@ -100,15 +100,33 @@ def validate(payload: dict, expected: list[str]) -> None:
 
 
 def _equivalent_bibliography_entries(left: str, right: str) -> bool:
-    """Only URL/lookup-date variations of the same DOI record are harmless."""
-    def doi(entry: str) -> str:
-        match = re.search(r'\bdoi\s*=\s*[{"]([^}"]+)[}"]', entry, re.I)
-        return re.sub(r'^https?://(?:dx\.)?doi\.org/', '', match.group(1).strip().lower()) if match else ''
-    def core(entry: str) -> str:
-        value = re.sub(r'(?im)^\s*(?:url|urldate|accessdate)\s*=\s*(?:\{[^{}]*\}|"[^"]*")\s*,?[ \t]*$', '', entry)
-        value = re.sub(r',\s*}', '}', value)
-        return re.sub(r'\s+', '', value).casefold()
-    return bool(doi(left)) and doi(left) == doi(right) and core(left) == core(right)
+    """Accept the same scholarly record from DOI and arXiv providers.
+
+    Providers may disagree on non-identity fields such as ``journal`` and one
+    may expose an arXiv identifier as a DOI while another uses ``eprint``.
+    """
+    def field(entry: str, name: str) -> str:
+        match = re.search(rf'\b{name}\s*=\s*[{{"]([^}}"]+)[}}"]', entry, re.I)
+        return re.sub(r'\s+', ' ', match.group(1).strip()).casefold() if match else ''
+
+    def identity(entry: str) -> str:
+        doi = field(entry, "doi")
+        if doi:
+            doi = re.sub(r'^https?://(?:dx\.)?doi\.org/', '', doi)
+            arxiv_doi = re.fullmatch(r'10\.48550/arxiv\.(.+)', doi, re.I)
+            return f"arxiv:{arxiv_doi.group(1).lower()}" if arxiv_doi else f"doi:{doi}"
+        eprint = field(entry, "eprint")
+        if eprint:
+            return f"arxiv:{eprint.removeprefix('arxiv:').lower()}"
+        url = field(entry, "url")
+        match = re.search(r'arxiv\.org/(?:abs|pdf)/([^/?#]+)', url, re.I)
+        return f"arxiv:{match.group(1).removesuffix('.pdf').lower()}" if match else ''
+
+    same_title = field(left, "title") and field(left, "title") == field(right, "title")
+    same_year = field(left, "year") and field(left, "year") == field(right, "year")
+    same_author = field(left, "author") and field(left, "author") == field(right, "author")
+    left_id, right_id = identity(left), identity(right)
+    return bool(same_title and same_year and (same_author or (left_id and left_id == right_id)))
 
 
 def _merge_bibliographies(sources: list[dict]) -> tuple[dict[str, str], list[dict]]:

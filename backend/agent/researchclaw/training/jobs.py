@@ -71,7 +71,10 @@ def require_idle_gpu(gpu_uuid: str) -> None:
     processes = gpu_rows("gpu_uuid,pid,used_gpu_memory", applications=True)
     if any(row[0] == gpu_uuid for row in processes):
         raise RuntimeError("Allocated GPU is occupied; no training was started")
-    if float(selected[0][1]) > 256 or float(selected[0][2]) > 0:
+    # Driver utilization can lag after a process exits (and may report 100%
+    # with no process and zero allocated memory). Process ownership and memory
+    # are the reliable admission checks for an idle allocated device.
+    if float(selected[0][1]) > 256:
         raise RuntimeError("Allocated GPU is not idle; no training was started")
 
 

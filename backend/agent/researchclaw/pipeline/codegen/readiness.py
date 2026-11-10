@@ -74,9 +74,15 @@ def _has_training_entrypoint(files: dict[str, str]) -> bool:
     class Calls(ast.NodeVisitor):
         def __init__(self, module: str):
             self.module = module
-            self.imports = imports[module]
+            self.imports = dict(imports[module])
             self.names: set[str] = set()
             self.training = False
+
+        def visit_ImportFrom(self, node):
+            # Training scripts often import their author trainer inside the
+            # reachable entrypoint after adding the runtime project to sys.path.
+            for alias in node.names:
+                self.imports[alias.asname or alias.name] = f'{node.module}.{alias.name}'.lower()
 
         def visit_FunctionDef(self, node): pass
         def visit_AsyncFunctionDef(self, node): pass

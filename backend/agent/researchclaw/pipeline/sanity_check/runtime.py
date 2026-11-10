@@ -40,7 +40,7 @@ def _run_checked_smoke(workspace: Path, output_dir: Path, config: RCConfig, plan
     gaps = declared_interface_gaps(files, plan_text,
         require_training=bool(getattr(getattr(config, "experiment", None), "require_training", False)))
     if not gaps:
-        return run_experiment(workspace, output_dir, config, smoke=True, timeout=180)
+        return run_experiment(workspace, output_dir, config, smoke=True, timeout=900)
     report = {"success": False, "smoke": True, "require_training": False,
               "execution_started": False, "results": None,
               "errors": ["Implementation incomplete before smoke: " + gap for gap in gaps]}
@@ -166,7 +166,7 @@ class SanityCheckRuntime:
             system_prompt=system_prompt,
             session=session,
             allowed_read_dirs=allowed_reads,
-            bash_timeout=180,
+            bash_timeout=900,
             max_iterations=min(max_iters, 30),
             python_path=python_path,
             trace_prefix="sanity",

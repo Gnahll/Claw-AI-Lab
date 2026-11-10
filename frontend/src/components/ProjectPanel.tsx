@@ -6,6 +6,7 @@ const STATUS_ICONS: Record<string, { color: string; icon: string }> = {
   running:     { color: '#22c55e', icon: '▶' },
   queued:      { color: '#f59e0b', icon: '⏳' },
   completed:   { color: '#3b82f6', icon: '✓' },
+  engineering_complete: { color: '#22c55e', icon: '✓' },
   interrupted: { color: '#ef4444', icon: '⏸' },
   new:         { color: '#94a3b8', icon: '○' },
 };

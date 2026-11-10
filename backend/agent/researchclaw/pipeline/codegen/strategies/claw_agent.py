@@ -146,11 +146,10 @@ class ClawAgentStrategy:
             repair_round += 1
             session.log(CodegenPhase.GENERATE, f"Implementation incomplete; targeted repair "
                         f"{repair_round}/{self._MAX_REPAIR_ROUNDS}: " + "; ".join(gaps))
-            if repair_round > 1:
-                # The files are on disk. A fresh conversation keeps later repair
-                # prompts small instead of resending every earlier tool call.
-                loop = new_loop()
-            repaired = loop.run_turn(self._repair_message(gaps, fresh_conversation=repair_round > 1))
+            # The files are on disk. Start every repair with a fresh conversation;
+            # the initial 40-turn transcript can exceed the API context limit.
+            loop = new_loop()
+            repaired = loop.run_turn(self._repair_message(gaps, fresh_conversation=True))
             repaired.iterations += turn_result.iterations
             repaired.tool_calls += turn_result.tool_calls
             repaired.elapsed_sec += turn_result.elapsed_sec

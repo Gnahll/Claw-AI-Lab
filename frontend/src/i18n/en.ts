@@ -22,6 +22,7 @@ const en: Record<string, string> = {
   'project.status.running': 'Running',
   'project.status.queued': 'Queued',
   'project.status.completed': 'Completed',
+  'project.status.engineering_complete': 'Short training complete',
   'project.status.interrupted': 'Interrupted',
   'project.status.new': 'New',
   'project.mode.lab': 'Lab Explore',
