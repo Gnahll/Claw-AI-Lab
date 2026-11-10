@@ -1800,6 +1800,67 @@ def _reset_agent_idle(agent: LobsterAgent) -> None:
         agent.name = base
 
 
+
+def _external_execution_agent(project_dir: Path):
+    """Observe an explicitly registered external run without scheduling it."""
+    marker = _read_json(project_dir / 'external_execution.json')
+    if not marker:
+        return None
+    run = Path(marker.get('run_dir', ''))
+    if not run.is_absolute() or run.parent != project_dir:
+        return None
+    pid = marker.get('supervisor_pid')
+    alive = False
+    if isinstance(pid, int) and pid > 0:
+        try:
+            command = Path('/proc', str(pid), 'cmdline').read_bytes().replace(bytes([0]), b' ').decode(errors='replace')
+            alive = str(run.resolve()) in command and 'supervisor.py' in command
+        except OSError:
+            pass
+    result = _read_json(run / 'results.json') or {}
+    target = int(marker.get('target_steps', 150))
+    rows = []
+    completed = []
+    for condition, value in result.get('conditions', {}).items():
+        if not isinstance(value, dict):
+            continue
+        steps = value.get('optimizer_steps_completed', value.get('completed_optimizer_steps', value.get('completed_steps',
+                value.get('training', {}).get('unique_steps', 0))))
+        steps = steps if isinstance(steps, int) else 0
+        rows.append(f'{condition}: {steps}/{target}')
+        completed.append(steps >= target)
+    progress = result.get('progress', result.get('last_progress', {}))
+    if isinstance(progress, dict) and progress.get('condition') not in result.get('conditions', {}):
+        condition = progress.get('condition')
+        if condition:
+            steps = progress.get('completed_optimizer_steps', progress.get('completed_optimizer_executions', progress.get('step', 0)))
+            rows.append(f'{condition}: {steps}/{target}')
+    exit_code = None
+    try:
+        exit_code = int((run / 'exit_code.txt').read_text().strip())
+    except (OSError, ValueError):
+        pass
+    finished = not alive and exit_code == 0 and len(completed) >= 2 and all(completed)
+    status = 'working' if alive else 'done' if finished else 'error'
+    task = '；'.join(rows) or str(result.get('status', '模型加载与训练预检'))
+    if status == 'error':
+        task = '训练已停止，需检查日志；' + task
+    elif status == 'done':
+        task = '150步短程训练完成；' + task
+    return LobsterAgent(
+        id='external-' + hashlib.sha256(project_dir.name.encode()).hexdigest()[:12],
+        name='四卡训练（恢复运行）', layer='execution',
+        run_id=run.name, run_dir=str(run), config_path='',
+        project_id=project_dir.name, status=status, current_stage=14,
+        current_task=task, stage_progress={14: 'running' if alive else 'completed' if finished else 'failed'},
+        role_tag='150步工程训练',
+    )
+
+
+def _external_execution_messages(state: BridgeState) -> list[dict]:
+    return [msg_agent_update(agent) for project in state.projects_dir().iterdir()
+            if project.is_dir() and (agent := _external_execution_agent(project)) is not None]
+
 def list_all_projects(state: BridgeState) -> list[dict]:
     """Scan runs/projects/ and return status info for all projects."""
     projects_dir = state.projects_dir()
@@ -1859,6 +1920,13 @@ def list_all_projects(state: BridgeState) -> list[dict]:
         total_stages = TOTAL_STAGES
         completed_threshold = total_stages
 
+        observed = _external_execution_agent(proj_dir)
+        if observed is not None:
+            if observed.status == 'working':
+                running_project_ids.add(project_id)
+            last_stage = 14 if observed.status == 'done' else 13
+            last_name = observed.current_task
+
         short_training_done = False
         for run_name in ('run-ppt-four-scale-revision3-20261110',
                          'run-ppt-four-scale-revision2-20261110'):
@@ -1873,6 +1941,8 @@ def list_all_projects(state: BridgeState) -> list[dict]:
             status = 'running'
         elif project_id in queued_project_ids:
             status = 'queued'
+        elif observed is not None:
+            status = 'engineering_complete' if observed.status == 'done' else 'interrupted'
         elif short_training_done:
             status = 'engineering_complete'
             last_stage = max(last_stage, 14)
@@ -3257,6 +3327,7 @@ async def handle_command(state: BridgeState, data: dict) -> list[dict]:
     if cmd == "list_agents":
         for a in state.agents.values():
             messages.append(msg_agent_update(a))
+        messages.extend(_external_execution_messages(state))
         messages.append(msg_queue_update(state.queues))
         messages.append(msg_project_list(list_all_projects(state)))
 
@@ -3555,6 +3626,9 @@ async def ws_handler(state: BridgeState, websocket: websockets.ServerConnection)
     except websockets.ConnectionClosed:
         pass
 
+    for message in _external_execution_messages(state):
+        await websocket.send(json.dumps(message, ensure_ascii=False))
+
     # Send existing artifacts from completed stages
     try:
         for msg in _scan_existing_artifacts(state):
@@ -3674,6 +3748,7 @@ async def poll_loop(state: BridgeState, interval: float):
         if state._project_list_counter >= 10:  # type: ignore[attr-defined]
             state._project_list_counter = 0  # type: ignore[attr-defined]
             all_messages.append(msg_project_list(list_all_projects(state)))
+            all_messages.extend(_external_execution_messages(state))
 
         await broadcast(state, all_messages)
 
