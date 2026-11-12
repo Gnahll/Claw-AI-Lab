@@ -92,6 +92,12 @@ class ResultAnalysisRuntime:
             topic=topic,
         )
 
+        scope_path = run_dir / "stage-14/runs/completed_run_scope.md"
+        if (run_dir / "external_result_import.json").is_file():
+            from researchclaw.pipeline.external_results import validate_import
+            validate_import(run_dir)
+            user_message += "\n\n" + scope_path.read_text(encoding="utf-8")
+
         request = self._analysis_refine_request(run_dir)
         if request:
             user_message += (

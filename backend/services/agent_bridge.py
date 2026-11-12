@@ -360,6 +360,11 @@ def _pause_project(state: "BridgeState", project_id: str) -> list[dict]:
     if not project_id:
         return messages
 
+    policy_path = state.projects_dir() / project_id / 'external_handoff_policy.json'
+    policy = _read_json(policy_path)
+    if policy:
+        _write_json(policy_path, {**policy, 'enabled': False})
+
     stopped = 0
     for agent in list(state.agents.values()):
         if agent.project_id == project_id:
@@ -1665,6 +1670,8 @@ def on_agent_done(state: BridgeState, agent: LobsterAgent) -> list[dict]:
 
     # Create follow-up task in the next queue
     output_queue_name = LAYER_OUTPUT_QUEUE.get(agent.layer)
+    if agent.layer == 'writing' and (Path(agent.run_dir) / 'external_result_import.json').is_file():
+        output_queue_name = None
     if output_queue_name and output_queue_name in state.queues and agent.project_id:
         # L4→L5: only push if S17 PROCEED
         if agent.layer == "execution" and output_queue_name == "execution_to_writing":
@@ -1675,12 +1682,13 @@ def on_agent_done(state: BridgeState, agent: LobsterAgent) -> list[dict]:
             if _decision_file.exists():
                 _dec_text = _decision_file.read_text(encoding="utf-8").upper()
                 _is_proceed = "PROCEED" in _dec_text and "REFINE" not in _dec_text.split("PROCEED")[0][-50:]
-            if not _is_proceed and _warning_file.exists():
+            _external_import = (Path(agent.run_dir) / 'external_result_import.json').is_file()
+            if not _is_proceed and not _external_import and _warning_file.exists():
                 _warn_text = _warning_file.read_text(encoding="utf-8")
                 if "max pivots" in _warn_text.lower():
                     _is_proceed = True
                     messages.append(msg_log(agent, "S17 决策为 REFINE 但已达最大迭代次数，强制进入论文写作", "warning"))
-            if not _is_proceed and _summary_file.exists():
+            if not _is_proceed and not _external_import and _summary_file.exists():
                 try:
                     import json as _json
                     _summary = _json.loads(_summary_file.read_text(encoding="utf-8"))
@@ -1864,6 +1872,44 @@ def _external_execution_agent(project_dir: Path):
     )
 
 
+def _advance_external_runs(state: BridgeState) -> list[dict]:
+    """Queue each opted-in completed comparison once, starting after S14."""
+    messages = []
+    if state.agent_package_dir not in sys.path:
+        sys.path.insert(0, state.agent_package_dir)
+    from researchclaw.pipeline.external_results import prepare
+    for project in state.projects_dir().iterdir():
+        policy = _read_json(project / 'external_handoff_policy.json') or {}
+        if policy.get('enabled') is not True:
+            continue
+        observed = _external_execution_agent(project)
+        if observed is None or observed.status != 'done' or observed.run_dir != policy.get('source_run'):
+            continue
+        key = hashlib.sha256(str(Path(observed.run_dir).resolve()).encode()).hexdigest()[:12]
+        task_id = 'external-analysis-' + key
+        if any(t.id == task_id for q in state.queues.values() for t in q.tasks):
+            continue
+        record_path = project / 'external_handoff_status.json'
+        record = _read_json(record_path) or {}
+        if record.get('state') == 'blocked' and time.time() - record.get('time', 0) < 60:
+            continue
+        try:
+            run = prepare(project, policy)
+            meta = _read_project_meta(str(project)) or {}
+            task = Task(id=task_id, project_id=project.name, run_dir=str(run),
+                        config_path=policy['config_path'], topic=meta.get('topic', ''),
+                        source_layer='execution', target_layer='execution', created_at=_now_ms())
+            state.queues['coding_to_execution'].push(task)
+            _write_json(record_path, {'state': 'queued', 'run_dir': str(run), 'task_id': task_id,
+                                     'source_run': observed.run_dir, 'time': time.time()})
+            messages.append(msg_log(observed, '训练结果已核验并交接：S15 复核 → S16 分析；沿用已完成训练预算', 'success'))
+            messages.append(msg_queue_update(state.queues))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            _write_json(record_path, {'state': 'blocked', 'error': str(exc), 'time': time.time()})
+            messages.append(msg_log(observed, '结果交接待处理：' + str(exc), 'error'))
+    return messages
+
+
 def _external_execution_messages(state: BridgeState) -> list[dict]:
     return [msg_agent_update(agent) for project in state.projects_dir().iterdir()
             if project.is_dir() and (agent := _external_execution_agent(project)) is not None]
@@ -1931,8 +1977,9 @@ def list_all_projects(state: BridgeState) -> list[dict]:
         if observed is not None:
             if observed.status == 'working':
                 running_project_ids.add(project_id)
-            last_stage = 14 if observed.status == 'done' else 13
-            last_name = observed.current_task
+            if last_stage <= 14:
+                last_stage = 14 if observed.status == 'done' else 13
+                last_name = observed.current_task
 
         short_training_done = False
         for run_name in ('run-ppt-four-scale-revision3-20261110',
@@ -1949,7 +1996,7 @@ def list_all_projects(state: BridgeState) -> list[dict]:
         elif project_id in queued_project_ids:
             status = 'queued'
         elif observed is not None:
-            status = 'engineering_complete' if observed.status == 'done' else 'interrupted'
+            status = 'engineering_complete' if observed.status == 'done' and last_stage <= 14 else 'interrupted'
         elif short_training_done:
             status = 'engineering_complete'
             last_stage = max(last_stage, 14)
@@ -3743,6 +3790,9 @@ async def poll_loop(state: BridgeState, interval: float):
         # Poll active discussions
         for group in list(state.discussion_groups.values()):
             all_messages.extend(_poll_discussion(state, group))
+
+        # Import completed external training before assigning the next-stage queue.
+        all_messages.extend(_advance_external_runs(state))
 
         # Schedule idle agents
         sched_msgs = schedule_idle_agents(state)

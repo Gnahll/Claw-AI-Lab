@@ -295,6 +295,7 @@ def execute_pipeline(
             stage == Stage.RESEARCH_DECISION
             and result.status == StageStatus.DONE
             and result.decision in DECISION_ROLLBACK
+            and not (run_dir / "external_result_import.json").is_file()
         ):
             pivot_count = _read_pivot_count(run_dir)
             # R6-4: Skip REFINE if experiment metrics are empty for consecutive cycles
