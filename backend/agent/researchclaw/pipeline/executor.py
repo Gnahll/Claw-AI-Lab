@@ -4389,6 +4389,15 @@ def _execute_iterative_refine(
     The full implementation uses a claw-code agentic turn loop to analyze
     results, modify code, and re-run experiments iteratively.
     """
+    if (run_dir / "external_result_import.json").is_file():
+        from researchclaw.pipeline.external_results import review
+        try:
+            review(run_dir, stage_dir)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            return StageResult(stage=Stage.ITERATIVE_REFINE, status=StageStatus.FAILED,
+                               artifacts=(), error=f"External result review failed: {exc}")
+        return StageResult(stage=Stage.ITERATIVE_REFINE, status=StageStatus.DONE,
+                           artifacts=("refinement_log.json", "experiment_final/", "results.json"))
     from researchclaw.pipeline.iterative_refine import execute_iterative_refine
     return execute_iterative_refine(
         stage_dir=stage_dir,
@@ -11118,6 +11127,17 @@ def execute_stage(
     auto_approve_gates: bool = False,
 ) -> StageResult:
     """Execute one pipeline stage, validate outputs, and apply gate logic."""
+
+    # Imported runs are analysis-only even if a stale UI command asks for S14.
+    if (run_dir / "external_result_import.json").is_file() and int(stage) <= 14:
+        return StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(),
+                           error="Completed external run is analysis-only; training cannot be relaunched here")
+
+    if (run_dir / "external_result_import.json").is_file():
+        from dataclasses import replace
+        scope = (run_dir / "stage-14/runs/completed_run_scope.md").read_text(encoding="utf-8")
+        config = replace(config, research=replace(config.research,
+            details=(getattr(config.research, "details", "") + "\n\n" + scope)))
 
     # The file/UI topic stays short. Every stage receives the separately stored
     # details as labeled context, including resume and downstream writing stages.

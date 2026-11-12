@@ -400,12 +400,14 @@ export default function App() {
                 );
               })}
             </div>
-            <div className={`feedback-loop ${agentMap[AgentLayer.EXECUTION].some((a) => a.status === 'done') ? 'active' : ''}`}>
+            {(state.queues.execution_feedback?.assigned ?? 0) > 0 && (
+            <div className="feedback-loop active">
               <div className="fb-line fb-bottom" />
               <div className="fb-line fb-side"><div className="fb-pulse" /></div>
               <div className="fb-line fb-top" />
               <div className="fb-tip" />
             </div>
+            )}
           </div>
         </div>
 
