@@ -97,6 +97,9 @@ class ResultAnalysisRuntime:
             from researchclaw.pipeline.external_results import validate_import
             validate_import(run_dir)
             user_message += "\n\n" + scope_path.read_text(encoding="utf-8")
+            user_message += ("\nRead training_evidence.json: report recovered epoch histories and all mechanism "
+                             "warnings. Missing measurements are not zero. Do not infer that a fusion mechanism "
+                             "was effective merely from final AP when logged activity is near zero.")
 
         request = self._analysis_refine_request(run_dir)
         if request:
@@ -256,7 +259,7 @@ class ResultAnalysisRuntime:
 
         # Copy key standalone result files
         _RESULT_FILES = (
-            "results.json", "results_v0.json", "refinement_log.json",
+            "results.json", "results_v0.json", "refinement_log.json", "training_evidence.json",
             "experiment_summary.json", "sanity_report.json",
         )
         for fname in _RESULT_FILES:

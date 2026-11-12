@@ -93,7 +93,7 @@ def prepare(project: Path, policy: dict) -> Path:
         if not old.is_dir():
             continue
         for item in old.iterdir():
-            if item.is_file() and not item.is_symlink() and item.suffix in {".md", ".json", ".yaml", ".jsonl"} and item.stat().st_size < 2_000_000:
+            if item.is_file() and not item.is_symlink() and item.suffix in {".md", ".json", ".yaml", ".jsonl", ".bib"} and item.stat().st_size < 2_000_000:
                 target = staging / old.name / item.name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(item, target)
@@ -153,6 +153,9 @@ def validate_import(run_dir: Path) -> dict:
 
 def review(run_dir: Path, stage_dir: Path) -> None:
     receipt = validate_import(run_dir)
+    # Recover compact measured evidence before S16, including logs omitted by results.json.
+    from researchclaw.pipeline.artifact_audit import collect_training_evidence
+    collect_training_evidence(Path(receipt['source_run']), stage_dir)
     stage_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(run_dir / "stage-14/runs/results.json", stage_dir / "results.json")
     shutil.copy2(run_dir / "stage-14/runs/completed_run_scope.md", stage_dir / "completed_run_scope.md")

@@ -4416,6 +4416,11 @@ def _run_chart_generation(
     llm: Any | None = None,
 ) -> None:
     """Generate charts for S16 using visualize.py (shared by agentic and legacy paths)."""
+    from researchclaw.pipeline.artifact_audit import plot_training_evidence
+    try:
+        plot_training_evidence(run_dir, stage_dir)
+    except Exception as exc:
+        logger.warning("Saved-training diagnostic charts unavailable: %s", exc)
     try:
         from researchclaw.experiment.visualize import (
             generate_all_charts as _gen_charts,
@@ -8988,6 +8993,14 @@ def _execute_paper_revision(
             "selected_source": "original_draft_no_llm",
             "remaining_conflicts": draft_conflicts,
         }
+    from researchclaw.pipeline.artifact_audit import manuscript_errors
+    structure_errors = manuscript_errors(revised)
+    if structure_errors:
+        (stage_dir / "paper_revision_rejected.md").write_text(revised, encoding="utf-8")
+        (stage_dir / "manuscript_structure_errors.json").write_text(json.dumps(structure_errors), encoding="utf-8")
+        return StageResult(stage=Stage.PAPER_REVISION, status=StageStatus.FAILED,
+                           artifacts=("paper_revision_rejected.md", "manuscript_structure_errors.json"),
+                           error="; ".join(structure_errors))
     revised, _dup_figures = _dedupe_markdown_figures(revised)
     if _dup_figures:
         logger.info("Stage 22: Removed %d repeated figure reference(s)", _dup_figures)
@@ -10971,7 +10984,8 @@ def _execute_citation_verify(
         )
         return StageResult(
             stage=Stage.CITATION_VERIFY,
-            status=StageStatus.DONE,
+            status=StageStatus.FAILED,
+            error="Citation verification cannot complete without a bibliography",
         artifacts=("verification_report.json", "references_verified.bib"),
             evidence_refs=(
                 "stage-26/verification_report.json",
@@ -11081,7 +11095,8 @@ def _execute_citation_verify(
 
     return StageResult(
         stage=Stage.CITATION_VERIFY,
-        status=StageStatus.DONE,
+        status=StageStatus.DONE if report_data["summary"]["fully_verified"] else StageStatus.FAILED,
+        error=None if report_data["summary"]["fully_verified"] else "Citation verification incomplete; see verification_report.json",
         artifacts=tuple(artifacts),
         evidence_refs=tuple(f"stage-26/{a}" for a in artifacts),
     )
@@ -11136,6 +11151,13 @@ def execute_stage(
     if (run_dir / "external_result_import.json").is_file():
         from dataclasses import replace
         scope = (run_dir / "stage-14/runs/completed_run_scope.md").read_text(encoding="utf-8")
+        evidence_path = run_dir / "stage-15/training_evidence.json"
+        if evidence_path.is_file():
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            warnings = evidence.get("warnings", [])
+            scope += "\nSaved training evidence is available in stage-15/training_evidence.json."
+            if warnings:
+                scope += "\nMandatory mechanism limitations (retain in analysis and manuscript):\n" + "\n".join(warnings)
         config = replace(config, research=replace(config.research,
             details=(getattr(config.research, "details", "") + "\n\n" + scope)))
 

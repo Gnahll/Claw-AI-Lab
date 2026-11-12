@@ -799,6 +799,10 @@ def _package_deliverables(
         except (ValueError, OSError):
             citation_state = "requires_review"
 
+    from researchclaw.pipeline.artifact_audit import audit_package
+    artifact_audit = audit_package(dest)
+    packaged.append("artifact_audit.json")
+
     # --- Write manifest ---
     manifest = {
         "run_id": run_id,
@@ -806,6 +810,8 @@ def _package_deliverables(
         "files": packaged,
         "generated": _utcnow_iso(),
         "publication_status": "draft_requires_review",
+        "artifact_checks_passed": artifact_audit["ready"],
+        "artifact_errors": artifact_audit["errors"],
         "quality_gate": quality_state,
         "citation_verification": citation_state,
         "notes": {

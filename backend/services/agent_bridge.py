@@ -1989,7 +1989,18 @@ def list_all_projects(state: BridgeState) -> list[dict]:
                 short_training_done = True
                 break
 
-        if last_stage >= completed_threshold:
+        artifact_errors = []
+        for sub in proj_dir.glob('run-*'):
+            sub_cp = _read_json(sub / 'checkpoint.json') or {}
+            if sub_cp.get('last_completed_stage', 0) != last_stage:
+                continue
+            audit = _read_json(sub / 'deliverables/artifact_audit.json') or {}
+            if audit.get('ready') is False:
+                artifact_errors.extend(audit.get('errors', []))
+        if last_stage >= completed_threshold and artifact_errors:
+            status = 'interrupted'
+            last_name = '产物待修订：' + '；'.join(artifact_errors[:3])
+        elif last_stage >= completed_threshold:
             status = 'completed'
         elif project_id in running_project_ids:
             status = 'running'
