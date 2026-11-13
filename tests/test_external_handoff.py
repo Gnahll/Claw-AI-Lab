@@ -98,5 +98,16 @@ class HandoffTests(unittest.TestCase):
         bridge._advance_external_runs(state)
         self.assertEqual(queue.tasks, [])
 
+    def test_archived_phase_hidden_without_removing_artifacts(self):
+        state = SimpleNamespace(projects_dir=lambda: self.root / 'projects', agents={}, queues={})
+        self.assertIsNotNone(bridge._external_execution_agent(self.project))
+        self.assertEqual(len(bridge.list_all_projects(state)), 1)
+        ex.write(self.project / 'project_meta.json', {'ui_archived': True, 'canonical_project_id': 'current'})
+        self.assertIsNone(bridge._external_execution_agent(self.project))
+        self.assertEqual(bridge.list_all_projects(state), [])
+        self.assertEqual((self.source / 'final.pt').read_bytes(), b'fixture weights')
+        ex.write(self.project / 'project_meta.json', {'ui_archived': False})
+        self.assertEqual(len(bridge.list_all_projects(state)), 1)
+
 
 if __name__ == '__main__': unittest.main()
