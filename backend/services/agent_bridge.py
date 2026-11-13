@@ -1811,6 +1811,8 @@ def _reset_agent_idle(agent: LobsterAgent) -> None:
 
 def _external_execution_agent(project_dir: Path):
     """Observe an explicitly registered external run without scheduling it."""
+    if (_read_json(project_dir / 'project_meta.json') or {}).get('ui_archived') is True:
+        return None
     marker = _read_json(project_dir / 'external_execution.json')
     if not marker:
         return None
@@ -1950,6 +1952,8 @@ def list_all_projects(state: BridgeState) -> list[dict]:
             continue
         project_id = proj_dir.name
         meta = _read_json(proj_dir / "project_meta.json")
+        if meta and meta.get('ui_archived') is True:
+            continue
         project_mode = meta.get("mode", "lab") if meta else "lab"
 
         # Read checkpoint: top-level first, then aggregate from sub-runs (Lab mode)
