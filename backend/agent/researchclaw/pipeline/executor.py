@@ -9793,15 +9793,25 @@ def _sanitize_fabricated_data(
 
 
 def _paper_citation_keys(paper: str) -> set[str]:
+    # Ignore examples/comments; support LaTeX optional arguments and Pandoc keys.
+    paper = re.sub(r"```.*?```|`[^`\n]*`|<!--.*?-->", "", paper, flags=re.DOTALL)
+    paper = re.sub(r"(?m)(?<!\\)%[^\n]*", "", paper)
     keys: set[str] = set()
-    for match in re.finditer(r"\\cite\w*\{([^}]+)\}|\[([^\]\n]+)\]", paper):
+    for match in re.finditer(
+        r"\\(?:cite\w*|nocite)\*?(?:\s*\[[^\]\n]*\])*\s*\{([^}]+)\}|\[([^\]\n]+)\]", paper
+    ):
         inner = match.group(1) or match.group(2)
+        if match.group(1) is not None:
+            keys.update(k.strip() for k in inner.split(",") if k.strip() != "*")
+            continue
+        pandoc = re.findall(r"(?<![\w])@([A-Za-z][A-Za-z0-9_:.\-]*)", inner)
+        if pandoc:
+            keys.update(k.rstrip(".") for k in pandoc)
+            continue
         parts = re.split(r"[,;]\s*", inner)
-        if match.group(1) is not None or all(
-            re.fullmatch(r"[A-Za-z][A-Za-z0-9_:-]*\d{4}[A-Za-z0-9_:-]*", part.strip())
-            for part in parts
-        ):
-            keys.update(part.strip() for part in parts)
+        if all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_:-]*\d{4}[A-Za-z0-9_:-]*", k.strip()) for k in parts):
+            keys.update(k.strip() for k in parts)
+    keys.update(m.rstrip(".") for m in re.findall(r"(?<![\w@])@([A-Za-z][A-Za-z0-9_:.\-]*)", paper))
     return keys
 
 
@@ -10995,14 +11005,24 @@ def _execute_citation_verify(
 
     s2_api_key = getattr(config.llm, "s2_api_key", "") or ""
 
-    from researchclaw.literature.verify import parse_bibtex_entries
-    _n_entries = len(parse_bibtex_entries(bib_text))
+    # The collected bibliography is a literature pool, not the manuscript's
+    # reference list. Never spend the verification budget on uncited entries.
+    bibliography_entries = _bibliography_entries(bib_text)
+    bibliography_keys = set(bibliography_entries)
+    cited_keys = _paper_citation_keys(paper_text)
+    if re.search(r"\\nocite\s*\{\s*\*\s*\}", paper_text):
+        cited_keys |= bibliography_keys
+    selected_keys = cited_keys & bibliography_keys
+    selected_bib = "\n\n".join(
+        bibliography_entries[key] for key in sorted(selected_keys)
+    )
+    _n_entries = len(selected_keys)
     logger.info(
         "[citation-verify] Verifying %d references "
         "(DOI→CrossRef > OpenAlex > arXiv > S2)…",
         _n_entries,
     )
-    report = verify_citations(bib_text, s2_api_key=s2_api_key)
+    report = verify_citations(selected_bib, s2_api_key=s2_api_key)
     logger.info(
         "[citation-verify] Done: %d verified, %d suspicious, "
         "%d hallucinated, %d skipped (integrity: %.0f%%)",
@@ -11023,13 +11043,11 @@ def _execute_citation_verify(
             if score is not None:
                 cr.relevance_score = score
 
-    bibliography_keys = set(_bibliography_entries(bib_text))
-    cited_keys = _paper_citation_keys(paper_text)
     verified_keys = {
         result.cite_key for result in report.results
         if result.status == VerifyStatus.VERIFIED
     }
-    pending_keys = bibliography_keys - verified_keys
+    pending_keys = selected_keys - verified_keys
     missing_keys = cited_keys - bibliography_keys
     low_relevance_keys = {
         result.cite_key for result in report.results
@@ -11038,10 +11056,14 @@ def _execute_citation_verify(
     report_data = report.to_dict()
     report_data["summary"].update({
         "bibliography_total": len(bibliography_keys),
+        "verification_scope": "manuscript_citations",
+        "uncited_bibliography_total": len(bibliography_keys - cited_keys),
+        "uncited_bibliography_keys": sorted(bibliography_keys - cited_keys),
+        "scope_error": None if paper_text.strip() and cited_keys else "Manuscript missing or no supported citation keys found",
         "cited_total": len(cited_keys),
-        "integrity_score": len(verified_keys & bibliography_keys) / len(bibliography_keys) if bibliography_keys else 0.0,
-        "verified_fraction": len(verified_keys & bibliography_keys) / len(bibliography_keys) if bibliography_keys else 0.0,
-        "fully_verified": bool(bibliography_keys) and not pending_keys and not missing_keys and not low_relevance_keys,
+        "integrity_score": len(verified_keys & cited_keys) / len(cited_keys) if cited_keys else 0.0,
+        "verified_fraction": len(verified_keys & cited_keys) / len(cited_keys) if cited_keys else 0.0,
+        "fully_verified": bool(paper_text.strip()) and bool(cited_keys) and not pending_keys and not missing_keys and not low_relevance_keys,
         "pending_citation_keys": sorted(pending_keys),
         "unresolved_citation_keys": sorted(missing_keys),
         "low_relevance_citation_keys": sorted(low_relevance_keys),
@@ -11056,7 +11078,8 @@ def _execute_citation_verify(
     verified_bib = _correct_bibtex_dois(bib_text, doi_corrections) if doi_corrections else bib_text
     report_data["summary"]["corrected_doi_keys"] = sorted(doi_corrections)
     report_data["note"] = (
-        "Original citations and bibliography are preserved. Pending and low-relevance entries "
+        "Only manuscript citations were verified; uncited bibliography entries were not checked. "
+        "Original citations and the full bibliography are preserved. Pending and low-relevance cited entries "
         "require review; no references were removed."
         + (" DOIs that pointed to a different paper were corrected in references_verified.bib "
            "(original kept as references_original.bib)." if doi_corrections else "")
