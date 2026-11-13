@@ -9926,6 +9926,49 @@ _REFERENCE_ITEM_RE = re.compile(
 )
 
 
+
+def _repair_reference_metadata(bib_text: str) -> tuple[str, list[str]]:
+    """Recover explicitly formatted titles/identifiers, never infer a missing work."""
+    from researchclaw.literature.verify import parse_bibtex_entries
+    changes = []
+    entries = _bibliography_entries(bib_text)
+    for key, raw in entries.items():
+        parsed = parse_bibtex_entries(raw)
+        if not parsed:
+            continue
+        fields = parsed[0]
+        title = fields.get("title", "")
+        source = title if title.startswith("*") else fields.get("note", "") if not title else ""
+        match = re.search(r"(?<!\*)\*([^*]+)\*(?!\*)", source)
+        if not match:
+            continue
+        recovered = match.group(1).strip().rstrip(".")
+        if not recovered:
+            continue
+        updates = {"title": recovered}
+        clean_source = re.sub(r"\\([_%&#])", r"\1", raw)
+        url = re.search(r"https?://[^\s){}]+", clean_source)
+        if url and not fields.get("url"):
+            updates["url"] = url.group(0).split("?")[0]
+        arxiv = re.search(r"arxiv\.org/(?:abs|pdf)/(\d{4}\.\d{4,5}(?:v\d+)?)", clean_source)
+        if arxiv and not fields.get("eprint"):
+            updates["eprint"] = arxiv.group(1)
+        if not fields.get("year"):
+            year = re.search(r"\b(?:19|20)\d{2}\b", source[match.end():].split("http")[0])
+            if year:
+                updates["year"] = year.group(0)
+        updated = raw
+        if title:
+            updated = re.sub(r"\btitle\s*=\s*\{[^{}]*\}", "title = {" + recovered + "}", updated, count=1)
+            updates.pop("title")
+        extra = ",\n".join("  " + k + " = {" + v + "}" for k, v in updates.items())
+        if extra:
+            updated = updated.rstrip()[:-1].rstrip().rstrip(",") + ",\n" + extra + "\n}"
+        if updated != raw:
+            bib_text = bib_text.replace(raw, updated, 1)
+            changes.append(key)
+    return bib_text, changes
+
 def _reference_list_entries(paper: str) -> dict[str, str]:
     """BibTeX for ``[key] Authors. Title. Venue, Year.`` lines under References."""
     heading = re.search(r"^#{1,3}[ \t]*(?:References|Bibliography)[ \t]*$", paper, re.MULTILINE | re.IGNORECASE)
@@ -9953,7 +9996,7 @@ def _reference_list_entries(paper: str) -> dict[str, str]:
             )
             for name, value in fields.items()
         )
-        entries[key] = f"@misc{{{key},\n{body}\n}}"
+        entries[key] = _repair_reference_metadata(f"@misc{{{key},\n{body}\n}}")[0]
     return entries
 
 
@@ -10844,6 +10887,8 @@ def _check_citation_relevance(
     llm: Any,
     topic: str,
     results: list[Any],
+    *,
+    paper: str = "",
 ) -> dict[str, float | None]:
     """Use LLM to assess relevance of each citation to the research topic.
 
@@ -10852,7 +10897,9 @@ def _check_citation_relevance(
     """
     citation_lines = []
     for cr in results:
-        citation_lines.append(f"- [{cr.cite_key}] \"{cr.title}\"")
+        contexts = [p for p in paper.split("\n\n") if cr.cite_key in p]
+        context = "\n".join(contexts[:3])[:2400]
+        citation_lines.append(f"- [{cr.cite_key}] {cr.title}\nCitation context: {context or chr(45)}")
     if not citation_lines:
         return {}
 
@@ -10867,6 +10914,9 @@ def _check_citation_relevance(
             f"Research topic: {topic}\n\n"
             f"Rate the relevance of each citation to the research topic "
             f"on a scale of 0.0 to 1.0.\n"
+            "Judge its specific role in the supplied citation context, not title similarity alone. "
+            "Background, contrast, evaluation protocols and mathematical tools can be relevant "
+            "without sharing the main task. Do not penalize an explicitly stated distinction.\n"
             f"Return ONLY a JSON object mapping cite_key to relevance score.\n"
             f"Example: {{\"smith2020\": 0.9, \"jones2019\": 0.2}}\n\n"
             f"Citations:\n{citations_text}"
@@ -11003,6 +11053,8 @@ def _execute_citation_verify(
             ),
         )
 
+    original_bib_text = bib_text
+    bib_text, metadata_repairs = _repair_reference_metadata(bib_text)
     s2_api_key = getattr(config.llm, "s2_api_key", "") or ""
 
     # The collected bibliography is a literature pool, not the manuscript's
@@ -11036,7 +11088,7 @@ def _execute_citation_verify(
     # --- Relevance check: assess topical relevance of verified citations ---
     if llm is not None and report.results:
         relevance_scores = _check_citation_relevance(
-            llm, config.research.topic, report.results
+            llm, config.research.topic, report.results, paper=paper_text
         )
         for cr in report.results:
             score = relevance_scores.get(cr.cite_key)
@@ -11057,6 +11109,7 @@ def _execute_citation_verify(
     report_data["summary"].update({
         "bibliography_total": len(bibliography_keys),
         "verification_scope": "manuscript_citations",
+        "metadata_repaired_keys": metadata_repairs,
         "uncited_bibliography_total": len(bibliography_keys - cited_keys),
         "uncited_bibliography_keys": sorted(bibliography_keys - cited_keys),
         "scope_error": None if paper_text.strip() and cited_keys else "Manuscript missing or no supported citation keys found",
@@ -11091,8 +11144,8 @@ def _execute_citation_verify(
         _escape_bib_specials(verified_bib), encoding="utf-8"
     )
     artifacts = ["verification_report.json", "references_verified.bib"]
-    if doi_corrections:
-        (stage_dir / "references_original.bib").write_text(bib_text, encoding="utf-8")
+    if doi_corrections or metadata_repairs:
+        (stage_dir / "references_original.bib").write_text(original_bib_text, encoding="utf-8")
         artifacts.append("references_original.bib")
     if paper_text.strip():
         annotated = paper_text
