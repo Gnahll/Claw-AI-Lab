@@ -83,6 +83,8 @@ class ResultAnalysisRuntime:
         topic = getattr(config.research, "topic", "") or ""
         metric_key = getattr(config.experiment, "metric_key", "primary_metric")
         metric_direction = getattr(config.experiment, "metric_direction", "minimize")
+        from researchclaw.pipeline.paper_evidence import emit_reporting_contract
+        contract = emit_reporting_contract(run_dir, workspace, metric_key, metric_direction)
 
         user_message = build_user_message(
             workspace_path=str(workspace),
@@ -91,6 +93,13 @@ class ResultAnalysisRuntime:
             metric_direction=metric_direction,
             topic=topic,
         )
+        user_message += ("\n\nRead paper_reporting_contract.json. Its report_metric, when present, is the "
+                         "paper axis/table metric; optimizer_objective is a separate optimization target. "
+                         "Preserve scene counts, loss-window counts and unknown threshold policies. "
+                         "Inspect experiment_final/source and source_manifest.json when present; for legacy "
+                         "external imports read the explicitly registered source in SOURCE.md through the allowed read root. "
+                         "Code availability is not proof of an immutable training-time history.\n"
+                         + json.dumps(contract, ensure_ascii=False))
 
         scope_path = run_dir / "stage-14/runs/completed_run_scope.md"
         if (run_dir / "external_result_import.json").is_file():
@@ -166,6 +175,8 @@ class ResultAnalysisRuntime:
         )
 
         artifacts = []
+        emit_reporting_contract(run_dir, stage_dir, metric_key, metric_direction)
+        artifacts.append("paper_reporting_contract.json")
         if has_analysis:
             artifacts.append("analysis.md")
         if has_summary:
@@ -183,6 +194,16 @@ class ResultAnalysisRuntime:
                 session.log("RESULT", "Copied charts/ to stage_dir")
             except OSError:
                 pass
+        # The canonical chart uses validated measured AP; do not trust a generated
+        # negative-objective chart merely because its PNG exists.
+        try:
+            emit_reporting_contract(run_dir, stage_dir, metric_key, metric_direction, chart=True)
+            if (stage_dir / "paper_metric_chart.json").exists():
+                artifacts.append("paper_metric_chart.json")
+                if "charts/" not in artifacts:
+                    artifacts.append("charts/")
+        except ImportError:
+            session.log("RESULT", "Reporting contract saved; plotting dependency unavailable")
 
         if not success:
             return StageResult(
@@ -329,6 +350,11 @@ class ResultAnalysisRuntime:
     @staticmethod
     def _build_allowed_reads(config: RCConfig, run_dir: Path) -> list[Path]:
         dirs: list[Path] = [run_dir]
+        if (run_dir / "external_result_import.json").exists():
+            from researchclaw.pipeline.paper_evidence import external_source_root
+            source, _ = external_source_root(run_dir)
+            if source is not None:
+                dirs.append(source)
         for attr in ("existing_project_dir", "datasets_dir", "checkpoints_dir", "codebases_dir"):
             d = getattr(config.experiment, attr, "") or ""
             if d and Path(d).is_dir():

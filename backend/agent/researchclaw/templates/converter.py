@@ -171,14 +171,14 @@ def _sanitize_latex_output(
         re.DOTALL,
     )
     _cite_re = re.compile(
-        rf"\[({_CITE_KEY_PAT_L}(?:\s*,\s*{_CITE_KEY_PAT_L})*)\]"
+        rf"\[({_CITE_KEY_PAT_L}(?:\s*[,;]\s*{_CITE_KEY_PAT_L})*)\]"
     )
 
     def _cite_outside_verbatim(tex_src: str) -> str:
         parts = _VERBATIM_RE.split(tex_src)
         for i, part in enumerate(parts):
             if not _VERBATIM_RE.match(part):
-                parts[i] = _cite_re.sub(r"\\cite{\1}", part)
+                parts[i] = _cite_re.sub(lambda m: "\\cite{" + re.sub(r"\s*;\s*", ",", m.group(1)) + "}", part)
         return "".join(parts)
 
     tex = _cite_outside_verbatim(tex)
@@ -860,7 +860,7 @@ _FENCED_CODE_RE = re.compile(r"^```(\w*)\n(.*?)^```", re.MULTILINE | re.DOTALL)
 _TABLE_SEP_RE = re.compile(r"^\|[-:| ]+\|$")
 
 # Markdown image pattern: ![caption](path)
-_IMAGE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
+_IMAGE_RE = re.compile(r"^!\[((?:[^\[\]\n]|\[[^\[\]\n]*\])*)\]\(([^)]+)\)\s*$")
 
 # Bullet / numbered list patterns
 _BULLET_RE = re.compile(r"^(\s*)-\s+(.+)")
@@ -943,18 +943,17 @@ def _convert_block(text: str) -> str:
             # Check if previous line is a table caption (e.g. **Table 1: ...**)
             table_caption = ""
             if output:
-                prev = output[-1].strip()
-                # Match bold caption: \textbf{Table N...} (already converted)
-                # or raw markdown: **Table N: ...**
-                cap_m = re.match(
-                    r"(?:\\textbf\{|[*]{2})\s*Table\s+\d+[.:]?\s*(.*?)(?:\}|[*]{2})$",
-                    prev,
-                )
+                previous = i - 1
+                while previous >= 0 and not lines[previous].strip():
+                    previous -= 1
+                # Read the raw caption so inline markup is converted only once.
+                cap_m = re.match(r"\*\*\s*Table\s+\d+[.:]?\s*(.*?)\*\*$",
+                                 lines[previous].strip()) if previous >= 0 else None
                 if cap_m:
-                    table_caption = f"Table {cap_m.group(1)}" if cap_m.group(1) else ""
-                    if not table_caption:
-                        table_caption = prev
-                    output.pop()  # Remove caption line from output (now inside table)
+                    table_caption = cap_m.group(1).strip()
+                    while output and not output[-1].strip():
+                        output.pop()
+                    output.pop()
             table_lines, i = _collect_table(lines, i)
             output.append(_render_table(table_lines, caption=table_caption))
             continue
@@ -1117,7 +1116,7 @@ def _auto_table_caption(header: list[str], table_num: int) -> str:
     rest = [_convert_inline(c) for c in cols[1:min(5, len(cols))]]
     # Detect common table types by first-column header
     _HP_HINTS = {"hyperparameter", "parameter", "param", "hp", "setting", "config"}
-    _ABL_HINTS = {"component", "variant", "ablation", "configuration", "module"}
+    _ABL_HINTS = {"ablation"}
     _MODEL_HINTS = {"model", "method", "approach", "algorithm", "baseline"}
     if any(h in col0 for h in _HP_HINTS):
         return f"Hyperparameter settings"
@@ -1263,6 +1262,7 @@ def _render_figure(caption: str, path: str) -> str:
     fig_num = _next_figure_num()
     # Sanitize path for LaTeX: replace spaces, keep underscores
     path = path.replace(" ", "_")
+    caption = re.sub(r"^Figure\s+\d+[.:]\s*", "", caption)
     cap_tex = _convert_inline(caption) if caption else f"Figure {fig_num}"
     label_key = re.sub(r"[^a-z0-9]+", "_", caption.lower()).strip("_")[:30]
     if not label_key:

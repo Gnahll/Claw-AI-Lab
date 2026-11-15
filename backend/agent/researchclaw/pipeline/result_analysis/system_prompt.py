@@ -91,8 +91,12 @@ Write a clear scientific analysis including:
 # Chart requirements
 Generate publication-quality charts in `charts/` using matplotlib. Include at minimum:
 1. **Main comparison bar chart** (`charts/fig_main_comparison.png`):
-   Bar chart comparing all conditions/methods on the primary metric with error bars
-   (std or CI95). Use distinct colors per condition.
+   Bar chart comparing conditions on the measured paper-reporting metric. If
+   paper_reporting_contract.json supplies report_metric, use that value, unit
+   and direction, not a transformed optimizer objective such as negative AP.
+   Add error bars only when supported by independent repeated observations;
+   a single stored condition value does not justify std or CI95.
+   Report evaluated scene counts separately from validation-loss window counts.
 2. **Per-metric breakdown** (`charts/fig_metric_breakdown.png`):
    If there are multiple metrics, show a grouped bar chart or radar chart.
 3. **Statistical significance** (`charts/fig_paired_comparison.png`):

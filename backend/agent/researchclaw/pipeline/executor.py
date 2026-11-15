@@ -8417,7 +8417,7 @@ Generated: {_utcnow_iso()}
     )
 
 
-_METHOD_FILE_HINTS = ("model", "operator", "module", "method", "layer", "attention", "net", "block", "head")
+_METHOD_FILE_HINTS = ("fusion", "spectral", "geometry", "loss", "conditioning", "calibration", "training_runtime", "model", "operator", "module", "method", "layer", "attention", "net", "block", "head")
 _PAPER_SOURCE_SKIP_DIRS = {"__pycache__", "outputs", "datasets", "checkpoints", "codebases", "repair_backup", "tests"}
 
 
@@ -8429,18 +8429,25 @@ def _final_code_dir(run_dir: Path) -> Path | None:
     return None
 
 
-def _implementation_sources(run_dir: Path, budget: int = 16000) -> str:
+def _implementation_sources(run_dir: Path, budget: int = 48000) -> str:
     """The experiment's own source files, model/operator files first, within *budget* chars.
 
     The paper's Method section and the reviewer need the code that produced the
     results; the hypotheses and outline describe what was planned, not what ran.
     """
-    code_dir = _final_code_dir(run_dir)
+    from researchclaw.pipeline.paper_evidence import external_source_root, source_files
+    external = (run_dir / "external_result_import.json").is_file()
+    try:
+        code_dir, provenance = external_source_root(run_dir)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return f"IMPLEMENTATION SOURCE UNAVAILABLE: registered external source verification failed: {exc}. Do not substitute planned or unrelated code."
+    if not external:
+        code_dir, provenance = _final_code_dir(run_dir), "adopted_pipeline_source"
     if code_dir is None:
         return ""
-    files = [path for path in code_dir.rglob("*.py")
-             if not any(part.startswith(".") or part in _PAPER_SOURCE_SKIP_DIRS
-                        for part in path.relative_to(code_dir).parts[:-1])]
+    files = list(source_files(code_dir))
+    if not files:
+        return "IMPLEMENTATION SOURCE UNAVAILABLE: no eligible code/configuration files were supplied; do not reconstruct execution from the proposed outline."
 
     def priority(path: Path) -> tuple[int, int, str]:
         name = path.stem.lower()
@@ -8452,7 +8459,8 @@ def _implementation_sources(run_dir: Path, budget: int = 16000) -> str:
             rank = 1
         return rank, path.stat().st_size, path.as_posix()
 
-    parts: list[str] = []
+    parts: list[str] = [f"Source provenance: {provenance}; root: {code_dir}. "
+                        "A snapshot/live source is not an independently verified training-time execution history."]
     remaining = budget
     for path in sorted(files, key=priority):
         if remaining < 400:
@@ -8463,9 +8471,10 @@ def _implementation_sources(run_dir: Path, budget: int = 16000) -> str:
         except (OSError, UnicodeDecodeError):
             continue
         rel = path.relative_to(code_dir).as_posix()
-        take = code[: min(len(code), remaining - 100, 7000)]
+        take = code[: min(len(code), remaining - 100)]
         suffix = "" if len(take) == len(code) else f"\n# ... truncated ({len(code)} chars total)"
-        parts.append(f"#### {rel}\n```python\n{take}{suffix}\n```")
+        language = "python" if path.suffix == ".py" else "yaml"
+        parts.append(f"#### {rel}\n```{language}\n{take}{suffix}\n```")
         remaining -= len(take) + 100
     return "\n\n".join(parts)
 
@@ -8540,8 +8549,9 @@ def _implementation_fidelity_block(run_dir: Path | None) -> str:
     inventory = _result_inventory(run_dir)
     if not sources and not inventory:
         return ""
-    block = ["\n\nIMPLEMENTATION FIDELITY (HARD RULE): The Method section describes the code that was "
-             "actually run, shown below. Take every operation, tensor size, number of heads/keys/bands, "
+    block = ["\n\nIMPLEMENTATION FIDELITY (HARD RULE): Describe the retained implementation shown below "
+             "and preserve its stated provenance limits; import-time/live source is not proof of immutable "
+             "training-time execution. Take every operation, tensor size, number of heads/keys/bands, "
              "temperature, kernel size, which parameters are shared or separate, and every new parameter "
              "from this code. Do not describe components, equations or projections that the code does not "
              "contain; when the outline or hypotheses differ from the code, follow the code. Optimizer, "
@@ -8550,16 +8560,38 @@ def _implementation_fidelity_block(run_dir: Path | None) -> str:
     if sources:
         block.append("### Implementation sources\n" + sources)
     if inventory:
-        block.append("DATA AVAILABILITY (HARD RULE): everything listed below was measured or recorded. Never "
-                     "write that a setting, a baseline score, a corruption result, a failure analysis or any "
-                     "other listed item is unavailable, missing or not provided; report it instead.\n"
+        block.append("DATA AVAILABILITY: report explicitly measured values below instead of claiming they are absent. "
+                     "A recorded filename alone does not establish its contents, usability or mechanism effectiveness. "
+                     "Keep missing measurements distinct from zero.\n"
                      "### Measured results and recorded files\n" + inventory)
+    block.append(_paper_reporting_block(run_dir))
     return "\n\n".join(block) + "\n"
+
+
+def _paper_reporting_block(run_dir: Path) -> str:
+    from researchclaw.pipeline.paper_evidence import load_measured_results, reporting_contract
+    results = load_measured_results(run_dir)
+    # External comparisons record their objective semantics alongside measured AP.
+    contract = reporting_contract(results)
+    for path in (run_dir / "stage-16/paper_reporting_contract.json", run_dir / "stage-25/paper_reporting_contract.json"):
+        try:
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            if saved.get("measured_results_sha256") == contract["measured_results_sha256"]:
+                contract = saved
+                break
+        except (OSError, ValueError):
+            pass
+    return ("PAPER REPORTING CONTRACT: use the measured report_metric for paper axes and tables, not a "
+            "negative optimization objective. State evaluated scenes, budget and seed scope. Do not call "
+            "unknown precision/recall operating points a shared fixed threshold. Counts alone do not verify "
+            "official benchmark membership. This is descriptive evidence, not scientific acceptance.\n"
+            + json.dumps(contract, ensure_ascii=False, indent=2))
 
 
 def _collect_experiment_evidence(run_dir: Path) -> str:
     """Collect actual experiment parameters and results for peer review."""
     evidence_parts: list[str] = []
+    evidence_parts.append(_paper_reporting_block(run_dir))
     exp_summary = _load_experiment_summary(run_dir)
     selected_version = str((exp_summary or {}).get("selected_version", ""))
     has_final_version = selected_version.startswith(f"stage-{int(Stage.ITERATIVE_REFINE):02d}")
@@ -10044,8 +10076,8 @@ def _execute_export_publish(
         _deg_threshold = _deg_signal.get("threshold", "N/A")
         _deg_notice = (
             "\n\n> **Note:** This paper was produced in degraded mode. "
-            f"Quality gate score ({_deg_score}/{_deg_threshold}) was below "
-            "threshold. This is a draft requiring revision. Original numerical "
+            f"Quality review score was {_deg_score}/10, below the required "
+            f"threshold of {_deg_threshold}/10. This is a draft requiring revision. Original numerical "
             "claims have been preserved and require independent verification; "
             "no numbers have been replaced.\n\n"
         )
@@ -10209,6 +10241,15 @@ def _execute_export_publish(
     except Exception as exc:  # noqa: BLE001
         logger.warning("Chart generation failed: %s", exc)
 
+    # Separate publication metrics from optimizer objectives even when S25 is
+    # resumed with pre-existing S16 charts from an older platform version.
+    from researchclaw.pipeline.paper_evidence import emit_reporting_contract
+    try:
+        emit_reporting_contract(run_dir, stage_dir, config.experiment.metric_key,
+                                config.experiment.metric_direction, chart=True)
+    except ImportError:
+        logger.warning("Paper metric contract saved; canonical chart dependency unavailable")
+
     # FIGURE_PROMPT blocks are instructions for the image model; turn them
     # into real figures (rendered or fallback) copied into charts/.
     final_paper, _prompt_figures = _figure_prompts_to_markdown(
@@ -10227,6 +10268,9 @@ def _execute_export_publish(
 
     # Initialize artifacts list
     artifacts = ["paper_final.md"]
+    artifacts.append("paper_reporting_contract.json")
+    if (stage_dir / "paper_metric_chart.json").is_file():
+        artifacts.append("paper_metric_chart.json")
     if any((stage_dir / "charts").glob("*.png")):
         artifacts.append("charts/")
     # F2.7: Post-process citations — [cite_key] → \cite{cite_key}
