@@ -4,6 +4,7 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -108,6 +109,68 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual((self.source / 'final.pt').read_bytes(), b'fixture weights')
         ex.write(self.project / 'project_meta.json', {'ui_archived': False})
         self.assertEqual(len(bridge.list_all_projects(state)), 1)
+
+    def validation_hold(self, kind='ior'):
+        report = {'all_312_scenes_completed_per_condition': True, 'scene_omissions': [],
+                  'protocol': {'scenes': [f'scene{i:04d}_00' for i in range(312)]},
+                  'comparisons': {c: {'AP': 10, 'scenes': 312} for c in ['method', 'baseline']}}
+        if kind == 'ior':
+            directory = self.source / 'full312_epoch_3'
+            ex.write(self.source / 'status.json', {'phase': 'held_after_full_validation_regression',
+                     'completed_epochs': 3, 'gate': {'continuation_passed': False}})
+        else:
+            directory = self.source / 'full312'
+            ex.write(self.source / 'status.json', {'phase': 'needs_method_revision'})
+            ex.write(self.source / 'readiness_result.json', {'ready_for_long_training': False})
+        ex.write(directory / 'full_validation_result.json', report)
+        (self.source / 'exit_code.txt').write_text('1')
+        return directory, report
+
+    def test_completed_negative_validation_is_revision_not_crash_or_success(self):
+        self.validation_hold()
+        state = SimpleNamespace(projects_dir=lambda: self.root / 'projects', agents={}, queues={})
+        observed = bridge._external_execution_agent(self.project)
+        self.assertEqual(observed.status, 'idle')
+        self.assertIn('完整312场景验证已完成', observed.current_task)
+        self.assertNotIn('需检查日志', observed.current_task)
+        self.assertEqual(bridge.list_all_projects(state)[0]['status'], 'needs_revision')
+
+    def test_reliability_revision_requires_completed_comparison(self):
+        directory, report = self.validation_hold('reliability')
+        self.assertEqual(bridge._external_execution_agent(self.project).status, 'idle')
+        report['comparisons']['method']['scenes'] = 311
+        ex.write(directory / 'full_validation_result.json', report)
+        self.assertEqual(bridge._external_execution_agent(self.project).status, 'error')
+
+    def test_runtime_failure_does_not_reuse_stale_negative_report(self):
+        self.validation_hold()
+        ex.write(self.source / 'status.json', {'phase': 'failed', 'error': 'CUDA out of memory'})
+        self.assertEqual(bridge._external_execution_agent(self.project).status, 'error')
+
+    def test_live_process_takes_precedence_over_stale_validation_hold(self):
+        self.validation_hold()
+        ex.write(self.project / 'external_execution.json', {'run_dir': str(self.source), 'supervisor_pid': 123})
+        with patch.object(Path, 'read_bytes', return_value=(str(self.source.resolve()) + ' supervisor.py').encode()):
+            self.assertEqual(bridge._external_execution_agent(self.project).status, 'working')
+
+    def test_revision_cannot_advance_to_paper_handoff(self):
+        self.validation_hold()
+        queue = bridge.TaskQueue('coding_to_execution', self.root / 'queue.json')
+        state = SimpleNamespace(agent_package_dir=str(AGENT), projects_dir=lambda: self.root / 'projects',
+                                queues={'coding_to_execution': queue})
+        bridge._advance_external_runs(state)
+        self.assertEqual(queue.tasks, [])
+
+    def test_outside_report_or_missing_evidence_stays_error(self):
+        self.validation_hold()
+        ex.write(self.source / 'status.json', {'phase': 'held_after_full_validation_regression',
+                 'evaluation_dir': str(self.root), 'gate': {'continuation_passed': False}})
+        self.assertEqual(bridge._external_execution_agent(self.project).status, 'error')
+
+    def test_zero_exit_cannot_turn_declared_hold_into_success(self):
+        self.validation_hold()
+        (self.source / 'exit_code.txt').write_text('0')
+        self.assertEqual(bridge._external_execution_agent(self.project).status, 'error')
 
 
 if __name__ == '__main__': unittest.main()

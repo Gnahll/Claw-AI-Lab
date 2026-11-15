@@ -24,6 +24,8 @@ const zh: Record<string, string> = {
   'project.status.completed': '已完成',
   'project.status.engineering_complete': '短程训练完成',
   'project.status.interrupted': '已中断',
+  'project.status.needs_revision': '验证未通过，待改进',
+  'project.count_needs_revision': '{n} 待改进',
   'project.status.new': '新建',
   'project.mode.lab': 'Lab 探索',
   'project.mode.reproduce': '论文复现',
