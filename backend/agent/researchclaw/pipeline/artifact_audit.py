@@ -22,8 +22,15 @@ def manuscript_errors(text: str) -> list[str]:
         value = re.sub(r'\s*\{[^}]*\}\s*$', '', value)
         headings.append(value)
     counts = Counter(headings)
-    return [f'Duplicate manuscript section: {key} ({counts[key]})'
+    errors = [f'Duplicate manuscript section: {key} ({counts[key]})'
             for key in ('title', 'abstract', 'introduction', 'method', 'methods', 'conclusion') if counts[key] > 1]
+    images = re.findall(r'!\[((?:[^\[\]\n]|\[[^\[\]\n]*\])*)\]\(([^)]+)\)', body)
+    paths = {path.strip().lstrip('./') for _, path in images}
+    if paths:
+        dangling = sorted({int(n) for n in re.findall(r'\bFigure\s+(\d+)\b', body)} - set(range(1, len(paths) + 1)))
+        if dangling:
+            errors.append('Figure references exceed the number of unique images: ' + ', '.join(map(str, dangling)))
+    return errors
 
 
 def audit_package(dest: Path) -> dict:
@@ -34,7 +41,7 @@ def audit_package(dest: Path) -> dict:
     text = paper.read_text(encoding='utf-8') if paper.is_file() else ''
     errors = manuscript_errors(text)
     if not text.strip(): errors.append('Manuscript missing or empty')
-    for link in re.findall(r'!\[[^\]]*\]\(([^)]+)\)', text):
+    for _, link in re.findall(r'!\[((?:[^\[\]\n]|\[[^\[\]\n]*\])*)\]\(([^)]+)\)', text):
         if link.startswith(('http://', 'https://', 'data:')): continue
         path = dest / link.split(' "')[0].strip('<>')
         if not path.is_file(): errors.append('Missing figure: ' + link)

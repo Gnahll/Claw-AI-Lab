@@ -161,10 +161,13 @@ def review(run_dir: Path, stage_dir: Path) -> None:
     shutil.copy2(run_dir / "stage-14/runs/completed_run_scope.md", stage_dir / "completed_run_scope.md")
     final = stage_dir / "experiment_final"
     final.mkdir(exist_ok=True)
+    from researchclaw.pipeline.paper_evidence import snapshot_sources
+    snapshot_sources(Path(receipt["source_run"]).resolve(), final)
     shutil.copy2(stage_dir / "results.json", final / "results.json")
     (final / "SOURCE.md").write_text(
         "The executed source and weights remain in " + receipt["source_run"] +
-        ". This directory contains imported results only, not regenerated experiment code.\n",
+        ". source/ contains an import-time implementation snapshot, verified by source_manifest.json; "
+        "it is not proof of an immutable training-time source history. No code or training was regenerated.\n",
         encoding="utf-8")
     write(stage_dir / "refinement_log.json", {"adopted": True, "improved": False, "retrained": False,
           "verification_mode": "external_completed_run_review", "source_run": receipt["source_run"],
