@@ -340,7 +340,7 @@ export interface ChatMessage {
 
 // ===================== Project Management =====================
 
-export type ProjectStatus = 'running' | 'queued' | 'completed' | 'interrupted' | 'engineering_complete' | 'new';
+export type ProjectStatus = 'running' | 'queued' | 'completed' | 'interrupted' | 'needs_revision' | 'engineering_complete' | 'new';
 
 export interface ProjectInfo {
   projectId: string;

@@ -8,6 +8,7 @@ const STATUS_ICONS: Record<string, { color: string; icon: string }> = {
   completed:   { color: '#3b82f6', icon: '✓' },
   engineering_complete: { color: '#22c55e', icon: '✓' },
   interrupted: { color: '#ef4444', icon: '⏸' },
+  needs_revision: { color: '#f59e0b', icon: '⏸' },
   new:         { color: '#94a3b8', icon: '○' },
 };
 
@@ -156,12 +157,13 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
   };
 
   const sorted = [...projects].sort((a, b) => {
-    const o: Record<string, number> = { running: 0, queued: 1, interrupted: 2, new: 3, completed: 4 };
+    const o: Record<string, number> = { running: 0, queued: 1, interrupted: 2, needs_revision: 3, new: 4, engineering_complete: 5, completed: 6 };
     return (o[a.status] ?? 5) - (o[b.status] ?? 5);
   });
 
   const running = projects.filter(p => p.status === 'running').length;
   const interrupted = projects.filter(p => p.status === 'interrupted').length;
+  const needsRevision = projects.filter(p => p.status === 'needs_revision').length;
 
   const goLabel = t('project.go_submit');
 
@@ -178,6 +180,7 @@ export default function ProjectPanel({ projects, connected, selectedProjectId, a
           {projects.length > 0 && <span className="project-count">{projects.length}</span>}
           {running > 0 && <span className="project-count running-count">{t('project.count_running', { n: running })}</span>}
           {interrupted > 0 && <span className="project-count interrupted-count">{t('project.count_interrupted', { n: interrupted })}</span>}
+          {needsRevision > 0 && <span className="project-count revision-count">{t('project.count_needs_revision', { n: needsRevision })}</span>}
         </h3>
         <span className="expand-arrow">{panelOpen ? '▾' : '▸'}</span>
       </div>

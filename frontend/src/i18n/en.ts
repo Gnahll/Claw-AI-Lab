@@ -24,6 +24,8 @@ const en: Record<string, string> = {
   'project.status.completed': 'Completed',
   'project.status.engineering_complete': 'Short training complete',
   'project.status.interrupted': 'Interrupted',
+  'project.status.needs_revision': 'Validation complete; revision needed',
+  'project.count_needs_revision': '{n} Need revision',
   'project.status.new': 'New',
   'project.mode.lab': 'Lab Explore',
   'project.mode.reproduce': 'Reproduce',

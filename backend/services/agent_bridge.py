@@ -1809,6 +1809,37 @@ def _reset_agent_idle(agent: LobsterAgent) -> None:
 
 
 
+def _external_validation_hold(run: Path) -> str:
+    """A completed negative comparison is a research hold, never a runtime crash."""
+    state = _read_json(run / 'status.json') or {}
+    phase = state.get('phase')
+    if phase == 'held_after_full_validation_regression':
+        if (state.get('gate') or {}).get('continuation_passed') is not False:
+            return ''
+        evaluation = Path(state.get('evaluation_dir') or str(run / f"full312_epoch_{state.get('completed_epochs')}"))
+    elif phase == 'needs_method_revision':
+        if (_read_json(run / 'readiness_result.json') or {}).get('ready_for_long_training') is not False:
+            return ''
+        evaluation = run / 'full312'
+    else:
+        return ''
+    # Only inspect an explicitly registered run's own report.
+    if not evaluation.resolve().is_relative_to(run.resolve()):
+        return ''
+    report = _read_json(evaluation / 'full_validation_result.json') or {}
+    comparisons = report.get('comparisons') or {}
+    scenes = (report.get('protocol') or {}).get('scenes') or []
+    if (not isinstance(comparisons, dict) or not isinstance(scenes, list)
+            or any(not isinstance(scene, str) for scene in scenes)
+            or report.get('all_312_scenes_completed_per_condition') is not True
+            or report.get('scene_omissions') != [] or len(comparisons) < 2
+            or not scenes or len(set(scenes)) != len(scenes)
+            or any(not isinstance(row, dict) or row.get('scenes') != len(scenes)
+                   for row in comparisons.values())):
+        return ''
+    return f'完整{len(scenes)}场景验证已完成，未达到续训条件；暂停待改进'
+
+
 def _external_execution_agent(project_dir: Path):
     """Observe an explicitly registered external run without scheduling it."""
     if (_read_json(project_dir / 'project_meta.json') or {}).get('ui_archived') is True:
@@ -1850,28 +1881,35 @@ def _external_execution_agent(project_dir: Path):
         exit_code = int((run / 'exit_code.txt').read_text().strip())
     except (OSError, ValueError):
         pass
-    finished = not alive and exit_code == 0 and len(completed) >= 2 and all(completed)
-    status = 'working' if alive else 'done' if finished else 'error'
+    phase = (_read_json(run / 'status.json') or {}).get('phase')
+    finished = (not alive and exit_code == 0 and len(completed) >= 2 and all(completed)
+                and phase not in {'needs_method_revision', 'held_after_full_validation_regression', 'failed'})
+    hold = _external_validation_hold(run) if not alive and exit_code == 1 else ''
+    status = 'working' if alive else 'idle' if hold else 'done' if finished else 'error'
     task = '；'.join(rows) or str(result.get('status', '模型加载与训练预检'))
-    if status == 'error':
+    if hold:
+        task = hold + '；' + task
+    elif status == 'error':
         task = '训练已停止，需检查日志；' + task
     elif status == 'done':
         task = f'{target}步训练完成；' + task
     epochs = marker.get('target_epochs')
     label = f'{epochs}轮试验训练' if isinstance(epochs, int) and epochs > 0 else f'{target}步工程训练'
     pending = _read_json(project_dir / 'next_external_execution.json') or {}
-    if pending.get('run_dir') and pending['run_dir'] != str(run):
+    if not hold and pending.get('run_dir') and pending['run_dir'] != str(run):
         pending_epochs, pending_steps = pending.get('target_epochs'), pending.get('target_steps')
         if isinstance(pending_epochs, int) and isinstance(pending_steps, int):
             task += f'；下一阶段：{pending_epochs}轮、每条件{pending_steps}步，待当前任务结束'
-    return LobsterAgent(
+    agent = LobsterAgent(
         id='external-' + hashlib.sha256(project_dir.name.encode()).hexdigest()[:12],
-        name='四卡训练（恢复运行）', layer='execution',
+        name='四卡实验（待改进）' if hold else '四卡训练（恢复运行）', layer='execution',
         run_id=run.name, run_dir=str(run), config_path='',
         project_id=project_dir.name, status=status, current_stage=14,
-        current_task=task, stage_progress={14: 'running' if alive else 'completed' if finished else 'failed'},
+        current_task=task, stage_progress={14: 'running' if alive else 'pending' if hold else 'completed' if finished else 'failed'},
         role_tag=label,
     )
+    agent._external_validation_hold = hold
+    return agent
 
 
 def _advance_external_runs(state: BridgeState) -> list[dict]:
@@ -2001,7 +2039,10 @@ def list_all_projects(state: BridgeState) -> list[dict]:
             audit = _read_json(sub / 'deliverables/artifact_audit.json') or {}
             if audit.get('ready') is False:
                 artifact_errors.extend(audit.get('errors', []))
-        if last_stage >= completed_threshold and artifact_errors:
+        if observed is not None and getattr(observed, '_external_validation_hold', ''):
+            status = 'needs_revision'
+            last_name = observed.current_task
+        elif last_stage >= completed_threshold and artifact_errors:
             status = 'interrupted'
             last_name = '产物待修订：' + '；'.join(artifact_errors[:3])
         elif last_stage >= completed_threshold:
