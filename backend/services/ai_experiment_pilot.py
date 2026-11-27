@@ -155,6 +155,20 @@ def _instrument_g(file, formulas, parent, changed):
     ])
     _write(file,source)
 
+def patch_osgk_checkpoint_handling(dispatch: Path, trainer: Path):
+    restore = "def recover_final_receipt(out, arm, ep):\n    import torch\n    path=out/'last_resume.pt'\n    if not path.is_file() or (out/'completion.json').exists():\n        return\n    checkpoint=torch.load(path,map_location='cpu',mmap=True,weights_only=False)\n    endpoint=ep['target_steps']\n    if checkpoint.get('step')!=endpoint:\n        return\n    source=Path(ep['source_checkpoint'])\n    assert driver.sha(source)==ep['starting_sha256'], 'Checkpoint lineage mismatch'\n    assert checkpoint['condition']==arm and checkpoint['world_size']==4\n    assert checkpoint['source_sha256']==ep['starting_sha256'] and checkpoint['source_step']==ep['source_step']\n    assert checkpoint['scheduler']['last_epoch']==endpoint-300 and checkpoint['consumed_batches_per_rank']==endpoint*2\n    assert len(checkpoint['rng_per_rank'])==4\n    state=checkpoint['optimizer']['state']\n    assert state and any(int(float(v['step']))==endpoint-300 for v in state.values() if isinstance(v,dict) and 'step' in v)\n    with (out/'steps.jsonl').open() as file:\n        rows=[json.loads(line) for line in file]\n    assert [row['step'] for row in rows]==list(range(ep['source_step']+1,endpoint+1))\n    assert all(len(row['rank_records'])==4 for row in rows)\n    digest=driver.sha(path)\n    receipt={'step':endpoint,'updates':endpoint-ep['source_step'],'checkpoint_sha256':digest,\n             'continuation_seed':checkpoint['continuation_seed'],'source_sha256':ep['starting_sha256'],\n             'optimizer_reset_both_conditions':False,'optimizer_state_count':len(state),\n             'scheduler_epoch':checkpoint['scheduler']['last_epoch'],'recovered_from_durable_checkpoint':True}\n    driver.write(out/'completion.json',receipt)\n\n"
+    text = dispatch.read_text()
+    text = _replace(text,"def arm_work(arm,previous):",restore+"def arm_work(arm,previous):")
+    text = _replace(text,"    out=job/'training'/arm","    out=job/'training'/arm\n    recover_final_receipt(out,arm,ep)")
+    _write(dispatch,text)
+    text = trainer.read_text()
+    text = _replace(text," if source_path==initial_path:assert stat(source_path)==plan['source_checkpoint_stat'] and source['step']==initial_step",
+        " if source_path==initial_path:\n  assert source['step']==initial_step\n  if stat(source_path)!=plan['source_checkpoint_stat']:check(sha(source_path)==plan['starting_sha256'],'Starting checkpoint content changed')")
+    text = _replace(text,"    check(stat(initial_path)==plan['source_checkpoint_stat'],'Starting checkpoint changed')",
+        "    if stat(initial_path)!=plan['source_checkpoint_stat']:check(sha(initial_path)==plan['starting_sha256'],'Starting checkpoint content changed')")
+    _write(trainer,text)
+
+
 def _trainer_hook(file, family):
     source = "import mechanism_probe as _probe\n" + file.read_text()
     if family == B_FAMILY:
@@ -229,6 +243,7 @@ def install(path: Path, family: str, decision: dict):
             setup["worker_sha256"] = _digest(exp/"directed_worker.py")
             setup["module_sha256"] = _digest(exp/"directed_boundary.py")
         else:
+            patch_osgk_checkpoint_handling(path/"dispatch.py",exp/"train_worker.py")
             _instrument_a(exp/"osgf.py",formulas,parent,changed)
             _trainer_hook(exp/"train_worker.py",family)
     else:
