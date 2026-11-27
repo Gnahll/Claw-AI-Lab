@@ -3,11 +3,14 @@ import json
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai_experiment_loop as loop
 from ai_experiment_cirb import proposal, validate_expression
 from ai_experiment_geometry import OSGK, SPECTRAL, slots_for, verify_numerics
+from ai_experiment_pilot import revision_plan
+import ai_experiment_probe_runtime as probe
 
 
 class ExperimentLoopTests(unittest.TestCase):
@@ -47,7 +50,9 @@ class ExperimentLoopTests(unittest.TestCase):
         def model(_, payload):
             self.calls.append(payload)
             return {"action": action, "diagnosis": "observed problem", "hypothesis": "one changed factor",
-                    "parent": "initial", "edits": edits}
+                    "parent": "initial", "edits": edits,
+                    "experiment":{"observable":next(iter(edits or {}),""),"budget":"screen",
+                                  "question":"Which signal?","expected":"activity differs","budget_reason":"screen"}}
         loop.tick(self.project, self.project, model=model, active=lambda _: active,
                   launch=lambda unit, run: self.started.append((unit, run)))
 
@@ -71,7 +76,8 @@ class ExperimentLoopTests(unittest.TestCase):
         self.result(9)
         self.tick("revise_method", edits={"mask_delta":"x.tanh() * boundary.square() * .55"})
         self.assertEqual(self.state()["status"], "preparing")
-        self.tick()
+        with patch("ai_experiment_pilot.install"):
+            self.tick()
         variant = self.started[0][1]
         new = loop.read(variant / "setup.json")
         self.assertEqual(new["target_steps"], 1350)
@@ -166,6 +172,28 @@ class ExperimentLoopTests(unittest.TestCase):
         }})
         table = loop.terminal_result(self.run,312,SPECTRAL)
         self.assertFalse(loop.is_pass(table,dict(self.policy,family=SPECTRAL)))
+
+    def test_budget_and_indistinguishable_spectral_control(self):
+        reply = {"parent":"initial","experiment":{"observable":"graph_detail","budget":"compare",
+                 "question":"separate graph evidence","expected":"counterfactual differs","budget_reason":"matched"}}
+        with self.assertRaisesRegex(ValueError,"same graph signal"):
+            revision_plan(reply,{"graph_detail":"shared-unweighted"},{},SPECTRAL)
+        a = revision_plan(reply,{"graph_detail":"(weighted-unweighted)+shared"},{},SPECTRAL)
+        self.assertEqual(a["steps_per_arm"],900)
+
+    def test_real_signal_gate_rejects_same_control(self):
+        import importlib
+        import torch
+        probe_test = importlib.reload(probe)
+        dest = self.project/"pilot.json"
+        probe_test.configure(dest,start_step=0,pilot_steps=1,changed_slots=["new"])
+        probe_test.begin(1)
+        value=torch.ones(4)
+        probe_test.observe("new", value*1.2,value)
+        probe_test.observe("control",value,value)
+        with self.assertRaisesRegex(RuntimeError,"MechanismCheckFailed"):
+            probe_test.finish(1,torch.device("cpu"))
+        self.assertFalse(loop.read(dest)["control_separable"])
 
     def test_reject_run_escape(self):
         with self.assertRaises(ValueError):

@@ -25,6 +25,7 @@ ERROR_PATTERNS = (
     ("distributed_timeout", re.compile(r"watchdog.*(?:timeout|timed out)|NCCL.*(?:timeout|timed out)", re.I)),
     ("checkpoint_error", re.compile(r"checkpoint.*(?:corrupt|invalid)|failed finding central directory", re.I)),
     ("code_error", re.compile(r"SyntaxError|NameError|ModuleNotFoundError|ImportError|AttributeError", re.I)),
+    ("mechanism_check_failed", re.compile(r"MechanismCheckFailed", re.I)),
     ("method_numerics", re.compile(r"FloatingPointError|AssertionError|nonfinite|finite learning signal", re.I)),
 )
 
@@ -196,8 +197,10 @@ def call_model(repo: Path, payload: dict) -> dict:
             "parent（initial 或 current）及 edits（公式插入点名到表达式的映射）。"
             "使用输入允许的变量和算子，可重写当前研究方向给定的任意公式插入点。"
             "公式必须使用单行 Python 张量表达式。不能访问文件、网络或执行命令。"
-            "保留零初始化、非空的梯度、输出形状和数值有限性。避免与历史重复。"
-            "不要改动验收、训练预算、数据划分和候选评分；不要宣称尚未测量的效果。"
+            "改方法时另外返回 experiment 对象，含 question（要区分的原因）、observable（被改动的插入点的原英文键名，例如 graph_detail）、"
+            "expected（预期出现的可观测变化）、budget（screen、compare 或 confirm 之一）、budget_reason（理由）。"
+            "优先用 screen 快筛；有独立证据时可用更长预算。保留零初始化、非空的梯度、输出形状和数值有限性。避免与历史重复。"
+            "只在 budget_choices 中选择预算，保持验收、数据划分和候选评分；不要宣称尚未测量的效果。"
         ),
         json_mode=True, max_tokens=1600, strip_thinking=True,
     )
@@ -287,12 +290,22 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
     run = child(project, state["run"])
     if state["status"] == "preparing":
         source = child(project, policy["initial_run"])
-        if family == "cirb_mask_boundary":
-            from ai_experiment_cirb import prepare
-            prepare(source, run, state["variant"], state["decision"])
-        else:
-            from ai_experiment_geometry import prepare
-            prepare(source, run, family, state["variant"], state["decision"])
+        if not run.exists():
+            from ai_experiment_pilot import install
+            with tempfile.TemporaryDirectory(prefix=".ai-preparing-", dir=project) as directory:
+                staged = Path(directory)/"trial"
+                if family == "cirb_mask_boundary":
+                    from ai_experiment_cirb import prepare
+                    prepare(source, staged, state["variant"], state["decision"])
+                else:
+                    from ai_experiment_geometry import prepare
+                    prepare(source, staged, family, state["variant"], state["decision"])
+                install(staged, family, state["decision"])
+                staged.rename(run)
+        elif not (run / "mechanism_plan.json").is_file():
+            # Existing jobs launched before this feature keep their original artifacts.
+            if not (run / "ai_revision.json").is_file():
+                raise ValueError("Cannot identify the existing revision")
         record(project, state, "launching", action="prepare_completed")
     if state["status"] == "launching":
         if not active(state["unit"]):
@@ -334,7 +347,9 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
         outcome = "gate_failed" if metrics is not None else "interrupted"
     errors = [] if metrics is not None else evidence(run)
     counts = read(run / "status.json").get("counts", {})
-    if (outcome == "interrupted" and state.get("formulas") and "method_numerics" in errors
+    if "mechanism_check_failed" in errors:
+        outcome = "method_preflight_failed"
+    elif (outcome == "interrupted" and state.get("formulas") and "method_numerics" in errors
             and not any(tag in errors for tag in ("disk_full", "gpu_memory", "gpu_busy", "checkpoint_error"))
             and all(row.get("steps", 0) < 50 for row in counts.values())):
         outcome = "method_preflight_failed"
@@ -353,6 +368,7 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
     }
     if "revise_method" in actions:
         from ai_experiment_cirb import METHODS, SLOTS, TORCH_CALLS, proposal, verify_numerics
+        from ai_experiment_pilot import BUDGETS, revision_plan
         slots = SLOTS
         numeric_check = verify_numerics
         if family != "cirb_mask_boundary":
@@ -367,6 +383,8 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
                        "arithmetic": ["+", "-", "*", "/", "<", ">", "&", "|"]},
             training_tail=training_statistics(run, family),
             experiment_family=family,
+            budget_choices=BUDGETS[family],
+            mechanics_evidence=read(run / "preflight_mechanism.json"),
             experiment_context=policy.get("research_evidence", "CIRB fixed candidates and scores, depth vs luminance.")
         )
         if state.get("last_rejected"):
@@ -377,7 +395,9 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
         if decision["action"] == "revise_method":
             formulas, revision = proposal(reply, state.get("formulas", {}), state["tested"], slots)
             numeric_check(formulas)
-            decision.update(parent=reply["parent"], formulas=formulas, revision=revision)
+            experiment = revision_plan(reply, formulas, state.get("formulas", {}), family)
+            decision.update(parent=reply["parent"], formulas=formulas, revision=revision,
+                            mechanism_plan=experiment)
             state.pop("last_rejected", None)
     except (ValueError, TypeError, RuntimeError, SyntaxError) as exc:
         state["last_rejected"] = str(exc)[:250] if isinstance(exc, (ValueError, SyntaxError)) else type(exc).__name__
