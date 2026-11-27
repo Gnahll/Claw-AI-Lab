@@ -6,7 +6,7 @@ import unittest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai_experiment_loop as loop
-from ai_experiment_cirb import VARIANTS, prepare
+from ai_experiment_cirb import proposal, validate_expression
 
 
 class ExperimentLoopTests(unittest.TestCase):
@@ -19,7 +19,7 @@ class ExperimentLoopTests(unittest.TestCase):
         for name in ("dispatch.py", "supervisor.py"):
             (self.run / name).write_text("# experiment entry point\n")
         (self.run / "experiment" / "directed_boundary.py").write_text(
-            "def objective(current,guard):\n    return (1+.5*(1-current.mean())+guard)\n"
+            "def objective(current,guard,parts,wb):\n            targets.append((parts*wb).sum(1).mean()+.5*(1-current.mean())+guard)\n"
             "def update(x,boundary,present):\n    delta=.80*x.tanh()*boundary*present\n    return delta\n"
         )
         self.write(self.run / "setup.json", {
@@ -30,7 +30,7 @@ class ExperimentLoopTests(unittest.TestCase):
         self.policy = {
             "enabled": True, "family": "cirb_mask_boundary", "initial_run": self.run.name,
             "initial_unit": "initial", "scenes": 312, "min_ap_gain": .5, "max_ap25_drop": .1,
-            "max_retries_per_run": 3, "variants": list(VARIANTS), "api_retry_seconds": 600,
+            "max_retries_per_run": 3, "api_retry_seconds": 600,
         }
         self.write(self.project / loop.POLICY, self.policy)
         self.calls = []
@@ -42,10 +42,11 @@ class ExperimentLoopTests(unittest.TestCase):
     def state(self):
         return loop.read(self.project / loop.STATE)
 
-    def tick(self, action=None, active=False):
+    def tick(self, action=None, active=False, edits=None):
         def model(_, payload):
             self.calls.append(payload)
-            return {"action": action, "diagnosis": "observed problem", "hypothesis": "one changed factor"}
+            return {"action": action, "diagnosis": "observed problem", "hypothesis": "one changed factor",
+                    "parent": "initial", "edits": edits}
         loop.tick(self.project, self.project, model=model, active=lambda _: active,
                   launch=lambda unit, run: self.started.append((unit, run)))
 
@@ -67,16 +68,17 @@ class ExperimentLoopTests(unittest.TestCase):
 
     def test_gate_failure_revises_and_preserves_original(self):
         self.result(9)
-        self.tick("protect_good_masks")
+        self.tick("revise_method", edits={"mask_delta":"x.tanh() * boundary.square() * .55"})
         self.assertEqual(self.state()["status"], "preparing")
         self.tick()
         variant = self.started[0][1]
         new = loop.read(variant / "setup.json")
         self.assertEqual(new["target_steps"], 1350)
         self.assertEqual(len(new["scene_ids"]), 312)
-        self.assertIn("+2.*guard", (variant / "experiment" / "directed_boundary.py").read_text())
-        self.assertNotIn("+2.*guard", (self.run / "experiment" / "directed_boundary.py").read_text())
-        self.assertEqual(self.state()["tested"], ["protect_good_masks"])
+        self.assertIn("boundary.square()", (variant / "experiment" / "directed_boundary.py").read_text())
+        self.assertNotIn("boundary.square()", (self.run / "experiment" / "directed_boundary.py").read_text())
+        self.assertEqual(len(self.state()["tested"]), 1)
+        self.assertEqual(self.state()["formulas"]["mask_delta"], "x.tanh() * boundary.square() * 0.55")
 
     def test_interruption_requeues_same_checkpoint(self):
         self.tick("resume_checkpoint")
@@ -104,6 +106,27 @@ class ExperimentLoopTests(unittest.TestCase):
         s = {"tested":[], "retries":0}
         self.assertEqual(set(loop.plan_actions(self.policy,s,["gpu_busy"],"interrupted")), {"await_resources"})
         self.assertEqual(set(loop.plan_actions(self.policy,s,["checkpoint_error"],"interrupted")), {"needs_attention"})
+
+    def test_does_not_execute_arbitrary_python_or_repeat(self):
+        for code in ("__import__('os')", "torch.load(x)", "x.__class__", "[x for x in x]"):
+            with self.assertRaises(ValueError):
+                validate_expression("mask_delta", code)
+        request = {"parent":"initial","edits":{"mask_delta":"0.4*x.tanh()*boundary"}}
+        _, key = proposal(request, {}, [])
+        with self.assertRaises(ValueError):
+            proposal(request, {}, [key])
+
+    def test_numerically_invalid_revision_does_not_start(self):
+        self.result(9)
+        self.tick("revise_method", edits={"mask_delta":"boundary"})
+        self.assertEqual(self.state()["status"], "await_ai")
+        self.assertEqual(self.started, [])
+
+    def test_accepts_structured_diagnosis(self):
+        body = {"action":"resume_checkpoint","diagnosis":{"observation":"timeout"},"hypothesis":["retry same checkpoint"]}
+        data = loop.validated_choice(body, {"resume_checkpoint":"resume"})
+        self.assertIn("timeout", data["diagnosis"])
+        self.assertIn("retry same checkpoint", data["hypothesis"])
 
     def test_reject_run_escape(self):
         with self.assertRaises(ValueError):

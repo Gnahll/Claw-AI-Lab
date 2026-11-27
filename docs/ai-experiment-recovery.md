@@ -1,32 +1,30 @@
-# AI 实验诊断与恢复
+# AI 自主复试与断点恢复
 
-`backend/services/ai_experiment_loop.py` 处理显式登记的外部实验。首次启用支持 CIRB 固定评分掩码边缘实验。平台原来的阶段队列可继续使用。
+`backend/services/ai_experiment_loop.py` 监控登记过的外部实验。当前接入 CIRB 的固定评分掩码边缘实验。
 
-在项目根目录设置 `ai_experiment_policy.json`：
+在项目根目录添加 `ai_experiment_policy.json`：
 
 ```json
 {
   "enabled": true,
   "family": "cirb_mask_boundary",
+  "revision_mode": "ai_authored_formulas",
   "initial_run": "run-1350步短训",
   "initial_unit": "claw-cirb-fixed-score-mask-1126",
   "scenes": 312,
   "min_ap_gain": 0.5,
   "max_ap25_drop": 0.1,
   "max_retries_per_run": 3,
-  "api_retry_seconds": 600,
-  "variants": ["protect_good_masks", "reduce_boundary_displacement", "emphasize_iou"]
+  "api_retry_seconds": 600
 }
 ```
-
-用平台的 Python 环境启动服务：
 
 ```bash
 python -B backend/services/ai_experiment_loop.py --repo "$PWD" --projects "$PWD/backend/runs/projects"
 ```
 
-模型沿用平台 `.env` 的 API。模型获得评估分数、故障类别、训练进度和先前尝试，返回诊断与一个登记过的动作。模型没有命令执行入口。API 暂时不可用时，状态记为 `await_ai`，由服务稍后重试。
+模型沿用平台 `.env` 中的 API。每次短训未达标后，它获得实际指标、近期梯度与边缘修正统计、已试过的改动以及上次公式校验反馈。模型自己提出原因、可证伪假设和一至两条张量表达式，可改邻域条件、消息聚合、掩码残差或训练损失。模型可基于原方法或在现有公式上继续调整。
 
-项目内的 `ai_experiment_history.json` 记录每次验收、故障、AI 诊断、假设和执行动作。每个新方法单独建立一个运行目录，`ai_revision.json` 记录实际代码改动、预算和基线。脚本比较统一场景上的主 AP 与 AP25。通过后沿用实验自带的长训接续程序。每种登记方法最多尝试一次。GPU 争用会等待资源，普通中断通过原训练程序读取检查点。磁盘故障、显存不足、代码错误和损坏权重需要明确处理，状态与诊断会保留在记录中。
+平台校验表达式的语法、允许的变量和算子、张量形状、有限性、需要时的梯度和零初始化，随后调用原训练入口的真实预检。重复表达式和无效公式写入状态，其中无效公式会交回模型重新编写。项目里的训练预算、验证集和验收门槛由登记配置控制。
 
-将 `enabled` 改为 `false` 可以禁止后续自动动作。已经启动的训练继续运行。更换实验类型时需登记相应的受控方法和恢复入口。
+每轮另建运行目录。`ai_revision.json` 保存公式和实际代码哈希，`ai_experiment_history.json` 保存历轮原因、假设、指标和进度。普通中断从已有检查点恢复，GPU 忙时等待。磁盘不足、显存不足、代码错误和坏检查点记录后暂停。通过验收时沿用实验自带的长训接续。可用 `max_revisions` 限制复试次数，默认随实验继续。将 `enabled` 设为 `false` 停止产生新任务，已启动的训练继续运行。
