@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai_experiment_loop as loop
 from ai_experiment_cirb import proposal, validate_expression
+from ai_experiment_geometry import OSGK, SPECTRAL, slots_for, verify_numerics
 
 
 class ExperimentLoopTests(unittest.TestCase):
@@ -127,6 +128,44 @@ class ExperimentLoopTests(unittest.TestCase):
         data = loop.validated_choice(body, {"resume_checkpoint":"resume"})
         self.assertIn("timeout", data["diagnosis"])
         self.assertIn("retry same checkpoint", data["hypothesis"])
+
+    def test_each_geometry_family_has_its_own_slots(self):
+        for family, name, code in (
+            (OSGK,"near_far_context","(near-far)/(1+(near-far).abs())"),
+            (SPECTRAL,"graph_detail","(weighted-unweighted)/(1+shared.abs())"),
+        ):
+            formulas, _ = proposal({"parent":"initial","edits":{name:code}}, {}, [], slots_for(family))
+            verify_numerics(family, formulas)
+            self.assertNotIn("mask_delta", slots_for(family))
+
+    def test_osgk_requires_paired_result_receipts(self):
+        self.result(10.6)
+        metrics = loop.read(self.run/"comparison.json")["metrics"]
+        result = {"scenes_each":312,"same_batches":True,
+                  "metrics":{"osgf32":metrics["depth"],"four_scale_baseline":metrics["brightness"]}}
+        folder = self.run/"short"
+        folder.mkdir()
+        self.write(folder/"comparison.json", result)
+        self.assertIsNone(loop.terminal_result(self.run,312,OSGK))
+        for name in result["metrics"]:
+            dest = folder/name
+            dest.mkdir()
+            self.write(dest/"pooled312.json",{"scenes":312})
+        table = loop.terminal_result(self.run,312,OSGK)
+        self.assertTrue(loop.is_pass(table,dict(self.policy,family=OSGK)))
+
+    def test_spectral_gate_checks_frozen_anchor_in_addition_to_control(self):
+        def values(ap):
+            return {"AP":ap,"AP25":42.,"AP50":25.,"AP75":6.}
+        self.write(self.run/"setup.json",{"frozen_metrics":values(10.2)})
+        self.write(self.run/"status.json",{"phase":"completed","counts":{
+            "geometry_spectral":{"scenes":312},"local_correction":{"scenes":312}
+        }})
+        self.write(self.run/"full_validation_result.json",{"scenes_each":312,"comparisons":{
+            "geometry_spectral":values(10.6),"local_correction":values(10.)
+        }})
+        table = loop.terminal_result(self.run,312,SPECTRAL)
+        self.assertFalse(loop.is_pass(table,dict(self.policy,family=SPECTRAL)))
 
     def test_reject_run_escape(self):
         with self.assertRaises(ValueError):

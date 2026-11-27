@@ -41,13 +41,13 @@ BINARY = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.BitAnd, ast.BitOr)
 COMPARISONS = (ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq)
 
 
-def validate_expression(slot: str, expression: str) -> str:
-    if slot not in SLOTS or not isinstance(expression, str) or not 1 <= len(expression) <= 480 or "\n" in expression:
+def validate_expression(slot: str, expression: str, slots=SLOTS) -> str:
+    if slot not in slots or not isinstance(expression, str) or not 1 <= len(expression) <= 480 or "\n" in expression:
         raise ValueError("Invalid formula or insertion point")
     tree = ast.parse(expression.strip(), mode="eval")
     if sum(1 for _ in ast.walk(tree)) > 100:
         raise ValueError("Formula is too complex")
-    variables = set(SLOTS[slot]["variables"].split())
+    variables = set(slots[slot]["variables"].split())
 
     def check(node):
         if isinstance(node, ast.Name) and node.id in variables:
@@ -84,15 +84,15 @@ def validate_expression(slot: str, expression: str) -> str:
     return ast.unparse(tree.body)
 
 
-def proposal(result: dict, previous: dict, used: list[str]) -> tuple[dict, str]:
+def proposal(result: dict, previous: dict, used: list[str], slots=SLOTS) -> tuple[dict, str]:
     edits = result.get("edits")
     if result.get("parent") not in {"initial", "current"} or not isinstance(edits, dict) or not 1 <= len(edits) <= 2:
         raise ValueError("Expected a parent and one or two authored formulas")
     old = previous if result["parent"] == "current" else {}
     formulas = dict(old)
     for slot, expression in edits.items():
-        canonical = validate_expression(slot, expression)
-        default = validate_expression(slot, SLOTS[slot]["default"])
+        canonical = validate_expression(slot, expression, slots)
+        default = validate_expression(slot, slots[slot]["default"], slots)
         if canonical == default:
             formulas.pop(slot, None)
         else:

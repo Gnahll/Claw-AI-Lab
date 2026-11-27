@@ -67,29 +67,57 @@ def log_tail(path: Path, size: int = 12000) -> str:
 
 
 def evidence(run: Path) -> list[str]:
-    paths = list(run.glob("*/training.log")) + list(run.glob("*/preflight.log"))
+    paths = list(run.glob("*/training.log")) + list(run.glob("short/*/training.log")) + list(run.glob("*/preflight.log"))
     text = "\n".join(log_tail(path) for path in sorted(paths) if path.is_file())
     text += "\n" + str(read(run / "status.json").get("error", ""))
     return [name for name, pattern in ERROR_PATTERNS if pattern.search(text)]
 
 
-def training_statistics(run: Path) -> dict:
+FAMILIES = {
+    "cirb_mask_boundary": ("comparison.json", "metrics",
+                           ("depth", "brightness", "frozen_anchor", "original_baseline")),
+    "osgk_depth_order": ("short/comparison.json", "metrics", ("osgf32", "four_scale_baseline")),
+    "gsf_spectral": ("full_validation_result.json", "comparisons",
+                     ("geometry_spectral", "local_correction", "frozen_anchor")),
+}
+
+
+def training_statistics(run: Path, family: str) -> dict:
     report = {}
-    for arm in ("depth", "brightness"):
-        log = run / arm / "training" / "steps.jsonl"
+    conditions = FAMILIES[family][2]
+    for arm in conditions[:2]:
+        if family == "gsf_spectral":
+            path = run / arm / "training" / arm
+        elif family == "osgk_depth_order":
+            path = run / "short" / arm / "training" / arm
+        else:
+            path = run / arm / "training"
+        log = path / "steps.jsonl"
         if not log.is_file():
             continue
         rows = []
-        for line in log_tail(log, 45000).splitlines()[1:]:
+        for line in log_tail(log, 70000).splitlines()[1:]:
             try:
-                rows.extend(json.loads(line).get("ranks", []))
+                parsed = json.loads(line)
+                rows.extend(parsed.get("ranks", parsed.get("rank_records", [])))
             except ValueError:
                 continue
         if not rows:
             continue
+        diagnostic = []
+        for row in rows:
+            item = dict(row)
+            item.update(row.get("osgf_geometry", {}))
+            for sub in row.get("correction_activity", []):
+                if isinstance(sub, dict):
+                    diagnostic.append(sub)
+            diagnostic.append(item)
+        keys = ("loss", "gradient_norm", "max_mask_delta", "supervised_boundary_masks",
+                "edge_support", "paired_direction_fraction", "shape_fraction",
+                "context_rms", "delivered_relative_l2", "cap_fraction", "depth_message_relative_change")
         data = {"records": len(rows)}
-        for key in ("loss", "gradient_norm", "max_mask_delta", "supervised_boundary_masks", "edge_support"):
-            values = [row[key] for row in rows if key in row and isinstance(row[key], (int, float))
+        for key in keys:
+            values = [row[key] for row in diagnostic if key in row and isinstance(row[key], (int, float))
                       and math.isfinite(row[key])]
             if values:
                 data[key] = {"mean": sum(values) / len(values), "max": max(values)}
@@ -97,18 +125,28 @@ def training_statistics(run: Path) -> dict:
     return report
 
 
-def terminal_result(run: Path, expected_scenes: int) -> dict | None:
-    result = read(run / "comparison.json")
+def terminal_result(run: Path, expected_scenes: int, family="cirb_mask_boundary") -> dict | None:
+    filename, table, required = FAMILIES[family]
+    result = read(run / filename)
     if result.get("scenes_each") != expected_scenes:
         return None
     status = read(run / "status.json")
-    if status.get("phase") != "completed" or any(
+    if family == "osgk_depth_order":
+        if result.get("same_batches") is not True:
+            return None
+        if any(read(run / "short" / name / "pooled312.json").get("scenes") != expected_scenes
+               for name in required):
+            return None
+    elif status.get("phase") != "completed" or any(
             status.get("counts", {}).get(arm, {}).get("scenes") != expected_scenes
-            for arm in ("depth", "brightness")):
+            for arm in required[:2]):
         return None
-    values = result.get("metrics")
-    required = ("depth", "brightness", "frozen_anchor", "original_baseline")
-    if not isinstance(values, dict) or not all(k in values for k in required):
+    values = result.get(table)
+    if not isinstance(values, dict):
+        return None
+    if family == "gsf_spectral":
+        values["frozen_anchor"] = read(run / "setup.json").get("frozen_metrics")
+    if not all(isinstance(values.get(k), dict) for k in required):
         return None
     clean = {}
     for condition in required:
@@ -122,10 +160,10 @@ def terminal_result(run: Path, expected_scenes: int) -> dict | None:
 
 
 def is_pass(metrics: dict, policy: dict) -> bool:
-    method = metrics["depth"]
-    return all(method["AP"] - metrics[name]["AP"] >= policy["min_ap_gain"]
-               and method["AP25"] - metrics[name]["AP25"] >= -policy["max_ap25_drop"]
-               for name in ("brightness", "frozen_anchor", "original_baseline"))
+    method, *controls = FAMILIES[policy["family"]][2]
+    return all(metrics[method]["AP"] - metrics[name]["AP"] >= policy["min_ap_gain"]
+               and metrics[method]["AP25"] - metrics[name]["AP25"] >= -policy["max_ap25_drop"]
+               for name in controls)
 
 
 def call_model(repo: Path, payload: dict) -> dict:
@@ -156,7 +194,7 @@ def call_model(repo: Path, payload: dict) -> dict:
             "回复一个 JSON 对象，必须有 action、diagnosis（中文字符串）、hypothesis（中文字符串）。"
             "若 action 是 revise_method，自行推导一到两个新的张量公式，同时回复 "
             "parent（initial 或 current）及 edits（公式插入点名到表达式的映射）。"
-            "使用输入允许的变量和算子，可重新组织邻域传播、深度置信度、残差或损失。"
+            "使用输入允许的变量和算子，可重写当前研究方向给定的任意公式插入点。"
             "公式必须使用单行 Python 张量表达式。不能访问文件、网络或执行命令。"
             "保留零初始化、非空的梯度、输出形状和数值有限性。避免与历史重复。"
             "不要改动验收、训练预算、数据划分和候选评分；不要宣称尚未测量的效果。"
@@ -235,7 +273,8 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
     meta = read(project / "project_meta.json")
     if policy.get("enabled") is not True or meta.get("ui_archived") or meta.get("intervention"):
         return
-    if policy.get("family") != "cirb_mask_boundary":
+    family = policy.get("family")
+    if family not in FAMILIES:
         raise ValueError("Unsupported experiment family")
     state = read(project / STATE)
     if not state:
@@ -247,8 +286,13 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
 
     run = child(project, state["run"])
     if state["status"] == "preparing":
-        from ai_experiment_cirb import prepare
-        prepare(child(project, policy["initial_run"]), run, state["variant"], state["decision"])
+        source = child(project, policy["initial_run"])
+        if family == "cirb_mask_boundary":
+            from ai_experiment_cirb import prepare
+            prepare(source, run, state["variant"], state["decision"])
+        else:
+            from ai_experiment_geometry import prepare
+            prepare(source, run, family, state["variant"], state["decision"])
         record(project, state, "launching", action="prepare_completed")
     if state["status"] == "launching":
         if not active(state["unit"]):
@@ -260,6 +304,8 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
         return
     if state["status"] == "await_resources":
         ids = read(run / "setup.json").get("gpu_uuids", [])
+        if not ids and family == "osgk_depth_order":
+            ids = read(run / "experiment" / "plan.json").get("gpu_uuids", [])
         found = subprocess.check_output(["nvidia-smi", "--query-compute-apps=gpu_uuid",
                                         "--format=csv,noheader"], text=True, timeout=10)
         if set(ids) & {row.strip() for row in found.splitlines()}:
@@ -272,11 +318,14 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
         record(project, state, "launching", action="resume_after_gpu_release", attempt=attempts)
         return
 
-    metrics = terminal_result(run, policy["scenes"])
+    metrics = terminal_result(run, policy["scenes"], family)
     promotion = read(run / "promotion.json")
     if metrics is not None and is_pass(metrics, policy):
-        if promotion.get("status") in {"long_completed", "long_training"} and (
-                promotion.get("status") == "long_completed" or active(state["unit"])):
+        long_completed = promotion.get("status") == "long_completed"
+        if family == "osgk_depth_order":
+            long_completed = ((run / "long" / "comparison.json").is_file()
+                              and read(run / "status.json").get("phase") == "completed")
+        if long_completed:
             record(project, state, "passed", metrics=metrics, promotion=promotion)
             return
         # Resume the dispatch to finish the already approved handoff, not the short budget.
@@ -304,14 +353,21 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
     }
     if "revise_method" in actions:
         from ai_experiment_cirb import METHODS, SLOTS, TORCH_CALLS, proposal, verify_numerics
+        slots = SLOTS
+        numeric_check = verify_numerics
+        if family != "cirb_mask_boundary":
+            from ai_experiment_geometry import slots_for, verify_numerics as verify_geometry
+            slots = slots_for(family)
+            numeric_check = lambda formulas: verify_geometry(family, formulas)
         payload.update(
             current_formulas=state.get("formulas", {}),
             insertion_points={name: {k: v for k, v in slot.items() if k != "line"}
-                              for name, slot in SLOTS.items()},
+                              for name, slot in slots.items()},
             operators={"tensor_methods": sorted(METHODS), "torch_functions": sorted(TORCH_CALLS),
                        "arithmetic": ["+", "-", "*", "/", "<", ">", "&", "|"]},
-            training_tail=training_statistics(run),
-            experiment_context="CIRB fixed candidates and scores. Depth vs luminance, 1350 updates per arm."
+            training_tail=training_statistics(run, family),
+            experiment_family=family,
+            experiment_context=policy.get("research_evidence", "CIRB fixed candidates and scores, depth vs luminance.")
         )
         if state.get("last_rejected"):
             payload["last_formula_error"] = state["last_rejected"]
@@ -319,8 +375,8 @@ def _tick(project: Path, repo: Path, model, active, launch) -> None:
         reply = model(repo, payload)
         decision = validated_choice(reply, actions)
         if decision["action"] == "revise_method":
-            formulas, revision = proposal(reply, state.get("formulas", {}), state["tested"])
-            verify_numerics(formulas)
+            formulas, revision = proposal(reply, state.get("formulas", {}), state["tested"], slots)
+            numeric_check(formulas)
             decision.update(parent=reply["parent"], formulas=formulas, revision=revision)
             state.pop("last_rejected", None)
     except (ValueError, TypeError, RuntimeError, SyntaxError) as exc:
