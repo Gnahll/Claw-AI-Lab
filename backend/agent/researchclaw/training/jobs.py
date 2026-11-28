@@ -101,8 +101,17 @@ def process_token(pid: int) -> str | None:
 def validate_spec(spec: dict[str, Any]) -> None:
     required = {"source_dir", "split_manifest", "dataset_root", "initial_checkpoint", "initial_checkpoint_sha256"}
     options = {"epochs", "steps_per_epoch", "learning_rate", "weight_decay", "seed", "checkpoint_every_steps"}
+    options.update({"training_phase", "pilot_steps", "min_validation_f1_gain"})
     if set(spec) - required - options or not required <= set(spec):
         raise ValueError("Unknown or missing training specification fields")
+    if spec.get("training_phase", "auto") not in ("auto", "short", "long"):
+        raise ValueError("Unknown training_phase")
+    budget = spec.get("pilot_steps", 150)
+    if type(budget) is not int or not 1 <= budget <= 1350:
+        raise ValueError("pilot_steps must be between 1 and 1350")
+    gain = spec.get("min_validation_f1_gain")
+    if gain is not None and (type(gain) not in (float, int) or not 0 <= gain <= 1):
+        raise ValueError("min_validation_f1_gain must be a fraction between zero and one")
     for key, default in (("epochs", 1), ("steps_per_epoch", 3), ("checkpoint_every_steps", 1), ("seed", 42)):
         value = spec.get(key, default)
         if type(value) is not int or value < (0 if key == "seed" else 1):
@@ -216,11 +225,14 @@ def start_job(job_dir: Path, gpu_uuid: str, *, resume: bool = False) -> dict[str
             raise ValueError(f"Cannot start job in state {state['status']}")
         if state["status"] != "prepared" and not resume:
             raise ValueError("Use explicit resume after an interrupted/failed job")
-        if resume and not (job_dir / "resume.json").is_file():
+        retry_pilot = resume and state.get("phase") == "ai_short_training" and not (job_dir / "resume.json").is_file()
+        if resume and not retry_pilot and not (job_dir / "resume.json").is_file():
             raise ValueError("No committed checkpoint exists; create a new job")
         if resume and state.get("gpu_uuid") != gpu_uuid:
             raise ValueError("Resume requires the original allocated GPU UUID")
-        verify_inputs(job_dir)
+        spec, _ = verify_inputs(job_dir)
+        from researchclaw.training.managed_review import needs_review
+        worker = "researchclaw.training.managed_review" if needs_review(spec) else "researchclaw.training.worker"
         require_idle_gpu(gpu_uuid)
         launch_id = uuid.uuid4().hex
         environment = os.environ.copy()
@@ -228,10 +240,10 @@ def start_job(job_dir: Path, gpu_uuid: str, *, resume: bool = False) -> dict[str
         environment["TORCH_FORCE_WEIGHTS_ONLY_LOAD"] = "1"
         package_root = str(Path(__file__).resolve().parents[2])
         environment["PYTHONPATH"] = package_root
-        write_json(job_dir / "launch.json", {"launch_id": launch_id, "gpu_uuid": gpu_uuid, "resume": resume})
+        write_json(job_dir / "launch.json", {"launch_id": launch_id, "gpu_uuid": gpu_uuid, "resume": resume and not retry_pilot})
         with (job_dir / "worker.log").open("ab", buffering=0) as log:
             child = subprocess.Popen(
-                [sys.executable, "-u", "-m", "researchclaw.training.worker", str(job_dir), launch_id],
+                [sys.executable, "-u", "-m", worker, str(job_dir), launch_id],
                 stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                 cwd=job_dir, env=environment, start_new_session=True, close_fds=True,
             )
