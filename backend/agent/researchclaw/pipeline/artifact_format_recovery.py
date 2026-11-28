@@ -1,4 +1,4 @@
-"""Recover an unambiguous notation error in a run-owned JSON input."""
+"""Recover an unambiguous notation error in a run-owned stage input."""
 from __future__ import annotations
 
 import codecs
@@ -106,26 +106,83 @@ def _snapshot(run, path):
     return target, raw, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_mode)
 
 
+YAML_INPUTS = {"search_plan.yaml", "exp_plan.yaml"}
+
+
+def _yaml_candidate(raw):
+    import yaml
+    match = re.fullmatch(rb"```(?:yaml|yml)[ \t]*\r?\n(.+?\n)```[ \t]*(?:\r?\n)?", raw, re.S)
+    if match is None:
+        return None
+    body = match[1]  # Includes the last payload newline for YAML block scalars.
+    if any(getattr(event, "anchor", None) is not None for event in yaml.parse(body, Loader=yaml.SafeLoader)):
+        return None
+
+    class UniqueLoader(yaml.SafeLoader):
+        def construct_mapping(self, node, deep=False):
+            keys = set()
+            for key, _ in node.value:
+                if key.tag != "tag:yaml.org,2002:str" or key.value in keys:
+                    raise ValueError("duplicate or non-string YAML key")
+                keys.add(key.value)
+            return super().construct_mapping(node, deep=deep)
+
+    value = yaml.load(body, Loader=UniqueLoader)
+    return ("unwrap_yaml_fence", body) if isinstance(value, dict) else None
+
+
+def _pinned_plan_allows(path, output):
+    if path.name != "exp_plan.yaml":
+        return True
+    binding = path.with_name("candidate.json")
+    if binding.is_symlink():
+        return False
+    if not binding.exists():
+        return True
+    record = json.loads(binding.read_text(encoding="utf-8"), object_pairs_hook=_pairs)
+    return isinstance(record, dict) and record.get("plan_sha256") == hashlib.sha256(output).hexdigest()
+
+
 def repair(run, path, error, *, choose=None, expected=(dict, list)):
     """Return True only after a verified replacement; retry via the caller."""
-    if path.name not in INPUTS or not isinstance(error, json.JSONDecodeError):
+    yaml_input = path.name in YAML_INPUTS
+    if not yaml_input and (path.name not in INPUTS or not isinstance(error, json.JSONDecodeError)):
         return False
     try:
         target, raw, identity = _snapshot(run, path)
         original = raw.decode("utf-8")
         # Path.read_text performs newline translation. Reproduce the parser
         # error on the original bytes to obtain the correct byte offset.
-        if original.replace("\r\n", "\n").replace("\r", "\n") != error.doc.replace("\r\n", "\n").replace("\r", "\n"):
+        source = error if yaml_input else error.doc
+        if original.replace("\r\n", "\n").replace("\r", "\n") != source.replace("\r\n", "\n").replace("\r", "\n"):
             return False
-        try:
-            json.loads(original)
-            return False
-        except json.JSONDecodeError as exc:
+        if yaml_input:
+            import yaml
             try:
-                candidate = _candidate(raw, exc, expected)
-            except (ValueError, RecursionError):
+                parsed = yaml.safe_load(original)
+                if isinstance(parsed, dict):
+                    return False
+                reason = {"error": "expected a YAML mapping", "line": 1}
+            except yaml.YAMLError as exc:
+                mark = getattr(exc, "problem_mark", None)
+                reason = {"error": type(exc).__name__, "line": mark.line + 1 if mark else None}
+            try:
+                candidate = _yaml_candidate(raw)
+                if candidate and not _pinned_plan_allows(target, candidate[1]):
+                    candidate = None
+                    reason["error"] = "frozen candidate digest mismatch"
+            except (yaml.YAMLError, ValueError, RecursionError):
                 candidate = None
-            reason = {"error": exc.msg, "line": exc.lineno, "column": exc.colno}
+        else:
+            try:
+                json.loads(original)
+                return False
+            except json.JSONDecodeError as exc:
+                try:
+                    candidate = _candidate(raw, exc, expected)
+                except (ValueError, RecursionError):
+                    candidate = None
+                reason = {"error": exc.msg, "line": exc.lineno, "column": exc.colno}
         audit = run.resolve() / ".artifact-format-recovery"
         audit.mkdir(mode=0o700, exist_ok=True)
         if audit.is_symlink() or audit.resolve() != audit:
@@ -164,7 +221,7 @@ def repair(run, path, error, *, choose=None, expected=(dict, list)):
         _atomic(attempt / "original.bytes", raw)
         event.update(status="backed_up", reason="before_replace")
         record()
-        if _snapshot(run, path) != (target, raw, identity):
+        if _snapshot(run, path) != (target, raw, identity) or not _pinned_plan_allows(target, output):
             event.update(status="manual_review", reason="source_changed")
             record()
             return False

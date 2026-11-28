@@ -11317,21 +11317,32 @@ def execute_stage(
     llm = None
     if contract.input_files:
         for input_file in contract.input_files:
-            found = _prior_artifact_path(run_dir, input_file)
-            if found is not None and input_file in {"schedule.json", "codebase_candidates.json"}:
+            found = _read_prior_artifact(run_dir, input_file)
+            is_yaml = input_file in {"exp_plan.yaml", "search_plan.yaml"}
+            if found is not None and (input_file in {"schedule.json", "codebase_candidates.json"}
+                                      or (is_yaml and found.startswith("```"))):
                 from researchclaw.pipeline.artifact_format_recovery import repair, suggest
                 try:
-                    json.loads(found.read_text(encoding="utf-8"))
-                except json.JSONDecodeError as exc:
+                    if is_yaml:
+                        if not isinstance(yaml.safe_load(found), dict):
+                            raise ValueError("expected a YAML mapping")
+                    else:
+                        json.loads(found)
+                except (ValueError, yaml.YAMLError) as exc:
+                    path = _prior_artifact_path(run_dir, input_file)
+                    if path is None:
+                        # A caller may provide its own in-memory artifact source.
+                        continue
                     llm = _stage_llm(config)
                     choose = (lambda d: suggest(llm, d)) if llm else None
-                    expected = dict if input_file == "schedule.json" else list
-                    if repair(run_dir, found, exc, choose=choose, expected=expected):
+                    expected = list if input_file == "codebase_candidates.json" else dict
+                    if repair(run_dir, path, found if is_yaml else exc, choose=choose, expected=expected):
                         # Re-enter the same reader before any stage side effects.
-                        json.loads(found.read_text(encoding="utf-8"))
+                        corrected = _read_prior_artifact(run_dir, input_file)
+                        (yaml.safe_load if is_yaml else json.loads)(corrected)
                     else:
                         result = StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(),
-                                             error=f"JSON input {input_file} requires manual review: {exc.msg}",
+                                             error=f"Input {input_file} requires manual format review",
                                              decision="retry")
                         _write_stage_meta(stage_dir, stage, run_id, result)
                         return result

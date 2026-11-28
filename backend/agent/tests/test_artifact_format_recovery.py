@@ -78,6 +78,34 @@ class ArtifactFormatRecoveryTests(unittest.TestCase):
             self.assertEqual(raw, self.path.read_bytes())
 
 
+    def test_yaml_fence_keeps_block_scalar_and_exact_frozen_plan(self):
+        import hashlib
+        import yaml
+        stage = self.run / "stage-09"
+        stage.mkdir()
+        plan = stage / "exp_plan.yaml"
+        target = b"training:\r\n  notes: |+\r\n    retain these spaces   \r\n\r\n"
+        wrapped = b"```yaml\r\n" + target + b"```\r\n"
+        plan.write_bytes(wrapped)
+        receipt = {"plan_sha256": hashlib.sha256(target).hexdigest()}
+        (stage / "candidate.json").write_text(json.dumps(receipt))
+        self.assertTrue(fmt.repair(self.run, plan, plan.read_text()))
+        self.assertEqual(target, plan.read_bytes())
+        self.assertEqual(yaml.safe_load(target)["training"]["notes"], "retain these spaces   \n\n")
+
+    def test_yaml_rejects_ambiguous_or_frozen_mismatch(self):
+        path = self.run / "search_plan.yaml"
+        for body in [b"a: 1\na: 2", b"a: 1\n---\nb: 2", b"a: !unknown x", b"a: &id [1]\nb: *id", b"- a", b"a: [1,"]:
+            with self.subTest(body=body):
+                raw = b"```yaml\n" + body + b"\n```\n"
+                path.write_bytes(raw)
+                self.assertFalse(fmt.repair(self.run, path, path.read_text()))
+                self.assertEqual(path.read_bytes(), raw)
+        plan = self.run / "exp_plan.yaml"
+        plan.write_bytes(b"```yaml\nsteps: 450\n```")
+        (self.run / "candidate.json").write_text('{"plan_sha256":"other"}')
+        self.assertFalse(fmt.repair(self.run, plan, plan.read_text()))
+
     def test_stage_entry_resumes_validation_with_same_schedule(self):
         from types import SimpleNamespace
         from unittest.mock import Mock, patch
@@ -97,6 +125,23 @@ class ArtifactFormatRecoveryTests(unittest.TestCase):
         self.assertIn("Missing input: experiment/", result.error)
         self.assertEqual(schedule.read_bytes(), b'{"steps":450}')
         self.assertEqual(ai.chat.call_count, 1)
+
+    def test_real_code_generation_stage_reads_recovered_yaml(self):
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from researchclaw.pipeline import executor
+        from researchclaw.pipeline.stages import Stage
+        stage = self.run / "stage-09"
+        stage.mkdir()
+        plan = stage / "exp_plan.yaml"
+        plan.write_bytes(b"```yaml\nsteps: 450\n```")
+        ai = Mock()
+        ai.chat.return_value.content = '{"action":"unwrap_yaml_fence"}'
+        with patch.object(executor, "_stage_llm", return_value=ai):
+            result = executor.execute_stage(Stage.CODE_GENERATION, run_dir=self.run, run_id="test",
+                config=SimpleNamespace(research=SimpleNamespace(details="")), adapters=None)
+        self.assertIn("Missing input: codebase_candidates.json", result.error)
+        self.assertEqual(plan.read_bytes(), b"steps: 450\n")
 
     def test_experiment_tick_retries_inactive_run_reader_once(self):
         from unittest.mock import patch
