@@ -208,12 +208,12 @@ def reporting_contract(results: dict, metric_key: str = "primary_metric", direct
 _SPLIT_WORDS = r"(?:[a-z0-9][\w.-]*\s+){0,4}validation\s+(?:split|set|scenes|benchmark)"
 _FULL_SPLIT = rf"(?:the\s+)?(?:full|complete|entire)\s+{_SPLIT_WORDS}"
 _NUMBERED_SPLIT = (
-    rf"(?:all\s+)?(?P<count>\d+)\s+(?:{_SPLIT_WORDS}|scenes\s+(?:of|in|from)\s+(?:the\s+)?{_SPLIT_WORDS})"
+    rf"(?P<all>all\s+)?(?P<count>\d+)\s+(?:{_SPLIT_WORDS}|scenes\s+(?:of|in|from)\s+(?:the\s+)?{_SPLIT_WORDS})"
 )
 _SCOPE_OBJECT = rf"(?:{_FULL_SPLIT}|{_NUMBERED_SPLIT}|all\s+{_SPLIT_WORDS})"
 _SCOPE_ACTIVE = re.compile(
     rf"\b(?:we\s+(?:evaluate[d]?|test(?:ed)?|benchmark(?:ed)?)"
-    rf"(?:\s+(?:our|the|both|each|all)\s+(?:model|approach|method|variant|condition)s?)?"
+    rf"(?P<active_subject>(?:\s+(?:(?:our|the|both|each|all)\s+)?(?:[a-z0-9_.-]+\s+)?(?:model|approach|method|variant|condition)s?)?)"
     rf"|(?:we\s+(?:report(?:ed)?|measure[d]?|compute[d]?)\s+(?:the\s+)?(?:instance\s+)?(?:mean\s+)?ap(?:\d+|\[[^\]]+\])?)"
     rf"|(?:ap(?:\d+|\[[^\]]+\])?)\s+(?:is|was)\s+(?:measured|evaluated|computed|reported))"
     rf"\s+(?:(?:on|over|across|using)\s+)?{_SCOPE_OBJECT}\b", re.I,
@@ -229,7 +229,8 @@ _SCOPE_PASSIVE = re.compile(
 _CLAUSE_LIMIT = re.compile(r"(?<=[.!?;])\s+|\n\s*\n|\s+[—–]\s+")
 _QUALIFIED_SCOPE = re.compile(
     r"\b(?:if|whether|planned|planning|would|could|will|future|wish|suppose|hypothetical|untrue|"
-    r"incorrect(?:ly)?|false|not\s+(?:claim|assert)|cannot\s+(?:claim|assert))\b", re.I,
+    r"incorrect(?:ly)?|false|not|no|neither|never|cannot|did(?:n['’]t| not)|was(?:n['’]t| not)|"
+    r"were(?:n['’]t| not)|is(?:n['’]t| not)|are(?:n['’]t| not))\b", re.I,
 )
 
 
@@ -262,8 +263,6 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
         name: row["scene_count"] for name, row in rows.items()
         if name in recorded and (official_ids is None or recorded[name] != official_ids)
     }
-    if not unsupported:
-        return []
     conflicts = []
     text = re.sub(r"\x60\x60\x60.*?(?:\x60\x60\x60|$)", "", paper, flags=re.S)
     names = "|".join(re.escape(name) for name in rows)
@@ -281,10 +280,21 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                 if re.search(r"\b(?:only\s+for|for\s+(?:the\s+)?)\s*(?:training\s+|validation\s+|depth\s+)?loss(?:es)?\b", clause[match.end():], re.I):
                     continue
                 claimed = int(match["count"]) if match["count"] else declared
+                is_full_claim = (
+                    match["count"] is None
+                    or bool(match.groupdict().get("all"))
+                    or claimed == declared
+                )
                 tail = clause[match.end():]
                 if re.match(r"\s+(?:in|from|within)\s+(?:our|the|a)\s+subset\b", tail, re.I):
                     continue
-                subject = match.groupdict().get("subject")
+                # A plain numeric statement describes exactly the recorded subset;
+                # it is not a claim that this number is the complete split.
+                if not is_full_claim:
+                    continue
+                subject = match.groupdict().get("subject") or match.groupdict().get("active_subject")
+                if subject and _QUALIFIED_SCOPE.search(subject):
+                    continue
                 named = {
                     name for name in rows
                     if subject and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", subject, re.I)
@@ -296,7 +306,7 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                     }
                 relevant = named or set(rows)
                 wrong = sorted(name for name in relevant if name in unsupported)
-                if match.group(0).lower().find("all") >= 0 and claimed != declared:
+                if bool(match.groupdict().get("all")) and claimed != declared:
                     wrong = sorted(set(wrong) | set(relevant))
                 if wrong:
                     counts = ", ".join(f"{name} {rows[name]['scene_count']}/{declared}" for name in wrong)

@@ -2282,12 +2282,15 @@ class TestPaperExperimentEvidence:
     @pytest.mark.parametrize("claim, conflict", [
         ("We evaluated on all 312 ScanNet v2 validation scenes.", True),
         ("Our model was evaluated on the full ScanNet validation split.", True),
+        ("We evaluated on 2 validation scenes.", False),
         ("We evaluated on all 2 validation scenes.", True),
         ("AP50 was measured on the complete ScanNet validation split.", True),
         ("The entire validation set was evaluated.", True),
         ("Spectral was evaluated on 312 validation scenes.", True),
         ("We evaluated on the full ScanNet validation split. A two-scene subset was visualized.", True),
         ("We did not evaluate on the full validation split.", False),
+        ("No model was evaluated on the full validation split.", False),
+        ("Not all 312 validation scenes were evaluated.", False),
         ("Future work will evaluate on the full validation split.", False),
         ("It is unclear whether the full validation set was evaluated.", False),
         ("The full validation set contains 312 scenes. We evaluated two of them.", False),
@@ -2311,6 +2314,7 @@ class TestPaperExperimentEvidence:
             "Candidate": {"evaluation": {"scenes": ["a", "b"]}}}}
         _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
         assert not rc_executor._paper_evidence_conflicts("Reference was evaluated on the full validation split.", run_dir)
+        assert not rc_executor._paper_evidence_conflicts("We evaluated the Reference model on the full validation split.", run_dir)
         assert rc_executor._paper_evidence_conflicts("Candidate was evaluated on the full validation split.", run_dir)
         assert rc_executor._paper_evidence_conflicts("We evaluated both models on all 3 validation scenes.", run_dir)
         assert not rc_executor._paper_evidence_conflicts(
@@ -2321,6 +2325,13 @@ class TestPaperExperimentEvidence:
             "Method": {"evaluation": {"scenes": ["x", "y", "z"]}}}}
         _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
         assert rc_executor._paper_evidence_conflicts("Our model was evaluated on the full validation split.", run_dir)
+
+    def test_full_official_coverage_still_rejects_wrong_all_count(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3, "scene_ids": ["a", "b", "c"]}}, "conditions": {
+            "Method": {"evaluation": {"scenes": ["a", "b", "c"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        assert rc_executor._paper_evidence_conflicts("We evaluated all 2 validation scenes.", run_dir)
+        assert not rc_executor._paper_evidence_conflicts("We evaluated all 3 validation scenes.", run_dir)
 
     def test_measured_results_uses_numeric_stage_version_order(self, run_dir):
         for version, scene in ((9, "old"), (10, "new")):
