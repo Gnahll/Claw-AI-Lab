@@ -333,6 +333,10 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                     r"(?:evaluated|tested|benchmarked)\b",
                     clause, re.I,
                 )
+                collective_clause = bool(except_tail and re.search(
+                    r"\b(?:all|both|each)\s+(?:models?|methods?|approaches?|variants?|conditions?)\b",
+                    clause[:except_tail.start()], re.I,
+                ))
                 excluded = {
                     name for name in rows
                     if (
@@ -348,7 +352,13 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                         name for name in rows
                         if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", match.group(0), re.I)
                     }
-                relevant = (named or set(rows)) - excluded
+                collective_subject = bool(subject and re.search(
+                    r"\b(?:all|both|each)\s+(?:models?|methods?|approaches?|variants?|conditions?)\b",
+                    subject, re.I,
+                ))
+                relevant = (
+                    set(rows) if collective_clause or collective_subject or not named else named
+                ) - excluded
                 wrong = sorted(name for name in relevant if name in unsupported)
                 if bool(match.groupdict().get("all")) and claimed != declared:
                     wrong = sorted(set(wrong) | set(relevant))

@@ -1376,6 +1376,26 @@ caption: Method overview
         rendered, copied = rc_executor._figure_prompts_to_markdown(paper, run_dir, chart_dir)
         assert copied == [] and "![" not in rendered
 
+    def test_figure_prompt_manifest_path_wins_over_stale_fallback(self, run_dir: Path) -> None:
+        paper = """<!-- FIGURE_PROMPT
+figure_id: method
+caption: Method overview
+-->"""
+        current = run_dir / "stage-22"
+        figures = current / "figures"
+        figures.mkdir(parents=True)
+        rendered = figures / "method.png"
+        rendered.write_bytes(b"rendered")
+        (figures / "method_fallback.png").write_bytes(b"stale")
+        (current / "figure_prompts.json").write_text(json.dumps([{
+            "figure_id": "method", "caption": "Method overview",
+            "success": True, "output_path": str(rendered),
+        }]), encoding="utf-8")
+        chart_dir = run_dir / "stage-25" / "charts"
+        result, copied = rc_executor._figure_prompts_to_markdown(paper, run_dir, chart_dir)
+        assert copied == ["method.png"] and "charts/method.png" in result
+        assert (chart_dir / "method.png").read_bytes() == b"rendered"
+
     def test_existing_method_figure_does_not_suppress_result_chart(
         self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
         monkeypatch: pytest.MonkeyPatch,
@@ -2406,6 +2426,10 @@ class TestPaperExperimentEvidence:
         assert not rc_executor._paper_evidence_conflicts(
             "All methods except Candidate and Missing were evaluated on the full validation split.", run_dir
         )
+        findings = rc_executor._paper_evidence_conflicts(
+            "All methods except Candidate were evaluated on the full validation split.", run_dir
+        )
+        assert findings and "Missing None/3" in findings[0]
 
     def test_full_scope_ignores_reference_sections(self, run_dir):
         measured = {"data_split": {"val": {"scene_count": 3}}, "conditions": {

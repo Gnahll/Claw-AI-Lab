@@ -6784,27 +6784,38 @@ def _figure_prompts_to_markdown(
         source: Path | None = None
         current_stages = _current_stage_dirs(run_dir, "stage-22", "stage-20")
         candidates: list[Path] = []
+        declared_source: Path | None = None
         if fp.get("output_path"):
             declared = Path(fp["output_path"])
             try:
-                if current_stages and declared.resolve().is_relative_to(current_stages[0].resolve()):
-                    candidates.append(declared)
+                if (
+                    current_stages
+                    and declared.is_file()
+                    and declared.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".svg", ".eps"}
+                    and declared.resolve().is_relative_to(current_stages[0].resolve())
+                ):
+                    declared_source = declared
             except OSError:
                 pass
-        # A current S22 revision supersedes S20. Fall back to S20 only when
-        # S22 has no file for this prompt; never combine both into a choice.
-        for stage in current_stages:
-            stage_candidates = [
-                *stage.joinpath("figures").glob(f"{fid}.*"),
-                *stage.joinpath("figures").glob(f"{fid}_fallback.*"),
-            ]
-            stage_candidates = [
-                cand for cand in stage_candidates
-                if cand.is_file() and cand.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".svg", ".eps"}
-            ]
-            if stage_candidates:
-                candidates.extend(stage_candidates)
-                break
+        # An explicit current-round manifest path is authoritative. Otherwise
+        # require exactly one matching file in the newest applicable stage.
+        if declared_source is not None:
+            candidates = [declared_source]
+        else:
+            # A current S22 revision supersedes S20. Fall back to S20 only when
+            # S22 has no file for this prompt; never combine both into a choice.
+            for stage in current_stages:
+                stage_candidates = [
+                    *stage.joinpath("figures").glob(f"{fid}.*"),
+                    *stage.joinpath("figures").glob(f"{fid}_fallback.*"),
+                ]
+                stage_candidates = [
+                    cand for cand in stage_candidates
+                    if cand.is_file() and cand.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".svg", ".eps"}
+                ]
+                if stage_candidates:
+                    candidates.extend(stage_candidates)
+                    break
         candidates = list(dict.fromkeys(candidates))
         if len(candidates) == 1:
             source = candidates[0]
