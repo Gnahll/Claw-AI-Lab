@@ -232,6 +232,11 @@ def install_promotion_hook(path: Path, family: str):
         "sys.path.insert(0, os.getenv('CLAW_PLATFORM_SERVICES', str(_repo/'backend/services')))\n"
         "from ai_experiment_promotion import may_start_long\n"
     )
+    if source.startswith(bootstrap):
+        variable = "run" if family == OSGK else "r"
+        if f"if not may_start_long({variable}, {family!r})" not in source:
+            raise ValueError("Incomplete short-to-long review in prepared dispatch")
+        return
     if family == OSGK:
         marker = "                if not passed:break"
         source = _replace(source, marker, marker + f"\n                if not may_start_long(run, {family!r}):break")

@@ -242,6 +242,13 @@ def unit_running(name: str) -> bool:
 
 
 def start_unit(name: str, run: Path) -> None:
+    # Prepared candidates can outlive a platform upgrade. Apply the same
+    # promotion hook on first launch without rewriting an in-flight dispatch.
+    if (run / "mechanism_plan.json").is_file() and not (run / "status.json").exists():
+        from ai_experiment_pilot import install_promotion_hook
+        family = read(run.parent / POLICY).get("family")
+        if family in FAMILIES:
+            install_promotion_hook(run, family)
     subprocess.run(
         ["systemd-run", "--user", "--unit", name, f"--setenv=CLAW_PLATFORM_SERVICES={Path(__file__).resolve().parent}",
          sys.executable, "-B", str(run / "dispatch.py"), str(run)],

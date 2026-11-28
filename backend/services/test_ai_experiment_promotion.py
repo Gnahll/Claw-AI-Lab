@@ -136,6 +136,8 @@ class PairedPromotionTests(unittest.TestCase):
             file.write_text(source, encoding="utf-8")
             install_promotion_hook(self.run, family)
             hooked=file.read_text(encoding="utf-8")
+            install_promotion_hook(self.run,family)
+            self.assertEqual(file.read_text(encoding="utf-8"),hooked)
             self.assertIn(f"not may_start_long(",hooked)
             if family!="osgk_depth_order":
                 self.assertLess(hooked.index("if not may_start_long("),hooked.index("supervise(long)"))
