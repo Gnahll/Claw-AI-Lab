@@ -1047,6 +1047,35 @@ def test_export_preserves_citations_and_numbers_in_degraded_draft(
     assert not json.loads((stage_dir / "sanitization_report.json").read_text())["sanitized"]
 
 
+def test_export_fails_when_latex_compilation_fails(
+    run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from researchclaw.templates import compiler
+
+    monkeypatch.setattr(
+        compiler,
+        "compile_latex",
+        lambda *args, **kwargs: SimpleNamespace(
+            success=False, errors=["forced compile failure"]
+        ),
+    )
+    _write_prior_artifact(run_dir, 22, "paper_revised.md", "# Paper\n\nText.")
+    stage_dir = run_dir / "stage-25"
+    stage_dir.mkdir()
+
+    result = rc_executor._execute_export_publish(
+        stage_dir, run_dir, rc_config, adapters
+    )
+
+    assert result.stage == Stage.EXPORT_PUBLISH
+    assert result.status == StageStatus.FAILED
+    assert result.error == "LaTeX compilation verification failed"
+    assert "% WARNING: Compilation failed" in (
+        stage_dir / "paper.tex"
+    ).read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("archive_only", [False, True])
 def test_export_recovers_cited_bibliography_without_inventing_entries(run_dir: Path, archive_only: bool) -> None:
     from zipfile import ZipFile
@@ -2505,6 +2534,8 @@ caption: Method
             "Candidate achieved AP_{50}=50.0 on the full validation split.": True,
             "The evaluation was conducted on the full validation split.": True,
             "The evaluation was performed on the full validation split.": True,
+            "All experiments were conducted on the full validation split.": True,
+            "We used the full validation split to evaluate Candidate.": True,
         }
         for claim, conflict in edge_cases.items():
             assert bool(rc_executor._paper_evidence_conflicts(claim, run_dir)) is conflict

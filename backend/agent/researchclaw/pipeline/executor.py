@@ -10668,10 +10668,10 @@ def _execute_export_publish(
                         )
                         _tex_path.write_text(_tex_content, encoding="utf-8")
                 return StageResult(
-                    stage=Stage.PAPER_REVISION,
+                    stage=Stage.EXPORT_PUBLISH,
                     status=StageStatus.FAILED,
-                    artifacts=tuple(_revision_artifacts),
-                    evidence_refs=tuple(f"stage-22/{a}" for a in _revision_artifacts),
+                    artifacts=tuple(artifacts),
+                    evidence_refs=tuple(f"stage-22/{a}" for a in artifacts),
                     error="LaTeX compilation verification failed",
                 )
         except Exception as _compile_exc:  # noqa: BLE001

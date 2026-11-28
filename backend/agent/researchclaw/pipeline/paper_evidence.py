@@ -248,6 +248,16 @@ _SCOPE_REPORTED = re.compile(
     rf"|(?P<reported_results_subject>[a-z0-9_.-]+)\s+(?:performance|results?)\s+(?:is|are|was|were)\s+reported"
     rf"|we\s+report\s+(?P<reported_active_subject>[a-z0-9_.-]+)\s+results?)\s+(?:on|over|across|using)?\s*{_SCOPE_OBJECT}\b", re.I,
 )
+_SCOPE_CONDUCTED = re.compile(
+    rf"\b(?P<conducted_subject>(?:(?:all|both|each)\s+)?(?:experiments?|evaluations?|benchmarks?|tests?))"
+    rf"\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:conducted|performed|run)"
+    rf"\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
+)
+_SCOPE_USED_TO_EVALUATE = re.compile(
+    rf"\bwe\s+(?:used|use)\s+{_SCOPE_OBJECT}\s+to\s+(?:evaluate|test|benchmark)\s+"
+    rf"(?P<used_subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+"
+    rf"(?:\s+(?:model|approach|method|variant|condition))?)\b", re.I,
+)
 _SCOPE_ACHIEVED = re.compile(
     rf"\b(?P<achieved_subject>[a-z0-9_.-]+)\s+(?:achieve[d]?|obtain(?:ed)?|reach(?:ed)?)\s+"
     rf"(?:an?\s+)?(?:instance\s+)?ap(?:@\d+|_\{{?\d+\}}?|\d+|\[[^\]]+\])?(?:\s*=\s*|\s+(?:of\s+)?)[-+]?\d+(?:\.\d+)?"
@@ -306,7 +316,8 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
         clause = " ".join(raw.replace("**", "").split())
         for pattern in (
             _SCOPE_ACTIVE_NAMED, _SCOPE_ACTIVE, _SCOPE_SUBJECT_LIST, _SCOPE_SUBJECT,
-            _SCOPE_OBJECT_FRONT, _SCOPE_PASSIVE, _SCOPE_REPORTED, _SCOPE_ACHIEVED, named_claim,
+            _SCOPE_OBJECT_FRONT, _SCOPE_PASSIVE, _SCOPE_REPORTED,
+            _SCOPE_CONDUCTED, _SCOPE_USED_TO_EVALUATE, _SCOPE_ACHIEVED, named_claim,
         ):
             for match in pattern.finditer(clause):
                 if pattern is _SCOPE_PASSIVE and _SCOPE_OBJECT_FRONT.search(clause):
@@ -349,6 +360,8 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                     or match.groupdict().get("reported_subject")
                     or match.groupdict().get("reported_results_subject")
                     or match.groupdict().get("reported_active_subject")
+                    or match.groupdict().get("conducted_subject")
+                    or match.groupdict().get("used_subject")
                     or match.groupdict().get("achieved_subject")
                     or match.groupdict().get("object_subject")
                 )
