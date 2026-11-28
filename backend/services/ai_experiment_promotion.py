@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import lru_cache
+from itertools import zip_longest
 from pathlib import Path
 
 from ai_experiment_loop import FAMILIES, POLICY, is_pass, read, terminal_result, write
@@ -25,6 +27,52 @@ def _hash(path: Path) -> str:
 def _check(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+def _stamp(path):
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+@lru_cache(maxsize=32)
+def _hash_checkpoint_generation(path, stamp):
+    # The long-running scheduler can retry the API without rereading multi-GB weights.
+    # A newly launched dispatch has a fresh cache and independently verifies the bytes.
+    digest = _hash(path)
+    _check(_stamp(path) == stamp, "Checkpoint changed while hashing")
+    return digest
+
+
+def _paired_updates(run, folders, family, endpoint, budget):
+    """Verify the two real four-rank ledgers and bind their contents in one pass."""
+    _check(type(budget) is int and type(endpoint) is int and 0 < budget <= endpoint,
+           "Missing or invalid pilot budget")
+    first = endpoint - budget + 1
+    keys = ("sample_indices", "frame_ids") if family == "cirb_mask_boundary" else ("sample_ids", "frame_ids")
+    rank_key = "rank_records" if family == "osgk_depth_order" else "ranks"
+    paths = [folder / "steps.jsonl" for folder in folders]
+    hashes = [hashlib.sha256(), hashlib.sha256()]
+    count = 0
+    with paths[0].open("rb") as left, paths[1].open("rb") as right:
+        for index, pair in enumerate(zip_longest(left, right)):
+            _check(index < budget and None not in pair, "Unpaired or excess pilot updates")
+            observations = []
+            for raw, digest in zip(pair, hashes):
+                digest.update(raw)
+                row = json.loads(raw)
+                ranks = row.get(rank_key)
+                _check(row.get("step") == first + index and isinstance(ranks, list) and len(ranks) == 4,
+                       "Missing, repeated or incomplete four-rank pilot update")
+                participants = []
+                for rank, item in enumerate(ranks):
+                    _check(isinstance(item, dict) and item.get("rank", rank) == rank and all(item.get(k) for k in keys),
+                           "Missing rank or sample provenance")
+                    participants.append([item[k] for k in keys])
+                observations.append(participants)
+            _check(observations[0] == observations[1], "Pilot arms used different samples or frames")
+            count += 1
+    _check(count == budget, "Pilot ledgers do not cover the planned update budget")
+    return {str(path.relative_to(run)): digest.hexdigest() for path, digest in zip(paths, hashes)}
 
 
 def evidence(run: Path, family: str) -> dict:
@@ -51,9 +99,12 @@ def evidence(run: Path, family: str) -> dict:
     a_plan = family == "osgk_depth_order"
     b_plan = family == "cirb_mask_boundary"
     steps = setup["short_endpoint" if a_plan else "target_steps"]
+    budget = read(run / "mechanism_plan.json").get("steps_per_arm")
     if a_plan:
-        _check(result.get("step") == steps, "Checkpoint and validation budgets differ")
+        _check(result.get("step") == steps and result.get("stage_updates") == budget,
+               "Checkpoint and validation budgets differ")
     else:
+        _check(budget == steps, "Planned and launched short budgets differ")
         ids = setup["scene_ids"]
         _check(len(ids) == len(set(ids)) == scenes, "Validation scene manifest differs")
         audit = read(run / "training_audit.json")
@@ -61,6 +112,7 @@ def evidence(run: Path, family: str) -> dict:
         updates = audit.get("optimizer_updates_each") if b_plan else audit.get("adapter_updates_per_condition")
         _check(paired is True and updates == steps, "Training audit or matched budget differs")
         artifacts["training_audit.json"] = _hash(run / "training_audit.json")
+    folders = []
     for arm in names[:2]:
         if a_plan:
             folder = run / "short" / arm
@@ -82,11 +134,13 @@ def evidence(run: Path, family: str) -> dict:
         else:
             weight = run / arm / "training" / arm / "last_resume.pt"
             expected = result["weights"][arm]["sha256"]
-        digest = _hash(weight)
+        digest = _hash_checkpoint_generation(weight, _stamp(weight))
         _check(digest == expected, "Scored checkpoint differs from continuation checkpoint")
         artifacts[str(weight.relative_to(run))] = digest
+        folders.append(weight.parent)
+    artifacts.update(_paired_updates(run, folders, family, steps, budget))
     return {"run": run.name, "revision": revision["revision"], "family": family, "metrics": metrics,
-            "short_endpoint": steps, "long_endpoint": setup["long_steps"], "scenes": scenes,
+            "short_endpoint": steps, "actual_updates_each": budget, "long_endpoint": setup["long_steps"], "scenes": scenes,
             "min_ap_gain": policy["min_ap_gain"], "max_ap25_drop": policy["max_ap25_drop"],
             "probe": probe, "artifacts": artifacts}
 

@@ -5,7 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import ai_experiment_loop as loop
@@ -36,12 +36,12 @@ class PairedPromotionTests(unittest.TestCase):
                  "long_steps":200, "frozen_metrics":metrics[names[-1]], "protocol_digest":"protocol"}
         self.put("setup.json", setup)
         self.put("preflight_mechanism.json", {"passed":True, "nonfinite_signal":False})
-        self.put("mechanism_plan.json", {"pilot_steps":8})
+        self.put("mechanism_plan.json", {"pilot_steps":8, "steps_per_arm":8})
         (self.run / "binding.py").write_text("pass")
         (self.run / "dispatch.py").write_text("pass")
         self.put("ai_revision.json", {"revision":"test","method_file_sha256":{"binding.py":gate._hash(self.run/"binding.py")}})
         self.put("status.json", {"phase":"completed","counts":{n:{"scenes":2} for n in names[:2]}})
-        report = {"scenes_each":2, table:metrics.copy(), "same_batches":True, "step":8, "weights":{}}
+        report = {"scenes_each":2, table:metrics.copy(), "same_batches":True, "step":8, "stage_updates":8, "weights":{}}
         for arm in names[:2]:
             data = arm.encode()
             digest = hashlib.sha256(data).hexdigest()
@@ -61,6 +61,12 @@ class PairedPromotionTests(unittest.TestCase):
                              {"scene":scene,"checkpoint_sha256":digest,"protocol":"protocol"})
             (self.run/path).mkdir(parents=True, exist_ok=True)
             (self.run/path/"last_resume.pt").write_bytes(data)
+            rank_key = "rank_records" if family == "osgk_depth_order" else "ranks"
+            sample_key = "sample_indices" if family == "cirb_mask_boundary" else "sample_ids"
+            with (self.run/path/"steps.jsonl").open("w") as ledger:
+                for step in range(1, 9):
+                    ranks = [{sample_key:[i+step], "frame_ids":[step,step+1]} for i in range(4)]
+                    ledger.write(json.dumps({"step":step, rank_key:ranks}) + "\n")
         self.put(filename, report)
 
     def test_review_boundary_for_all_three_families(self):
@@ -133,6 +139,39 @@ class PairedPromotionTests(unittest.TestCase):
             self.assertIn(f"not may_start_long(",hooked)
             if family!="osgk_depth_order":
                 self.assertLess(hooked.index("if not may_start_long("),hooked.index("supervise(long)"))
+
+    def test_verified_budget_requires_matched_four_rank_updates(self):
+        family = "cirb_mask_boundary"
+        self.prepare(family)
+        ledger = self.run/"depth/training/steps.jsonl"
+        rows = ledger.read_text().splitlines()
+        for description, broken in [
+            ("truncation", rows[:-1]),
+            ("duplicate", [rows[0], *rows[:-1]]),
+            ("missing rank", [json.dumps({"step":1, "ranks":[]}), *rows[1:]]),
+            ("different sample", [rows[0].replace('"sample_indices": [1]', '"sample_indices": [99]'), *rows[1:]]),
+        ]:
+            with self.subTest(description):
+                ledger.write_text("\n".join(broken)+"\n")
+                with self.assertRaises(ValueError):
+                    gate.may_start_long(self.run,family)
+                self.assertFalse((self.run/gate.REQUEST).exists())
+        ledger.write_text("\n".join(rows)+"\n")
+        self.put("mechanism_plan.json", {"pilot_steps":8, "steps_per_arm":900})
+        with self.assertRaisesRegex(ValueError, "budgets"):
+            gate.may_start_long(self.run,family)
+
+    def test_api_retry_can_reuse_unchanged_checkpoint_hash(self):
+        self.prepare("cirb_mask_boundary")
+        weight = self.run/"depth/training/last_resume.pt"
+        with patch.object(gate, "_hash", wraps=gate._hash) as hash_file:
+            for _ in range(2):
+                gate.evidence(self.run, "cirb_mask_boundary")
+            self.assertEqual(sum(call.args == (weight,) for call in hash_file.call_args_list), 1)
+            weight.write_bytes(b"different snapshot")
+            with self.assertRaisesRegex(ValueError, "checkpoint"):
+                gate.evidence(self.run, "cirb_mask_boundary")
+            self.assertEqual(sum(call.args == (weight,) for call in hash_file.call_args_list), 2)
 
 if __name__ == "__main__":
     unittest.main()
