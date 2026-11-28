@@ -30,12 +30,17 @@ def setup_runner(monkeypatch, *, optimizer_steps=None, fake_smoke=False):
         result = {"pilot_validation": {"split": "validation", "samples": 2, "metrics": {"method": {"AP": 5.8},
                                                                                          "base": {"AP": 5.0}}}}
         (workspace / "results.json").write_text(json.dumps(result))
-        return {"success": True, "smoke": fake_smoke, "require_training": True, "results": result, "world_size": 1,
+        result_report = {"success": True, "smoke": fake_smoke, "require_training": True, "results": result, "world_size": 1,
                 "training": {"optimizer_steps": step_limit if optimizer_steps is None else optimizer_steps,
                              "parameter_update_observed": True, "losses": [0.4], "checkpoint_verified": True,
                              "checkpoint_sha256": file_hash(ckpt)},
                 "results_sha256": file_hash(workspace / "results.json"),
                 "source_manifest": source_manifest(workspace), "predictions": {"groups": [{"checked": 2}]}}
+        (workspace / "outputs/val_predictions.csv").write_text("pred\n0\n1\n")
+        output_dir.mkdir(parents=True)
+        (output_dir / "execution_report.json").write_text(json.dumps(result_report))
+        (output_dir / "training_observation.json").write_text(json.dumps(result_report["training"]))
+        return result_report
     monkeypatch.setattr(execution, "_run_once", launch)
     return calls
 
@@ -145,6 +150,62 @@ Path("results.json").write_text(json.dumps({"pilot_validation": {"split": "valid
     full = execution.run_experiment(workspace, out, config, run_dir=tmp_path, review_client=client)
     assert full["success"], full["errors"]
     assert full["training"]["optimizer_steps"] == 3 and client.calls == 1
-    pilot = json.loads(next(out.glob("method-pilot-*/execution/execution_report.json")).read_text())
+    evidence_dir = Path(json.loads((out / "short_training_pilot.json").read_text())["pilot"])
+    pilot = json.loads((evidence_dir / "execution/execution_report.json").read_text())
     assert pilot["training"]["optimizer_steps"] == 2
     assert full["training"]["checkpoint_sha256"] != pilot["training"]["checkpoint_sha256"]
+
+
+class ReviewUnavailableOnce(Review):
+    def __init__(self):
+        super().__init__()
+        self.unavailable = True
+
+    def chat(self, messages, **kwargs):
+        if self.unavailable:
+            self.unavailable = False
+            raise ConnectionError("review service unavailable")
+        return super().chat(messages, **kwargs)
+
+
+@pytest.mark.parametrize("change,expected_pilots", [
+    (None, 1), ("yaml", 2), ("protocol", 2), ("prediction", 2), ("training_log", 2),
+    ("checkpoint", 2), ("resource", 2), ("untracked_external", 2), ("pilot_yaml", 2),
+])
+def test_retry_validates_inputs_and_real_evidence(case, tmp_path, monkeypatch, change, expected_pilots):
+    workspace, first_output, config = case
+    calls = setup_runner(monkeypatch)
+    client = ReviewUnavailableOnce()
+    settings = workspace / "model.yaml"
+    settings.write_text("width: 32")
+    external = tmp_path / "dataset"
+    external.mkdir()
+    frame = external / "image.bin"
+    frame.write_bytes(b"observed dataset")
+    config.experiment.datasets_dir = str(external)
+    if change == "untracked_external":
+        (workspace / "main.py").write_text("TARGET_STEPS=3000\nsource='https://host/dynamic'\n")
+    assert not execution.run_experiment(*case, run_dir=tmp_path, review_client=client)["success"]
+    first = json.loads((first_output / "short_training_pilot.json").read_text())
+    pilot = Path(first["pilot"])
+    if change == "pilot_yaml":
+        (pilot / "workspace/model.yaml").write_text("tampered: true")
+    elif change == "yaml":
+        settings.write_text("width: 64")
+    elif change == "resource":
+        frame.write_bytes(b"modified dataset")
+    elif change == "protocol":
+        (tmp_path / "stage-09").mkdir()
+        (tmp_path / "stage-09/exp_plan.yaml").write_text("training_phase: long\nseed: 111")
+    elif change == "checkpoint":
+        (pilot / "workspace/outputs/model.pt").write_bytes(b"replaced model")
+    elif change == "prediction":
+        (pilot / "workspace/outputs/val_predictions.csv").write_text("pred\n0\n0\n")
+    elif change == "training_log":
+        (pilot / "execution/training_observation.json").write_text("{}")
+    second_output = tmp_path / "new-attempt-dir"
+    assert execution.run_experiment(workspace, second_output, config, run_dir=tmp_path, review_client=client)["success"]
+    second = json.loads((second_output / "short_training_pilot.json").read_text())
+    assert sum(pilot for _, pilot, _ in calls) == expected_pilots
+    assert second["reused"] is (expected_pilots == 1)
+    assert (first["pilot"] == second["pilot"]) is (expected_pilots == 1)

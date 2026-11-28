@@ -118,7 +118,7 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
                     shutil.move(str(item), archive / item.name)
         if not config.experiment.require_training:
             raise ValueError("Long training requires the platform's supervised PyTorch execution")
-        receipt = review(workspace, output_dir, config, review_client, pilot_steps, plan, _run_once)
+        receipt = review(workspace, output_dir, config, review_client, pilot_steps, plan, _run_once, run_dir=run_dir)
     except Exception as exc:
         # The real launch must not run on an unavailable reviewer or an incomplete pilot.
         output_dir.mkdir(parents=True, exist_ok=True)
