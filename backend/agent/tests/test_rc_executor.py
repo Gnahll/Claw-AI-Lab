@@ -2202,6 +2202,51 @@ class TestPaperExperimentEvidence:
         assert len(llm.calls) == 2
 
 
+    @pytest.mark.parametrize("claim, conflict", [
+        ("We evaluated on all 312 ScanNet v2 validation scenes.", True),
+        ("AP50 was measured on the complete ScanNet validation split.", True),
+        ("The entire validation set was evaluated.", True),
+        ("Spectral was evaluated on 312 validation scenes.", True),
+        ("We evaluated on the full ScanNet validation split. A two-scene subset was visualized.", True),
+        ("We did not evaluate on the full validation split.", False),
+        ("Future work will evaluate on the full validation split.", False),
+        ("It is unclear whether the full validation set was evaluated.", False),
+        ("The full validation set contains 312 scenes. We evaluated two of them.", False),
+        ("We evaluated two scenes from the full validation split.", False),
+        ("We evaluated on the full validation set for depth loss only; AP used two scenes.", False),
+        ("AP was measured on all 2 validation scenes in our subset.", False),
+        ("We measured validation loss across all 312 validation windows.", False),
+    ])
+    def test_subset_coverage_uses_recorded_scene_ids(self, run_dir, claim, conflict):
+        measured = {"data_split": {"val": {"scene_count": 312}}, "conditions": {
+            "Spectral": {"validation": {"windows": 312}, "evaluation": {"scenes": ["s1", "s2"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        findings = rc_executor._paper_evidence_conflicts(claim, run_dir)
+        assert bool(findings) is conflict
+        if conflict:
+            assert "Spectral 2/312" in findings[0]
+
+    def test_subset_coverage_with_mixed_conditions(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3}}, "conditions": {
+            "Reference": {"evaluation": {"scenes": ["a", "b", "c"]}},
+            "Candidate": {"evaluation": {"scenes": ["a", "b"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        assert not rc_executor._paper_evidence_conflicts("Reference was evaluated on the full validation split.", run_dir)
+        assert rc_executor._paper_evidence_conflicts("Candidate was evaluated on the full validation split.", run_dir)
+
+    def test_revision_preserves_rejection_when_all_drafts_overstate_coverage(self, run_dir, rc_config, adapters):
+        _write_prior_artifact(run_dir, 20, "paper_draft.md", "# Results\nWe evaluated on the full validation split.")
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps({
+            "data_split": {"val": {"scene_count": 312}}, "conditions": {"method": {"evaluation": {"scenes": ["a", "b"]}}}}))
+        stage = run_dir / "stage-22"
+        stage.mkdir()
+        result = rc_executor._execute_paper_revision(stage, run_dir, rc_config, adapters)
+        assert result.status == StageStatus.FAILED and not (stage / "paper_revised.md").exists()
+        evidence = json.loads((stage / "experiment_sync_report.json").read_text())
+        assert "method 2/312" in evidence["remaining_conflicts"][0]
+        assert (stage / "paper_revision_rejected.md").is_file()
+
+
 class TestRunPayloadMetrics:
     """Tests for _run_payload_metrics() schema handling."""
 

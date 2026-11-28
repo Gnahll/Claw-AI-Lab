@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -194,6 +195,73 @@ def reporting_contract(results: dict, metric_key: str = "primary_metric", direct
         result["report_metric"] = {"name": "AP[.50:.95]" if all(v == ".50:.95" for v in ranges) else "AP (IoU range not recorded)", "unit": "percent", "direction": "maximize",
                                    "values": ap_values, "objective_transform": transforms[0]}
     return result
+
+
+# Match affirmative measurement statements, so naming or discussing the full split is safe.
+# Keep the object next to the measurement verb: "a subset of the full set" has a different object.
+_SPLIT_WORDS = r"(?:[a-z0-9][\w.-]*\s+){0,4}validation\s+(?:split|set|scenes|benchmark)"
+_FULL_SPLIT = rf"(?:the\s+)?(?:full|complete|entire)\s+{_SPLIT_WORDS}"
+_NUMBERED_SPLIT = (
+    rf"(?:all\s+)?(?P<count>\d+)\s+(?:{_SPLIT_WORDS}|scenes\s+(?:of|in|from)\s+(?:the\s+)?{_SPLIT_WORDS})"
+)
+_SCOPE_OBJECT = rf"(?:{_FULL_SPLIT}|{_NUMBERED_SPLIT}|all\s+{_SPLIT_WORDS})"
+_SCOPE_ACTIVE = re.compile(
+    rf"\b(?:we\s+(?:evaluate[d]?|test(?:ed)?|benchmark(?:ed)?)"
+    rf"(?:\s+(?:our|the|both|each|all)\s+(?:model|approach|method|variant|condition)s?)?"
+    rf"|(?:we\s+(?:report(?:ed)?|measure[d]?|compute[d]?)\s+(?:the\s+)?(?:instance\s+)?(?:mean\s+)?ap(?:\d+|\[[^\]]+\])?)"
+    rf"|(?:ap(?:\d+|\[[^\]]+\])?)\s+(?:is|was)\s+(?:measured|evaluated|computed|reported))"
+    rf"\s+(?:(?:on|over|across|using)\s+)?{_SCOPE_OBJECT}\b", re.I,
+)
+_SCOPE_PASSIVE = re.compile(
+    rf"\b{_SCOPE_OBJECT}\s+(?:was|were|is|are)\s+(?:used\s+(?:to\s+evaluate|for\s+evaluation)|evaluated)\b", re.I,
+)
+_CLAUSE_LIMIT = re.compile(r"(?<=[.!?;])\s+|\n\s*\n|\s+[—–]\s+")
+_QUALIFIED_SCOPE = re.compile(
+    r"\b(?:if|whether|planned|planning|would|could|will|future|wish|suppose|hypothetical|untrue|"
+    r"incorrect(?:ly)?|false|not\s+(?:claim|assert)|cannot\s+(?:claim|assert))\b", re.I,
+)
+
+
+def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
+    """Check asserted validation coverage against explicit per-condition scene IDs and split size."""
+    conditions = results.get("conditions")
+    split = results.get("data_split")
+    if not isinstance(conditions, dict) or not isinstance(split, dict) or not isinstance(split.get("val"), dict):
+        return []
+    declared = split["val"].get("scene_count")
+    if type(declared) is not int or declared <= 0:
+        return []
+    # reporting_contract owns scene-ID deduplication, split scope and the distinction from loss windows.
+    rows = reporting_contract(results)["conditions"]
+    subsets = {name: row["scene_count"] for name, row in rows.items() if row["evaluation_scope"] == "subset"}
+    if not subsets:
+        return []
+    conflicts = []
+    text = re.sub(r"\x60\x60\x60.*?(?:\x60\x60\x60|$)", "", paper, flags=re.S)
+    names = "|".join(re.escape(name) for name in rows)
+    named_claim = re.compile(
+        rf"(?<!\w)(?:we\s+(?:evaluated?|tested)\s+(?:{names})|(?:{names})\s+(?:was|is)\s+evaluated)"
+        rf"\s+(?:on|across|over)\s+{_SCOPE_OBJECT}\b", re.I)
+
+    for raw in _CLAUSE_LIMIT.split(text.partition("\n## References")[0]):
+        clause = " ".join(raw.replace("**", "").split())
+        for pattern in (_SCOPE_ACTIVE, _SCOPE_PASSIVE, named_claim):
+            for match in pattern.finditer(clause):
+                lead = re.split(r"[,;]|\bbut\b", clause[:match.start()], flags=re.I)[-1]
+                if _QUALIFIED_SCOPE.search(lead):
+                    continue
+                if re.search(r"\b(?:only\s+for|for\s+(?:the\s+)?)\s*(?:training\s+|validation\s+|depth\s+)?loss(?:es)?\b", clause[match.end():], re.I):
+                    continue
+                claimed = int(match["count"]) if match["count"] else declared
+                named = {name for name in rows if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", clause, re.I)}
+                relevant = named or (set(rows) if len(subsets) == len(rows) == len(conditions) else set())
+                wrong = sorted(name for name in relevant if name in subsets and claimed > subsets[name])
+                if wrong:
+                    counts = ", ".join(f"{name} {subsets[name]}/{declared}" for name in wrong)
+                    message = f"Evaluation scope: manuscript claims {claimed} validation scenes; recorded scene IDs cover {counts}."
+                    if message not in conflicts:
+                        conflicts.append(message)
+    return conflicts
 
 
 def emit_reporting_contract(run_dir: Path, destination: Path, metric_key: str = "primary_metric",

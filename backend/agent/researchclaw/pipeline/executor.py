@@ -5835,46 +5835,8 @@ def _paper_evidence_conflicts(paper: str, run_dir: Path) -> list[str]:
                 "Paper denies completed execution although the audit contains completed runs."
             )
 
-    return conflicts
-
-
-def _paper_evidence_conflicts(paper: str, run_dir: Path) -> list[str]:
-    """Detect claims that contradict the authoritative experiment summary."""
-    summary = _load_experiment_summary(run_dir) or {}
-    lowered = " ".join(paper.lower().split())
-    conflicts: list[str] = []
-
-    per_seed_results = summary.get("per_seed_results")
-    if isinstance(per_seed_results, list) and per_seed_results:
-        aggregate_only_patterns = (
-            "only aggregate means",
-            "contains aggregate means, not the full run-by-epoch",
-            "does not contain the full run-by-epoch",
-            "cannot be reconstructed from those means",
-        )
-        if any(pattern in lowered for pattern in aggregate_only_patterns):
-            conflicts.append(
-                "Paper says only aggregate means are available although per-seed results exist."
-            )
-
-    audit = summary.get("audit")
-    completed_audits = []
-    if isinstance(audit, dict):
-        completed_audits = [
-            value for value in audit.values()
-            if isinstance(value, dict) and value.get("status") == "completed"
-        ]
-    if completed_audits:
-        completion_patterns = (
-            "no new execution occurred",
-            "actual completed progress for the independent task therefore remain unverified",
-            "does not establish completion of the newly authorized server run",
-        )
-        if any(pattern in lowered for pattern in completion_patterns):
-            conflicts.append(
-                "Paper denies completed execution although the audit contains completed runs."
-            )
-
+    from researchclaw.pipeline.paper_evidence import evaluation_scope_conflicts, load_measured_results
+    conflicts.extend(evaluation_scope_conflicts(paper, load_measured_results(run_dir)))
     return conflicts
 
 
@@ -9032,6 +8994,13 @@ def _execute_paper_revision(
             "selected_source": "original_draft_no_llm",
             "remaining_conflicts": draft_conflicts,
         }
+    scope_conflicts = [item for item in sync_report["remaining_conflicts"] if item.startswith("Evaluation scope:")]
+    if scope_conflicts:
+        (stage_dir / "paper_revision_rejected.md").write_text(revised, encoding="utf-8")
+        (stage_dir / "experiment_sync_report.json").write_text(json.dumps(sync_report, indent=2), encoding="utf-8")
+        return StageResult(stage=Stage.PAPER_REVISION, status=StageStatus.FAILED,
+                           artifacts=("paper_revision_rejected.md", "experiment_sync_report.json"),
+                           error="; ".join(scope_conflicts))
     from researchclaw.pipeline.artifact_audit import manuscript_errors
     structure_errors = manuscript_errors(revised)
     if structure_errors:
