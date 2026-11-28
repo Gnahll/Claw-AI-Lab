@@ -17,7 +17,12 @@ class ArtifactFormatRecoveryTests(unittest.TestCase):
         self.run.mkdir()
         self.path = self.run / "schedule.json"
 
+    @staticmethod
+    def approve(info):
+        return {"action": info["operation"]}
+
     def check(self, raw, **kwargs):
+        kwargs.setdefault("choose", self.approve)
         self.path.write_bytes(raw)
         with self.assertRaises(json.JSONDecodeError) as captured:
             json.loads(self.path.read_text(encoding="utf-8"))
@@ -89,7 +94,7 @@ class ArtifactFormatRecoveryTests(unittest.TestCase):
         plan.write_bytes(wrapped)
         receipt = {"plan_sha256": hashlib.sha256(target).hexdigest()}
         (stage / "candidate.json").write_text(json.dumps(receipt))
-        self.assertTrue(fmt.repair(self.run, plan, plan.read_text()))
+        self.assertTrue(fmt.repair(self.run, plan, plan.read_text(), choose=self.approve))
         self.assertEqual(target, plan.read_bytes())
         self.assertEqual(yaml.safe_load(target)["training"]["notes"], "retain these spaces   \n\n")
 
@@ -104,7 +109,7 @@ class ArtifactFormatRecoveryTests(unittest.TestCase):
         plan = self.run / "exp_plan.yaml"
         plan.write_bytes(b"```yaml\nsteps: 450\n```")
         (self.run / "candidate.json").write_text('{"plan_sha256":"other"}')
-        self.assertFalse(fmt.repair(self.run, plan, plan.read_text()))
+        self.assertFalse(fmt.repair(self.run, plan, plan.read_text(), choose=self.approve))
 
     def test_stage_entry_resumes_validation_with_same_schedule(self):
         from types import SimpleNamespace
@@ -142,6 +147,60 @@ class ArtifactFormatRecoveryTests(unittest.TestCase):
                 config=SimpleNamespace(research=SimpleNamespace(details="")), adapters=None)
         self.assertIn("Missing input: codebase_candidates.json", result.error)
         self.assertEqual(plan.read_bytes(), b"steps: 450\n")
+
+    def test_missing_model_holds_stage_until_approved_retry(self):
+        import time
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from researchclaw.pipeline import executor
+        from researchclaw.pipeline.stages import Stage
+        stage = self.run / "stage-13"
+        stage.mkdir()
+        schedule = stage / "schedule.json"
+        schedule.write_bytes(b'{"steps":450,}')
+        client = Mock()
+        client.chat.return_value.content = '{"action":"remove_trailing_comma"}'
+        now = time.time()
+        def enter(ai, sec):
+            with patch.object(executor, "_stage_llm", return_value=ai), patch.object(fmt.time, "time", return_value=now+sec):
+                return executor.execute_stage(Stage.EXPERIMENT_RUN, run_dir=self.run, run_id="test",
+                    config=SimpleNamespace(research=SimpleNamespace(details="")), adapters=None)
+        self.assertIn("waiting for AI", enter(None, 0).error)
+        self.assertIn("waiting for AI", enter(client, 2).error)
+        self.assertEqual(client.chat.call_count, 0)
+        self.assertEqual(schedule.read_bytes(), b'{"steps":450,}')
+        self.assertIn("Missing input: experiment/", enter(client, fmt.BACKOFF_SECONDS + 1).error)
+        self.assertEqual(schedule.read_bytes(), b'{"steps":450}')
+        self.assertEqual(client.chat.call_count, 1)
+
+    def test_transient_model_errors_have_bounded_backoff(self):
+        import time
+        from unittest.mock import Mock, patch
+        ai = Mock(side_effect=TimeoutError())
+        raw = b'{"a":1,}'
+        now = time.time()
+        for attempt in range(1, fmt.AI_ATTEMPTS+1):
+            with patch.object(fmt.time, "time", return_value=now):
+                if attempt < fmt.AI_ATTEMPTS:
+                    with self.assertRaises(fmt.FormatRecoveryPending) as pending:
+                        self.check(raw, choose=ai)
+                    now = pending.exception.next_check+1
+                else:
+                    self.assertFalse(self.check(raw, choose=ai))
+        with patch.object(fmt.time, "time", return_value=now+1000):
+            self.assertFalse(self.check(raw, choose=ai))
+        self.assertEqual(self.path.read_bytes(), raw)
+        self.assertEqual(ai.call_count, fmt.AI_ATTEMPTS)
+        self.assertEqual(len(list((self.run/".artifact-format-recovery").rglob("audit.json"))), fmt.AI_ATTEMPTS)
+
+    def test_model_that_declines_is_not_retried(self):
+        from unittest.mock import Mock
+        ai = Mock(return_value={"action":"hold"})
+        raw = b'{"a":1,}'
+        self.assertFalse(self.check(raw, choose=ai))
+        self.assertFalse(self.check(raw, choose=ai))
+        self.assertEqual(ai.call_count, 1)
+        self.assertEqual(self.path.read_bytes(), raw)
 
     def test_experiment_tick_retries_inactive_run_reader_once(self):
         from unittest.mock import patch

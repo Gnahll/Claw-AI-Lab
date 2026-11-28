@@ -11321,7 +11321,7 @@ def execute_stage(
             is_yaml = input_file in {"exp_plan.yaml", "search_plan.yaml"}
             if found is not None and (input_file in {"schedule.json", "codebase_candidates.json"}
                                       or (is_yaml and found.startswith("```"))):
-                from researchclaw.pipeline.artifact_format_recovery import repair, suggest
+                from researchclaw.pipeline.artifact_format_recovery import FormatRecoveryPending, repair, suggest
                 try:
                     if is_yaml:
                         if not isinstance(yaml.safe_load(found), dict):
@@ -11336,13 +11336,20 @@ def execute_stage(
                     llm = _stage_llm(config)
                     choose = (lambda d: suggest(llm, d)) if llm else None
                     expected = list if input_file == "codebase_candidates.json" else dict
-                    if repair(run_dir, path, found if is_yaml else exc, choose=choose, expected=expected):
+                    try:
+                        repaired = repair(run_dir, path, found if is_yaml else exc,
+                                          choose=choose, expected=expected)
+                        message = f"Input {input_file} requires manual format review"
+                    except FormatRecoveryPending as pending:
+                        repaired = False
+                        message = f"Input {input_file} is waiting for AI format recovery; retry after {int(pending.next_check) + 1}"
+                    if repaired:
                         # Re-enter the same reader before any stage side effects.
                         corrected = _read_prior_artifact(run_dir, input_file)
                         (yaml.safe_load if is_yaml else json.loads)(corrected)
                     else:
                         result = StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(),
-                                             error=f"Input {input_file} requires manual format review",
+                                             error=message,
                                              decision="retry")
                         _write_stage_meta(stage_dir, stage, run_id, result)
                         return result

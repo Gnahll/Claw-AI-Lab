@@ -290,9 +290,15 @@ def tick(project: Path, repo: Path, model=call_model, active=unit_running, launc
             if not path.is_relative_to(run) or active(state["unit"]):
                 raise
             sys.path.insert(0, str(repo / "backend" / "agent"))
-            from researchclaw.pipeline.artifact_format_recovery import repair
+            from researchclaw.pipeline.artifact_format_recovery import FormatRecoveryPending, repair
             choose = lambda info: model(repo, {"task": "artifact_format_recovery", "parser": info})
-            if not repair(run, path, exc, choose=choose, expected=dict):
+            try:
+                repaired = repair(run, path, exc, choose=choose, expected=dict)
+            except FormatRecoveryPending as pending:
+                state["next_check"] = pending.next_check
+                record(project, state, state["status"], action="format_ai_wait", artifact=str(path.relative_to(run)))
+                return
+            if not repaired:
                 record(project, state, "needs_attention", outcome="invalid_json", artifact=str(path.relative_to(run)))
                 return
             record(project, state, state["status"], action="format_repaired", artifact=str(path.relative_to(run)))

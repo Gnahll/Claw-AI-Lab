@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import stat
 import tempfile
+import time
 
 
 MAX_BYTES = 2 * 1024 * 1024
@@ -143,6 +144,51 @@ def _pinned_plan_allows(path, output):
     return isinstance(record, dict) and record.get("plan_sha256") == hashlib.sha256(output).hexdigest()
 
 
+class FormatRecoveryPending(RuntimeError):
+    def __init__(self, next_check):
+        self.next_check = next_check
+        super().__init__("Format recovery is waiting for the configured AI")
+
+
+AI_ATTEMPTS = 3
+BACKOFF_SECONDS = 60
+
+
+def _claim(directory):
+    for number in range(1, AI_ATTEMPTS + 1):
+        attempt = directory if number == 1 else directory / f"retry-{number}"
+        try:
+            attempt.mkdir(mode=0o700)
+            return attempt, number
+        except FileExistsError:
+            if attempt.is_symlink() or attempt.resolve() != attempt:
+                return None
+            record = attempt / "audit.json"
+            if record.is_symlink():
+                return None
+            if not record.exists():
+                pending_until = attempt.stat().st_mtime + 120
+                if time.time() < pending_until:
+                    raise FormatRecoveryPending(pending_until)
+                return None
+            saved = json.loads(record.read_text(encoding="utf-8"))
+            if saved.get("status") == "choosing":
+                pending_until = record.stat().st_mtime + 120
+                if time.time() < pending_until:
+                    raise FormatRecoveryPending(pending_until)
+                return None
+            if saved.get("reason") != "ai_unavailable":
+                return None
+            if number == AI_ATTEMPTS:
+                return None
+            # Also handle the first release, which recorded ai_unavailable
+            # without a retry time.
+            next_check = saved.get("next_check", record.stat().st_mtime + BACKOFF_SECONDS)
+            if time.time() < next_check:
+                raise FormatRecoveryPending(next_check)
+    return None
+
+
 def repair(run, path, error, *, choose=None, expected=(dict, list)):
     """Return True only after a verified replacement; retry via the caller."""
     yaml_input = path.name in YAML_INPUTS
@@ -192,32 +238,42 @@ def repair(run, path, error, *, choose=None, expected=(dict, list)):
         # A persistent exclusive claim bounds repeat attempts and survives
         # concurrent workers or a crash between backup and replacement.
         key = hashlib.sha256((rel + "|" + digest).encode()).hexdigest()
-        attempt = audit / key
-        attempt.mkdir(mode=0o700)
+        claim = _claim(audit / key)
+        if claim is None:
+            return False
+        attempt, number = claim
         event = dict(path=rel, before_sha256=digest, parser=reason,
                      status="manual_review", reason="no_unique_verified_edit")
 
         def record():
             _atomic(attempt / "audit.json", json.dumps(event, indent=2).encode())
 
-        record()
         if not candidate:
+            record()
             return False
         operation, output = candidate
         event.update(operation=operation, after_sha256=hashlib.sha256(output).hexdigest(),
-                     reason="awaiting_choice", selected_by="ai" if choose else "validator")
+                     status="choosing", reason="awaiting_choice", selected_by="ai", attempt=number)
         record()
-        if choose:
-            try:
-                answer = choose(dict(reason, operation=operation))
-            except Exception:
-                event.update(reason="ai_unavailable")
-                record()
-                return False
-            if answer != {"action": operation}:
-                event.update(reason="ai_held_or_invalid_response")
-                record()
-                return False
+        try:
+            if choose is None:
+                raise ConnectionError("No configured AI client")
+            answer = choose(dict(reason, operation=operation))
+        except (ValueError, TypeError):
+            answer = None
+        except Exception:
+            next_check = time.time() + BACKOFF_SECONDS * 2 ** (number - 1)
+            pending = number < AI_ATTEMPTS
+            event.update(status="await_ai" if pending else "manual_review",
+                         reason="ai_unavailable", next_check=next_check)
+            record()
+            if pending:
+                raise FormatRecoveryPending(next_check)
+            return False
+        if answer != {"action": operation}:
+            event.update(status="manual_review", reason="ai_held_or_invalid_response")
+            record()
+            return False
         _atomic(attempt / "original.bytes", raw)
         event.update(status="backed_up", reason="before_replace")
         record()
