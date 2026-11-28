@@ -179,4 +179,3 @@ def review(workspace, output_dir, config, client, budget, plan, execute):
     finally:
         (attempt / "method_review.json").write_text(json.dumps(verdict, indent=2), encoding="utf-8")
     return attempt / "method_review.json"
-

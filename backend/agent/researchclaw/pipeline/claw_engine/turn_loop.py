@@ -186,7 +186,8 @@ class AgentTurnLoop:
         self._session = session
         self._max_iterations = max_iterations
         self._messages: list[dict[str, Any]] = []
-        self._tool_specs = tool_specs or TOOL_SPECS
+        self._tool_specs = TOOL_SPECS if tool_specs is None else tool_specs
+        self._tool_names = {spec["name"] for spec in self._tool_specs}
         self._verification_hooks = list(verification_hooks or [])
 
         self._executor = ToolExecutor(
@@ -325,7 +326,8 @@ class AgentTurnLoop:
                 result.tool_calls += 1
                 self._session.llm_calls += 1
 
-                perm_error = self._permissions.check(tool_name, tool_input)
+                perm_error = (self._permissions.check(tool_name, tool_input) if tool_name in self._tool_names
+                              else f"{tool_name} is not available in this stage")
                 if perm_error:
                     self._session.log("EXECUTE", f"  DENIED {tool_name}: {perm_error}")
                     self._trace.permission_denied(tool_name, perm_error)

@@ -103,3 +103,48 @@ def test_short_run_requires_no_ai(case, monkeypatch):
     assert execution.run_experiment(*case)["success"]
     assert calls == [(case[0], False, method_review.SHORT_LIMIT)]
 
+
+
+def test_real_torch_pilot_before_full_method(tmp_path, monkeypatch):
+    """Uses the same PyTorch observer, weight reload and prediction checks as a production launch."""
+    import sys
+    pytest.importorskip("torch")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "main.py").write_text("""from pathlib import Path
+import json, os
+import numpy as np
+import torch
+out = Path("outputs")
+out.mkdir(exist_ok=True)
+model = torch.nn.Linear(1, 1, bias=False)
+torch.nn.init.constant_(model.weight, 0.2)
+opt = torch.optim.SGD(model.parameters(), lr=0.05)
+data = torch.tensor([[1.0], [2.0], [3.0]])
+for _ in range(int(os.getenv("RESEARCHCLAW_PILOT_UPDATES", "3"))):
+    opt.zero_grad()
+    (model(data) - data).square().mean().backward()
+    opt.step()
+val = torch.tensor([[1.5], [2.5]])
+with torch.no_grad():
+    pred = model(val)
+    metric = (pred - val).abs().mean().item()
+np.save(out / "val_predictions.npy", pred.numpy())
+torch.save(model.state_dict(), out / "model.pt")
+Path("results.json").write_text(json.dumps({"pilot_validation": {"split": "validation", "samples": 2,
+        "metrics": {"method": {"error": metric}}}}))
+""")
+    stage = tmp_path / "stage-09"
+    stage.mkdir()
+    (stage / "exp_plan.yaml").write_text("training_phase: long\nshort_training_review: {pilot_steps: 2}\n")
+    config = SimpleNamespace(experiment=SimpleNamespace(require_training=True, metric_key="error", metric_direction="minimize",
+                  sandbox=SimpleNamespace(python_path=sys.executable), time_budget_sec=90, monitor_interval_sec=1))
+    out = tmp_path / "stage-14/runs/attempt-1"
+    client = Review()
+    full = execution.run_experiment(workspace, out, config, run_dir=tmp_path, review_client=client)
+    assert full["success"], full["errors"]
+    assert full["training"]["optimizer_steps"] == 3 and client.calls == 1
+    pilot = json.loads(next(out.glob("method-pilot-*/execution/execution_report.json")).read_text())
+    assert pilot["training"]["optimizer_steps"] == 2
+    assert full["training"]["checkpoint_sha256"] != pilot["training"]["checkpoint_sha256"]
