@@ -78,6 +78,7 @@ def test_receipt_accepts_resumed_completed_run(tmp_path: Path) -> None:
               "source_manifest": source_manifest(workspace),
               "training": {"optimizer_steps": 0, "parameter_update_observed": False},
               "resumed_completed_run": {"prior_optimizer_steps": 30150, "evidence": []}}
+    report["results"] = json.loads((workspace / "results.json").read_text(encoding="utf-8"))
     report_path.write_text(json.dumps(report), encoding="utf-8")
     from types import SimpleNamespace
     config = SimpleNamespace(experiment=SimpleNamespace(require_training=True, metric_key="pixel_f1"))

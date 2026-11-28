@@ -1,4 +1,5 @@
 import json
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -24,7 +25,9 @@ def verified(tmp_path):
     (workspace / 'results.json').write_text(json.dumps({'pixel_f1': 0.75, 'completed_epochs': 200}))
     (workspace / 'outputs/model.pt').write_bytes(b'validated final weights')
     (workspace / 'outputs/predictions/mask.npy').write_bytes(b'validated raw predictions')
-    report = {'success': True, 'smoke': False, 'require_training': True, 'source_manifest': source_manifest(workspace), 'training': {
+    report = {'workspace': str(workspace.resolve()),
+              'results_sha256': hashlib.sha256((workspace / 'results.json').read_bytes()).hexdigest(),
+              'success': True, 'smoke': False, 'require_training': True, 'source_manifest': source_manifest(workspace), 'training': {
         'parameter_update_observed': True, 'checkpoint_verified': True, 'optimizer_steps': 40200}}
     report_path.write_text(json.dumps(report))
     config = SimpleNamespace(experiment=SimpleNamespace(require_training=True, metric_key='pixel_f1',
@@ -157,3 +160,41 @@ def test_analysis_only_refine_adopts_verified_run_without_retraining(tmp_path, m
 def test_refine_scope(text, scope):
     from researchclaw.pipeline.stages import refine_scope
     assert refine_scope(text) == scope
+
+
+def test_supervised_results_replaced_before_receipt(tmp_path):
+    from researchclaw.training.verified_run import validate_receipt
+    run, ws, experiment, cfg, old = verified(tmp_path)
+    report = Path(old['report_path'])
+    results = ws / 'results.json'
+    results.write_text(json.dumps({'pixel_f1': 0.99, 'completed_epochs': 200}), encoding='utf-8')
+    with pytest.raises(ValueError, match="supervised results"):
+        create_receipt(ws, run, report, cfg)
+    # Simulate an old schema-1 receipt signed after the replacement.
+    old['artifacts']['results.json'] = hashlib.sha256(results.read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="supervised results"):
+        validate_receipt(old, experiment, run, cfg)
+
+
+def test_supervised_report_from_sibling_workspace_is_refused(tmp_path):
+    run, ws, _, cfg, receipt = verified(tmp_path)
+    report = Path(receipt['report_path'])
+    data = json.loads(report.read_text())
+    data['workspace'] = str(ws.with_name('run_workspace_2'))
+    report.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="different workspace"):
+        create_receipt(ws, run, report, cfg)
+
+
+def test_old_report_with_measured_snapshot_is_supported(tmp_path):
+    run, ws, _, cfg, receipt = verified(tmp_path)
+    report = Path(receipt['report_path'])
+    data = json.loads(report.read_text())
+    data.pop('results_sha256')
+    data['results'] = json.loads((ws / 'results.json').read_text())
+    report.write_text(json.dumps(data))
+    assert create_receipt(ws, run, report, cfg)['artifacts']['results.json']
+    data.pop('results')
+    report.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="supervised results"):
+        create_receipt(ws, run, report, cfg)

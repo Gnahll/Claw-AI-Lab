@@ -39,6 +39,31 @@ def config_contract(config) -> dict:
         'optional_experiments', 'datasets_dir', 'checkpoints_dir', 'codebases_dir')}))
 
 
+def _supervised_results_hash(workspace: Path, report: dict) -> str:
+    recorded_workspace = report.get('workspace')
+    if recorded_workspace is not None and (
+            not isinstance(recorded_workspace, str) or Path(recorded_workspace).resolve() != workspace.resolve()):
+        raise ValueError('Supervised execution report identifies a different workspace')
+    path = workspace / 'results.json'
+    if not path.resolve().is_relative_to(workspace.resolve()):
+        raise ValueError('Supervised results must be inside the executed workspace')
+    contents = path.read_bytes()
+    digest = hashlib.sha256(contents).hexdigest()
+    if 'results_sha256' in report:
+        if digest != report['results_sha256']:
+            raise ValueError('Workspace results differ from the supervised results digest')
+    else:
+        # Older reports may store the complete measurements but no byte hash.
+        # Compare JSON with its original scalar types (True != 1 and 1 != 1.0).
+        from_report = report.get('results')
+        if not isinstance(from_report, dict) or not from_report:
+            raise ValueError('Missing supervised results evidence; manual verification required')
+        if json.dumps(json.loads(contents), sort_keys=True, allow_nan=False) != json.dumps(
+                from_report, sort_keys=True, allow_nan=False):
+            raise ValueError('Workspace results differ from the supervised results snapshot')
+    return digest
+
+
 def create_receipt(workspace: Path, run_dir: Path, report_path: Path, config) -> dict:
     report = json.loads(report_path.read_text(encoding='utf-8'))
     training = report.get('training', {})
@@ -54,7 +79,7 @@ def create_receipt(workspace: Path, run_dir: Path, report_path: Path, config) ->
         raise ValueError('Experiment source changed during supervised execution')
     if 'main.py' not in sources or not (workspace / 'outputs/model.pt').is_file():
         raise ValueError('Verified run is missing source or final weights')
-    artifacts = {'results.json': file_hash(workspace / 'results.json')}
+    artifacts = {'results.json': _supervised_results_hash(workspace, report)}
     for path in sorted((workspace / 'outputs').rglob('*')):
         if not path.is_file():
             continue
@@ -94,4 +119,6 @@ def validate_receipt(receipt: dict, experiment_dir: Path, run_dir: Path, config)
     supervised = json.loads(report.read_text(encoding='utf-8'))
     if not supervised.get('success') or supervised.get('smoke') or not supervised.get('require_training'):
         raise ValueError('Receipt does not describe a verified full training run')
+    if _supervised_results_hash(workspace, supervised) != receipt['artifacts'].get('results.json'):
+        raise ValueError('Verified receipt does not pin the supervised results')
     return workspace
