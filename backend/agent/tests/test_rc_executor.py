@@ -1492,6 +1492,19 @@ caption: Method overview
         assert rc_executor._current_stage_dirs(tmp_path, "stage-16")[0].name == "stage-16"
         assert rc_executor._read_figure_manifest(tmp_path) == {}
 
+    def test_latex_package_includes_svg_figures(
+        self, run_dir: Path, rc_config: RCConfig,
+    ) -> None:
+        stage = run_dir / "stage-22"
+        figures = stage / "figures"
+        figures.mkdir(parents=True)
+        (figures / "method.svg").write_text("<svg/>", encoding="utf-8")
+        artifacts = rc_executor._generate_latex_package(
+            stage, run_dir, rc_config, "# Paper\n\n![Method](figures/method.svg)\n", llm=None
+        )
+        assert "latex_package.zip" in artifacts
+        assert (stage / "latex_package" / "figures" / "method.svg").exists()
+
     def test_copy_experiment_source_skips_large_files(self, tmp_path: Path) -> None:
         exp = tmp_path / "experiment_final"
         (exp / "source").mkdir(parents=True)
@@ -2271,6 +2284,32 @@ class TestPaperExperimentEvidence:
         assert "not independently reloaded" in evidence
         assert "sample_losses" not in evidence
         assert "per_image" not in evidence
+
+    def test_revision_reuses_only_current_stage20_figures(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        draft = """# Paper
+
+<!-- FIGURE_PROMPT
+figure_id: method
+caption: Method
+-->"""
+        _write_prior_artifact(run_dir, 20, "paper_draft.md", draft)
+        _write_prior_artifact(run_dir, 21, "reviews.md", "Keep the figure.")
+        current = run_dir / "stage-20" / "figures"
+        old = run_dir / "stage-20_v2" / "figures"
+        current.mkdir(parents=True, exist_ok=True)
+        old.mkdir(parents=True, exist_ok=True)
+        (current / "method.png").write_bytes(b"current")
+        (old / "method.png").write_bytes(b"old")
+        monkeypatch.setattr(rc_executor, "_generate_latex_package", lambda *args, **kwargs: [])
+        stage = run_dir / "stage-22"
+        stage.mkdir()
+        rc_executor._execute_paper_revision(
+            stage, run_dir, rc_config, adapters, llm=FakeLLMClient(draft)
+        )
+        assert (stage / "figures" / "method.png").read_bytes() == b"current"
 
     def test_revision_receives_and_saves_authoritative_evidence(
         self,

@@ -9063,7 +9063,7 @@ def _execute_paper_revision(
 
     # Reuse figures from S20 (PAPER_DRAFT) instead of regenerating
     _s20_figures_dir = None
-    for _sd in sorted(run_dir.glob("stage-20*"), reverse=True):
+    for _sd in _current_stage_dirs(run_dir, "stage-20"):
         _candidate = _sd / "figures"
         if _candidate.is_dir() and any(_candidate.iterdir()):
             _s20_figures_dir = _candidate
@@ -9284,7 +9284,7 @@ def _generate_latex_package(
     ]:
         if _fig_src.is_dir():
             for _fig_file in sorted(_fig_src.iterdir()):
-                if (_fig_file.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps"}
+                if (_fig_file.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps", ".svg"}
                         and _fig_file.name not in _fig_files):
                     _shutil_lp.copy2(_fig_file, fig_dir / _fig_file.name)
                     _fig_files.append(_fig_file.name)
