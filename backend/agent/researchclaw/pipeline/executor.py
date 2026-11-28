@@ -321,6 +321,13 @@ def _write_stage_meta(
 
 
 def _read_prior_artifact(run_dir: Path, filename: str) -> str | None:
+    found = _prior_artifact_path(run_dir, filename)
+    if found is None:
+        return None
+    return str(found) if found.is_dir() else found.read_text(encoding="utf-8")
+
+
+def _prior_artifact_path(run_dir: Path, filename: str) -> Path | None:
     # R14-2: Sort so non-versioned dirs (stage-13) come before versioned (stage-13_v1).
     # Within the same stage number, prefer the latest (non-versioned) copy.
     def _stage_sort_key(p: Path) -> tuple[str, int]:
@@ -337,9 +344,9 @@ def _read_prior_artifact(run_dir: Path, filename: str) -> str | None:
     for stage_subdir in sorted(run_dir.glob("stage-*"), key=_stage_sort_key, reverse=True):
         candidate = stage_subdir / filename
         if candidate.is_file():
-            return candidate.read_text(encoding="utf-8")
+            return candidate
         if filename.endswith("/") and (stage_subdir / filename.rstrip("/")).is_dir():
-            return str(stage_subdir / filename.rstrip("/"))
+            return stage_subdir / filename.rstrip("/")
     return None
 
 
@@ -11252,6 +11259,20 @@ _STAGE_EXECUTORS: dict[Stage, Callable[..., StageResult]] = {
 }
 
 
+def _stage_llm(config):
+    llm = None
+    try:
+        if config.llm.provider == "acp":
+            llm = create_llm_client(config)
+        else:
+            candidate = LLMClient.from_rc_config(config)
+            if candidate.config.base_url and candidate.config.api_key:
+                llm = candidate
+    except Exception:  # noqa: BLE001
+        llm = None
+    return llm
+
+
 def execute_stage(
     stage: Stage,
     *,
@@ -11293,9 +11314,27 @@ def execute_stage(
     _t_health_start = _time.monotonic()
     contract: StageContract = CONTRACTS[stage]
 
+    llm = None
     if contract.input_files:
         for input_file in contract.input_files:
-            found = _read_prior_artifact(run_dir, input_file)
+            found = _prior_artifact_path(run_dir, input_file)
+            if found is not None and input_file in {"schedule.json", "codebase_candidates.json"}:
+                from researchclaw.pipeline.artifact_format_recovery import repair, suggest
+                try:
+                    json.loads(found.read_text(encoding="utf-8"))
+                except json.JSONDecodeError as exc:
+                    llm = _stage_llm(config)
+                    choose = (lambda d: suggest(llm, d)) if llm else None
+                    expected = dict if input_file == "schedule.json" else list
+                    if repair(run_dir, found, exc, choose=choose, expected=expected):
+                        # Re-enter the same reader before any stage side effects.
+                        json.loads(found.read_text(encoding="utf-8"))
+                    else:
+                        result = StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(),
+                                             error=f"JSON input {input_file} requires manual review: {exc.msg}",
+                                             decision="retry")
+                        _write_stage_meta(stage_dir, stage, run_id, result)
+                        return result
             if found is None:
                 result = StageResult(
                     stage=stage,
@@ -11333,16 +11372,8 @@ def execute_stage(
     if bridge.use_memory:
         adapters.memory.append("stages", f"{run_id}:{int(stage)}:running")
 
-    llm = None
-    try:
-        if config.llm.provider == "acp":
-            llm = create_llm_client(config)
-        else:
-            candidate = LLMClient.from_rc_config(config)
-            if candidate.config.base_url and candidate.config.api_key:
-                llm = candidate
-    except Exception:  # noqa: BLE001
-        llm = None
+    if llm is None:
+        llm = _stage_llm(config)
 
     try:
         _ = advance(stage, StageStatus.PENDING, TransitionEvent.START)

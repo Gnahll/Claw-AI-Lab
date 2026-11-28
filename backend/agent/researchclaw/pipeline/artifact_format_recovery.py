@@ -1,0 +1,176 @@
+"""Recover an unambiguous notation error in a run-owned JSON input."""
+from __future__ import annotations
+
+import codecs
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import stat
+import tempfile
+
+
+MAX_BYTES = 2 * 1024 * 1024
+# Exact input artifacts. Checkpoints, weights, metrics, decisions and approvals
+# are intentionally outside the writer's scope.
+INPUTS = {"schedule.json", "codebase_candidates.json", "setup.json",
+          "status.json", "mechanism_plan.json"}
+
+
+def _pairs(items):
+    result = {}
+    for key, value in items:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_):
+    raise ValueError("non-standard JSON constant")
+
+
+def _verify(raw, expected):
+    value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs,
+                       parse_constant=_reject_constant)
+    if not isinstance(value, expected):
+        raise ValueError("unexpected JSON root")
+
+
+def _candidate(raw, exc, expected):
+    # All transformations splice the original bytes. Never serialize the
+    # decoded data back to disk, infer missing values, or edit string contents.
+    if raw.startswith(codecs.BOM_UTF8):
+        op, content = "remove_utf8_bom", raw[len(codecs.BOM_UTF8):]
+    elif match := re.fullmatch(rb"```json[ \t]*\r?\n(.*?)\r?\n```[ \t]*(?:\r?\n)?", raw, re.S):
+        op, content = "unwrap_json_fence", match[1]
+    elif (exc.doc[exc.pos:exc.pos + 1] in ("}", "]")
+          or re.match(r",[ \t\r\n]*[}\]]", exc.doc[exc.pos:])):
+        end = exc.pos + int(exc.doc[exc.pos:exc.pos + 1] == ",")
+        before = exc.doc[:end].rstrip(" \n\t\r")
+        if not before.endswith(","):
+            return None
+        left = before[:-1].rstrip(" \n\t\r")
+        if not left or left[-1] in "[:,{":
+            return None
+        idx = len(before[:-1].encode("utf-8"))
+        op, content = "remove_trailing_comma", raw[:idx] + raw[idx + 1:]
+    else:
+        return None
+    _verify(content, expected)
+    return op, content
+
+
+def _atomic(path, data, mode=0o600):
+    fd, name = tempfile.mkstemp(dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(name, mode)
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def suggest(client, diagnostic):
+    """Allow the configured AI to approve a single prevalidated byte edit."""
+    reply = client.chat(
+        [{"role": "user", "content": json.dumps(diagnostic)}],
+        system=("Return JSON with action equal to the supplied operation or 'hold'. "
+                "Only syntax may change. No replacement text or paths."),
+        json_mode=True, max_tokens=100,
+    )
+    return json.loads(reply.content)
+
+
+def _snapshot(run, path):
+    # Reject symlinks below the trusted run directory, links to other files,
+    # hidden paths, special files, and paths outside this run.
+    root = run.resolve(strict=True)
+    rel = path.absolute().relative_to(run.absolute())
+    if any(part.startswith(".") for part in rel.parts):
+        raise ValueError("hidden or parent path")
+    target = root / rel
+    if target.resolve(strict=True) != target:
+        raise ValueError("linked artifact")
+    st = target.stat()
+    if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1 or st.st_size > MAX_BYTES:
+        raise ValueError("ineligible file")
+    with target.open("rb") as f:
+        raw = f.read(MAX_BYTES + 1)
+    if len(raw) != st.st_size:
+        raise ValueError("artifact changed during read")
+    return target, raw, (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_mode)
+
+
+def repair(run, path, error, *, choose=None, expected=(dict, list)):
+    """Return True only after a verified replacement; retry via the caller."""
+    if path.name not in INPUTS or not isinstance(error, json.JSONDecodeError):
+        return False
+    try:
+        target, raw, identity = _snapshot(run, path)
+        original = raw.decode("utf-8")
+        # Path.read_text performs newline translation. Reproduce the parser
+        # error on the original bytes to obtain the correct byte offset.
+        if original.replace("\r\n", "\n").replace("\r", "\n") != error.doc.replace("\r\n", "\n").replace("\r", "\n"):
+            return False
+        try:
+            json.loads(original)
+            return False
+        except json.JSONDecodeError as exc:
+            try:
+                candidate = _candidate(raw, exc, expected)
+            except (ValueError, RecursionError):
+                candidate = None
+            reason = {"error": exc.msg, "line": exc.lineno, "column": exc.colno}
+        audit = run.resolve() / ".artifact-format-recovery"
+        audit.mkdir(mode=0o700, exist_ok=True)
+        if audit.is_symlink() or audit.resolve() != audit:
+            return False
+        rel = str(target.relative_to(run.resolve()))
+        digest = hashlib.sha256(raw).hexdigest()
+        # A persistent exclusive claim bounds repeat attempts and survives
+        # concurrent workers or a crash between backup and replacement.
+        key = hashlib.sha256((rel + "|" + digest).encode()).hexdigest()
+        attempt = audit / key
+        attempt.mkdir(mode=0o700)
+        event = dict(path=rel, before_sha256=digest, parser=reason,
+                     status="manual_review", reason="no_unique_verified_edit")
+
+        def record():
+            _atomic(attempt / "audit.json", json.dumps(event, indent=2).encode())
+
+        record()
+        if not candidate:
+            return False
+        operation, output = candidate
+        event.update(operation=operation, after_sha256=hashlib.sha256(output).hexdigest(),
+                     reason="awaiting_choice", selected_by="ai" if choose else "validator")
+        record()
+        if choose:
+            try:
+                answer = choose(dict(reason, operation=operation))
+            except Exception:
+                event.update(reason="ai_unavailable")
+                record()
+                return False
+            if answer != {"action": operation}:
+                event.update(reason="ai_held_or_invalid_response")
+                record()
+                return False
+        _atomic(attempt / "original.bytes", raw)
+        event.update(status="backed_up", reason="before_replace")
+        record()
+        if _snapshot(run, path) != (target, raw, identity):
+            event.update(status="manual_review", reason="source_changed")
+            record()
+            return False
+        _atomic(target, output, stat.S_IMODE(identity[-1]))
+        event.update(status="repaired", reason="retry_original_reader")
+        record()
+        return True
+    except (OSError, ValueError, RecursionError):
+        return False

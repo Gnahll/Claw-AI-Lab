@@ -33,7 +33,11 @@ ERROR_PATTERNS = (
 def read(path: Path) -> dict:
     if not path.exists():
         return {}
-    value = json.loads(path.read_text(encoding="utf-8"))
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        exc.artifact_path = path
+        raise
     if not isinstance(value, dict):
         raise ValueError(f"{path.name} must contain an object")
     return value
@@ -187,6 +191,9 @@ def call_model(repo: Path, payload: dict) -> dict:
         primary_model=env["RESEARCHCLAW_MODEL"],
         timeout_sec=45,
     ))
+    if payload.get("task") == "artifact_format_recovery":
+        from researchclaw.pipeline.artifact_format_recovery import suggest
+        return suggest(client, payload["parser"])
     response = client.chat(
         [{"role": "user", "content": json.dumps(payload, ensure_ascii=False)}],
         system=(
@@ -268,7 +275,24 @@ def tick(project: Path, repo: Path, model=call_model, active=unit_running, launc
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
-        _tick(project, repo, model, active, launch)
+        try:
+            _tick(project, repo, model, active, launch)
+        except json.JSONDecodeError as exc:
+            path = getattr(exc, "artifact_path", None)
+            if path is None or not path.is_relative_to(project) or len(path.relative_to(project).parts) < 2:
+                raise
+            state = read(project / STATE)
+            run = child(project, state["run"])
+            if not path.is_relative_to(run) or active(state["unit"]):
+                raise
+            sys.path.insert(0, str(repo / "backend" / "agent"))
+            from researchclaw.pipeline.artifact_format_recovery import repair
+            choose = lambda info: model(repo, {"task": "artifact_format_recovery", "parser": info})
+            if not repair(run, path, exc, choose=choose, expected=dict):
+                record(project, state, "needs_attention", outcome="invalid_json", artifact=str(path.relative_to(run)))
+                return
+            record(project, state, state["status"], action="format_repaired", artifact=str(path.relative_to(run)))
+            _tick(project, repo, model, active, launch)
 
 
 def _tick(project: Path, repo: Path, model, active, launch) -> None:
