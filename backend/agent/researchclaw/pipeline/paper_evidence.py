@@ -224,23 +224,29 @@ _SCOPE_ACTIVE_NAMED = re.compile(
 )
 _SCOPE_SUBJECT = re.compile(
     rf"\b(?P<subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+(?:\s+(?:model|approach|method|variant|condition))?)"
-    rf"\s+(?:was|were|is|are)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b",
+    rf"\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b",
     re.I,
 )
 _SCOPE_SUBJECT_LIST = re.compile(
-    rf"\b(?P<subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+(?:\s+(?:and|or)\s+[a-z0-9_.-]+)+(?:\s+(?:models?|approaches?|methods?|variants?|conditions?))?)"
-    rf"\s+(?:was|were|is|are)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
+    rf"\b(?P<subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+"
+    rf"(?:\s*,\s*[a-z0-9_.-]+)*(?:\s*,?\s+(?:and|or)\s+[a-z0-9_.-]+)"
+    rf"(?:\s+(?:models?|approaches?|methods?|variants?|conditions?))?)"
+    rf"\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
 )
 _SCOPE_OBJECT_FRONT = re.compile(
     rf"\b{_SCOPE_OBJECT}\s+(?:was|were|is|are)\s+(?:used\s+(?:to\s+evaluate|for\s+evaluation)|evaluated)\s+"
-    rf"(?P<object_subject>[a-z0-9_.-]+(?:\s+(?:and|or)\s+[a-z0-9_.-]+)?)\b", re.I,
+    rf"(?P<object_subject>(?:(?:our|the)\s+)?[a-z0-9_.-]+(?:\s+(?:and|or)\s+[a-z0-9_.-]+)?"
+    rf"(?:\s+(?:model|approach|method|variant|condition))?)\b", re.I,
 )
 _SCOPE_PASSIVE = re.compile(
     rf"\b{_SCOPE_OBJECT}\s+(?:was|were|is|are)\s+(?:used\s+(?:to\s+evaluate|for\s+evaluation)|evaluated)\b", re.I,
 )
 _SCOPE_REPORTED = re.compile(
     rf"\b(?:results?\s+for\s+(?P<result_subject>.{{1,80}}?)\s+(?:is|are|was|were)\s+reported"
-    rf"|(?:the\s+)?evaluation\s+(?:used|uses|was\s+(?:conducted|performed)))\s+(?:on|over|across|using)?\s*{_SCOPE_OBJECT}\b", re.I,
+    rf"|(?:the\s+)?evaluation\s+(?:used|uses|was\s+(?:conducted|performed))"
+    rf"|(?:(?:the\s+)?(?P<reported_subject>[a-z0-9_.-]+)\s+evaluation\s+(?:was|is|has\s+been)\s+(?:conducted|performed))"
+    rf"|(?P<reported_results_subject>[a-z0-9_.-]+)\s+(?:performance|results?)\s+(?:is|are|was|were)\s+reported"
+    rf"|we\s+report\s+(?P<reported_active_subject>[a-z0-9_.-]+)\s+results?)\s+(?:on|over|across|using)?\s*{_SCOPE_OBJECT}\b", re.I,
 )
 _SCOPE_ACHIEVED = re.compile(
     rf"\b(?P<achieved_subject>[a-z0-9_.-]+)\s+(?:achieve[d]?|obtain(?:ed)?|reach(?:ed)?)\s+"
@@ -340,6 +346,9 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                     match.groupdict().get("subject")
                     or match.groupdict().get("active_subject")
                     or match.groupdict().get("result_subject")
+                    or match.groupdict().get("reported_subject")
+                    or match.groupdict().get("reported_results_subject")
+                    or match.groupdict().get("reported_active_subject")
                     or match.groupdict().get("achieved_subject")
                     or match.groupdict().get("object_subject")
                 )

@@ -9170,6 +9170,20 @@ def _resolve_export_figure_paths(source: str, stage_dir: Path, references: re.Pa
             return match.group(0)
         target = stage_dir / path
         if target.is_file():
+            if references is _TEX_GRAPHIC_RE and target.suffix.lower() == ".svg":
+                alternatives = [
+                    target.with_suffix(ext)
+                    for ext in (".pdf", ".png", ".jpg", ".jpeg", ".eps")
+                    if target.with_suffix(ext).is_file()
+                ]
+                if len(alternatives) == 1:
+                    replacement = alternatives[0].relative_to(stage_dir).as_posix()
+                    start = match.start(1) - match.start()
+                    end = match.end(1) - match.start()
+                    return match.group(0)[:start] + replacement + match.group(0)[end:]
+                # pdflatex cannot consume SVG.  Keep the export compilable and
+                # explicit rather than silently emitting an invalid reference.
+                return r"\fbox{\textit{Figure omitted: SVG requires conversion}}"
             return match.group(0)
         if not path.suffix:
             inferred = [target.with_suffix(s) for s in extensions if target.with_suffix(s).is_file()]
@@ -9277,7 +9291,14 @@ def _generate_latex_package(
 
     # 1. Collect available figures first (need filenames for LLM prompt)
     _fig_files: list[str] = []
-    current_chart_dirs = [stage / "charts" for stage in _current_stage_dirs(run_dir, "stage-16", "stage-14")]
+    # Prefer the current stage-16 result figures; only fall back to stage-14
+    # when no current stage-16 directory exists.  Do not package both rounds.
+    current_chart_dirs: list[Path] = []
+    for _stage_name in ("stage-16", "stage-14"):
+        _stage_dirs = _current_stage_dirs(run_dir, _stage_name)
+        if _stage_dirs:
+            current_chart_dirs = [_stage_dirs[0] / "charts"]
+            break
     for _fig_src in [stage_dir / "figures", *current_chart_dirs]:
         if _fig_src.is_dir():
             for _fig_file in sorted(_fig_src.iterdir()):
@@ -10634,7 +10655,8 @@ def _execute_export_publish(
                     logger.debug("Stage 22: Quality checks skipped: %s", _qc_exc)
             else:
                 logger.warning("Stage 22: LaTeX compilation verification FAILED: %s", _compile_result.errors[:3])
-                # Add compilation failure comment to .tex
+                # A failed compiler means this export is not deliverable.
+                # Preserve the diagnostic in the artifact, but fail the stage.
                 _tex_path = stage_dir / "paper.tex"
                 if _tex_path.exists():
                     _tex_content = _tex_path.read_text(encoding="utf-8")
@@ -10645,6 +10667,13 @@ def _execute_export_publish(
                             + _tex_content
                         )
                         _tex_path.write_text(_tex_content, encoding="utf-8")
+                return StageResult(
+                    stage=Stage.PAPER_REVISION,
+                    status=StageStatus.FAILED,
+                    artifacts=tuple(_revision_artifacts),
+                    evidence_refs=tuple(f"stage-22/{a}" for a in _revision_artifacts),
+                    error="LaTeX compilation verification failed",
+                )
         except Exception as _compile_exc:  # noqa: BLE001
             logger.debug("Stage 22: Compile verification skipped: %s", _compile_exc)
     except Exception as exc:  # noqa: BLE001
