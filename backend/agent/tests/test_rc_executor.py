@@ -1339,6 +1339,61 @@ class TestExportPublishCodePackage:
         assert "fig_stale" not in paper
         assert "fig_superseded" not in paper
 
+    def test_export_prefers_current_non_png_chart_over_old_png(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md",
+            "# Test Paper\n\n## Results\n\n![Current](charts/fig_current.pdf)\n",
+        )
+        for stage, name in (("stage-16", "fig_current.pdf"), ("stage-14", "fig_old.png")):
+            chart_dir = run_dir / stage / "charts"
+            chart_dir.mkdir(parents=True, exist_ok=True)
+            (chart_dir / name).write_bytes(name.encode())
+        monkeypatch.setattr(compiler, "compile_latex", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+        stage = run_dir / "stage-25"
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        assert (stage / "charts" / "fig_current.pdf").exists()
+        assert not (stage / "charts" / "fig_old.png").exists()
+
+    def test_figure_prompt_uses_unique_current_round_source(self, run_dir: Path) -> None:
+        paper = """<!-- FIGURE_PROMPT
+figure_id: method
+caption: Method overview
+-->"""
+        current = run_dir / "stage-22" / "figures"
+        current.mkdir(parents=True)
+        (current / "method.jpg").write_bytes(b"current")
+        old = run_dir / "stage-22_v1" / "figures"
+        old.mkdir(parents=True)
+        (old / "method.png").write_bytes(b"old")
+        chart_dir = run_dir / "stage-25" / "charts"
+        rendered, copied = rc_executor._figure_prompts_to_markdown(paper, run_dir, chart_dir)
+        assert copied == ["method.jpg"] and "charts/method.jpg" in rendered
+        (current / "method.pdf").write_bytes(b"ambiguous")
+        rendered, copied = rc_executor._figure_prompts_to_markdown(paper, run_dir, chart_dir)
+        assert copied == [] and "![" not in rendered
+
+    def test_existing_method_figure_does_not_suppress_result_chart(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md",
+            "# Test\n\n![Method](charts/method.png)\n\n## Results\n\nMeasured results.\n",
+        )
+        charts = run_dir / "stage-16" / "charts"
+        charts.mkdir(parents=True)
+        (charts / "fig_main_comparison.png").write_bytes(b"result")
+        monkeypatch.setattr(compiler, "compile_latex", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+        stage = run_dir / "stage-25"
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        paper = (stage / "paper_final.md").read_text(encoding="utf-8")
+        assert "charts/fig_main_comparison.png" in paper
+
     def test_export_compiles_with_relocated_figure_and_preserves_missing_evidence(
         self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
         monkeypatch: pytest.MonkeyPatch,
@@ -2332,6 +2387,33 @@ class TestPaperExperimentEvidence:
         _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
         assert rc_executor._paper_evidence_conflicts("We evaluated all 2 validation scenes.", run_dir)
         assert not rc_executor._paper_evidence_conflicts("We evaluated all 3 validation scenes.", run_dir)
+
+    def test_full_scope_requires_per_condition_manifest_and_handles_common_prose(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3, "scene_ids": ["a", "b", "c"]}}, "conditions": {
+            "Reference": {"evaluation": {"scenes": ["a", "b", "c"]}},
+            "Candidate": {"evaluation": {"scenes": ["a", "b"]}},
+            "Missing": {"evaluation": {}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        claims = [
+            "We evaluated the Candidate and Reference models on the full validation split.",
+            "Results for Candidate are reported on the full validation split.",
+            "Evaluation used the full validation split.",
+            "Candidate achieved AP50=12.6 on the full validation split.",
+            "With no test-time augmentation we evaluated our model on the full validation split.",
+            "We did not use the test set for tuning and we evaluated our model on the full validation split.",
+        ]
+        assert all(rc_executor._paper_evidence_conflicts(claim, run_dir) for claim in claims)
+        assert not rc_executor._paper_evidence_conflicts(
+            "All methods except Candidate and Missing were evaluated on the full validation split.", run_dir
+        )
+
+    def test_full_scope_ignores_reference_sections(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3}}, "conditions": {
+            "Method": {"evaluation": {"scenes": ["a", "b"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        for heading in ("# References", "## REFERENCES", "### Bibliography"):
+            paper = f"# Paper\n\nNo full-coverage claim.\n\n{heading}\nWe evaluated on the full validation split."
+            assert not rc_executor._paper_evidence_conflicts(paper, run_dir)
 
     def test_measured_results_uses_numeric_stage_version_order(self, run_dir):
         for version, scene in ((9, "old"), (10, "new")):

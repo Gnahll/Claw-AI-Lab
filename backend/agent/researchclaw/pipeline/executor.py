@@ -6751,11 +6751,14 @@ def _figure_prompts_to_markdown(
     import shutil
 
     meta: dict[str, dict] = {}
-    # Older stages first so the revision (S22) overrides the draft (S20).
-    for path in [
-        *reversed(_newest_stage_files(run_dir, "stage-20*/figure_prompts.json")),
-        *reversed(_newest_stage_files(run_dir, "stage-22*/figure_prompts.json")),
-    ]:
+    # Read only the current round of each stage. An older refine directory is
+    # superseded and must not supply a figure to the exported manuscript.
+    manifest_paths = [
+        stage / "figure_prompts.json"
+        for stage in _current_stage_dirs(run_dir, "stage-20", "stage-22")
+        if (stage / "figure_prompts.json").is_file()
+    ]
+    for path in manifest_paths:
         try:
             for fp in json.loads(path.read_text(encoding="utf-8")):
                 if isinstance(fp, dict) and fp.get("figure_id"):
@@ -6779,14 +6782,35 @@ def _figure_prompts_to_markdown(
             pos = cap.end()
 
         source: Path | None = None
-        candidates = [Path(fp["output_path"])] if fp.get("output_path") else []
-        for name in (f"{fid}.*", f"{fid}_fallback.*"):
-            for stage in ("stage-22*", "stage-20*"):
-                candidates += _newest_stage_files(run_dir, f"{stage}/figures/{name}")
-        for cand in candidates:
-            if cand.is_file() and cand.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf"}:
-                source = cand
+        current_stages = _current_stage_dirs(run_dir, "stage-22", "stage-20")
+        candidates: list[Path] = []
+        if fp.get("output_path"):
+            declared = Path(fp["output_path"])
+            try:
+                if current_stages and declared.resolve().is_relative_to(current_stages[0].resolve()):
+                    candidates.append(declared)
+            except OSError:
+                pass
+        # A current S22 revision supersedes S20. Fall back to S20 only when
+        # S22 has no file for this prompt; never combine both into a choice.
+        for stage in current_stages:
+            stage_candidates = [
+                *stage.joinpath("figures").glob(f"{fid}.*"),
+                *stage.joinpath("figures").glob(f"{fid}_fallback.*"),
+            ]
+            stage_candidates = [
+                cand for cand in stage_candidates
+                if cand.is_file() and cand.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".svg", ".eps"}
+            ]
+            if stage_candidates:
+                candidates.extend(stage_candidates)
                 break
+        candidates = list(dict.fromkeys(candidates))
+        if len(candidates) == 1:
+            source = candidates[0]
+        elif len(candidates) > 1:
+            logger.warning("Stage 25: Dropped ambiguous FIGURE_PROMPT %s: %s", fid, candidates)
+            continue
         target = chart_dir / f"{fid}{source.suffix.lower() if source else '.png'}"
         try:
             if source is not None:
@@ -10165,17 +10189,20 @@ def _execute_export_publish(
             if _fa_charts_found:
                 break
             for _fa_dir in [_fa_stage / "charts"]:
-                _fa_pngs = sorted(_fa_dir.glob("fig_*.png"))
-                if _fa_pngs:
+                _fa_charts = sorted(
+                    path for path in _fa_dir.glob("fig_*.*")
+                    if path.is_file() and path.suffix.lower() in _chart_extensions
+                )
+                if _fa_charts:
                     import shutil
-                    for _fa_png in _fa_pngs:
-                        dest = chart_dir / _fa_png.name
-                        shutil.copy2(_fa_png, dest)
+                    for _fa_chart in _fa_charts:
+                        dest = chart_dir / _fa_chart.name
+                        shutil.copy2(_fa_chart, dest)
                         charts.append(dest)
                     _fa_charts_found = True
                     logger.info(
                         "Stage 22: Copied %d FigureAgent charts from %s",
-                        len(_fa_pngs), _fa_dir,
+                        len(_fa_charts), _fa_dir,
                     )
                     break
 
@@ -10215,9 +10242,15 @@ def _execute_export_publish(
             len(_prompt_figures), _prompt_figures,
         )
 
-    # IMP-19 Layer 2: Ensure at least figures are referenced in the paper
+    # IMP-19 Layer 2: Reference every exported PNG not already cited. Existing
+    # method illustrations must not suppress injection of measured-result charts.
     chart_files = sorted((stage_dir / "charts").glob("*.png"))
-    if chart_files and "![" not in final_paper:
+    referenced_charts = {
+        Path(match.group(1).replace("\\", "/")).name
+        for match in _MD_IMAGE_LINE_RE.finditer(final_paper)
+    }
+    chart_files = [path for path in chart_files if path.name not in referenced_charts]
+    if chart_files:
         # Distribute figures to relevant sections based on filename keywords
         _fig_placement: dict[str, list[str]] = {
             "method": [],       # architecture, method, model, pipeline diagrams

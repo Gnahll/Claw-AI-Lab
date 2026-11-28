@@ -218,6 +218,10 @@ _SCOPE_ACTIVE = re.compile(
     rf"|(?:ap(?:\d+|\[[^\]]+\])?)\s+(?:is|was)\s+(?:measured|evaluated|computed|reported))"
     rf"\s+(?:(?:on|over|across|using)\s+)?{_SCOPE_OBJECT}\b", re.I,
 )
+_SCOPE_ACTIVE_NAMED = re.compile(
+    rf"\bwe\s+(?:evaluate[d]?|test(?:ed)?|benchmark(?:ed)?)\s+"
+    rf"(?P<active_subject>.{{1,160}}?)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
+)
 _SCOPE_SUBJECT = re.compile(
     rf"\b(?P<subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+(?:\s+(?:model|approach|method|variant|condition))?)"
     rf"\s+(?:was|were|is|are)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b",
@@ -225,6 +229,15 @@ _SCOPE_SUBJECT = re.compile(
 )
 _SCOPE_PASSIVE = re.compile(
     rf"\b{_SCOPE_OBJECT}\s+(?:was|were|is|are)\s+(?:used\s+(?:to\s+evaluate|for\s+evaluation)|evaluated)\b", re.I,
+)
+_SCOPE_REPORTED = re.compile(
+    rf"\b(?:results?\s+for\s+(?P<result_subject>.{{1,80}}?)\s+(?:is|are|was|were)\s+reported"
+    rf"|evaluation\s+(?:used|uses))\s+(?:on|over|across|using)?\s*{_SCOPE_OBJECT}\b", re.I,
+)
+_SCOPE_ACHIEVED = re.compile(
+    rf"\b(?P<achieved_subject>[a-z0-9_.-]+)\s+(?:achieve[d]?|obtain(?:ed)?|reach(?:ed)?)\s+"
+    rf"(?:an?\s+)?(?:instance\s+)?ap(?:\d+|\[[^\]]+\])?(?:\s*=\s*|\s+(?:of\s+)?)[-+]?\d+(?:\.\d+)?"
+    rf"\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
 )
 _CLAUSE_LIMIT = re.compile(r"(?<=[.!?;])\s+|\n\s*\n|\s+[—–]\s+")
 _QUALIFIED_SCOPE = re.compile(
@@ -261,21 +274,32 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
             recorded[name] = ids
     unsupported = {
         name: row["scene_count"] for name, row in rows.items()
-        if name in recorded and (official_ids is None or recorded[name] != official_ids)
+        if name not in recorded or official_ids is None or recorded[name] != official_ids
     }
     conflicts = []
     text = re.sub(r"\x60\x60\x60.*?(?:\x60\x60\x60|$)", "", paper, flags=re.S)
+    reference_heading = re.search(
+        r"(?im)^#{1,3}\s+(?:references|bibliography)\s*$", text
+    )
+    if reference_heading:
+        text = text[:reference_heading.start()]
     names = "|".join(re.escape(name) for name in rows)
     named_claim = re.compile(
         rf"(?<!\w)(?:we\s+(?:evaluated?|tested)\s+(?:{names})|(?:{names})\s+(?:was|is)\s+evaluated)"
         rf"\s+(?:on|across|over)\s+{_SCOPE_OBJECT}\b", re.I)
 
-    for raw in _CLAUSE_LIMIT.split(text.partition("\n## References")[0]):
+    for raw in _CLAUSE_LIMIT.split(text):
         clause = " ".join(raw.replace("**", "").split())
-        for pattern in (_SCOPE_ACTIVE, _SCOPE_SUBJECT, _SCOPE_PASSIVE, named_claim):
+        for pattern in (
+            _SCOPE_ACTIVE_NAMED, _SCOPE_ACTIVE, _SCOPE_SUBJECT, _SCOPE_PASSIVE,
+            _SCOPE_REPORTED, _SCOPE_ACHIEVED, named_claim,
+        ):
             for match in pattern.finditer(clause):
-                lead = re.split(r"[,;]|\bbut\b", clause[:match.start()], flags=re.I)[-1]
-                if _QUALIFIED_SCOPE.search(lead):
+                lead = re.split(r"[,;]|\bbut\b|\band\b", clause[:match.start()], flags=re.I)[-1]
+                # Only a qualifier immediately adjacent to the assertion can
+                # negate it. Configuration prose such as "with no test-time
+                # augmentation we evaluated ..." is still an affirmative claim.
+                if _QUALIFIED_SCOPE.search(lead[-24:]) and not re.search(r"\bwe\s*$", lead, re.I):
                     continue
                 if re.search(r"\b(?:only\s+for|for\s+(?:the\s+)?)\s*(?:training\s+|validation\s+|depth\s+)?loss(?:es)?\b", clause[match.end():], re.I):
                     continue
@@ -292,19 +316,39 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                 # it is not a claim that this number is the complete split.
                 if not is_full_claim:
                     continue
-                subject = match.groupdict().get("subject") or match.groupdict().get("active_subject")
+                subject = (
+                    match.groupdict().get("subject")
+                    or match.groupdict().get("active_subject")
+                    or match.groupdict().get("result_subject")
+                    or match.groupdict().get("achieved_subject")
+                )
                 if subject and _QUALIFIED_SCOPE.search(subject):
                     continue
                 named = {
                     name for name in rows
                     if subject and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", subject, re.I)
                 }
+                except_tail = re.search(
+                    r"\b(?:except|excluding|but\s+not)\s+(.+?)\s+(?:was|were|is|are)\s+"
+                    r"(?:evaluated|tested|benchmarked)\b",
+                    clause, re.I,
+                )
+                excluded = {
+                    name for name in rows
+                    if (
+                        except_tail
+                        and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", except_tail.group(1), re.I)
+                    ) or re.search(
+                        rf"\b(?:except|excluding|but\s+not)\s+(?:the\s+)?{re.escape(name)}(?!\w)",
+                        clause, re.I,
+                    )
+                }
                 if not named and pattern is named_claim:
                     named = {
                         name for name in rows
                         if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", match.group(0), re.I)
                     }
-                relevant = named or set(rows)
+                relevant = (named or set(rows)) - excluded
                 wrong = sorted(name for name in relevant if name in unsupported)
                 if bool(match.groupdict().get("all")) and claimed != declared:
                     wrong = sorted(set(wrong) | set(relevant))
