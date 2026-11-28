@@ -8595,7 +8595,6 @@ def _paper_reporting_block(run_dir: Path) -> str:
 def _collect_experiment_evidence(run_dir: Path) -> str:
     """Collect actual experiment parameters and results for peer review."""
     evidence_parts: list[str] = []
-    evidence_parts.append(_paper_reporting_block(run_dir))
     exp_summary = _load_experiment_summary(run_dir)
     selected_version = str((exp_summary or {}).get("selected_version", ""))
     has_final_version = selected_version.startswith(f"stage-{int(Stage.ITERATIVE_REFINE):02d}")
@@ -8717,6 +8716,8 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
 
     if not evidence_parts:
         return ""
+
+    evidence_parts.insert(0, _paper_reporting_block(run_dir))
 
     return (
         "\n\n## Actual Experiment Evidence\n"
