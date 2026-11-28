@@ -156,7 +156,12 @@ class IterativeRefineRuntime:
 
         # The refine loop gets generous iterations and bash timeout because
         # each refinement cycle involves a full experiment re-run
+        # Only the supervised launcher may run editable experiment code.
+        from researchclaw.pipeline.claw_engine.tools.definitions import TOOL_SPECS
+        editing_tools = [tool for tool in TOOL_SPECS if tool["name"] != "bash"]
+        system_prompt += "\nEdit and inspect files. Training and evaluation are launched by the platform supervisor."
         loop = AgentTurnLoop(
+            tool_specs=editing_tools,
             llm_config=llm_config,
             workspace=workspace,
             system_prompt=system_prompt,
@@ -171,7 +176,8 @@ class IterativeRefineRuntime:
         session.log("EXECUTE", "Starting iterative refinement turn loop...")
         turn_result = loop.run_turn(user_message)
 
-        verified_run = run_experiment(workspace, stage_dir / "verified_execution", config)
+        verified_run = run_experiment(workspace, stage_dir / "verified_execution", config,
+                                      review_client=llm, run_dir=run_dir)
         if not verified_run["success"]:
             return StageResult(
                 stage=Stage.ITERATIVE_REFINE, status=StageStatus.FAILED,

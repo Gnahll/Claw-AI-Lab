@@ -321,6 +321,13 @@ def _write_stage_meta(
 
 
 def _read_prior_artifact(run_dir: Path, filename: str) -> str | None:
+    found = _prior_artifact_path(run_dir, filename)
+    if found is None:
+        return None
+    return str(found) if found.is_dir() else found.read_text(encoding="utf-8")
+
+
+def _prior_artifact_path(run_dir: Path, filename: str) -> Path | None:
     # R14-2: Sort so non-versioned dirs (stage-13) come before versioned (stage-13_v1).
     # Within the same stage number, prefer the latest (non-versioned) copy.
     def _stage_sort_key(p: Path) -> tuple[str, int]:
@@ -337,9 +344,9 @@ def _read_prior_artifact(run_dir: Path, filename: str) -> str | None:
     for stage_subdir in sorted(run_dir.glob("stage-*"), key=_stage_sort_key, reverse=True):
         candidate = stage_subdir / filename
         if candidate.is_file():
-            return candidate.read_text(encoding="utf-8")
+            return candidate
         if filename.endswith("/") and (stage_subdir / filename.rstrip("/")).is_dir():
-            return str(stage_subdir / filename.rstrip("/"))
+            return stage_subdir / filename.rstrip("/")
     return None
 
 
@@ -11252,6 +11259,20 @@ _STAGE_EXECUTORS: dict[Stage, Callable[..., StageResult]] = {
 }
 
 
+def _stage_llm(config):
+    llm = None
+    try:
+        if config.llm.provider == "acp":
+            llm = create_llm_client(config)
+        else:
+            candidate = LLMClient.from_rc_config(config)
+            if candidate.config.base_url and candidate.config.api_key:
+                llm = candidate
+    except Exception:  # noqa: BLE001
+        llm = None
+    return llm
+
+
 def execute_stage(
     stage: Stage,
     *,
@@ -11293,9 +11314,45 @@ def execute_stage(
     _t_health_start = _time.monotonic()
     contract: StageContract = CONTRACTS[stage]
 
+    llm = None
     if contract.input_files:
         for input_file in contract.input_files:
             found = _read_prior_artifact(run_dir, input_file)
+            is_yaml = input_file in {"exp_plan.yaml", "search_plan.yaml"}
+            if found is not None and (input_file in {"schedule.json", "codebase_candidates.json"}
+                                      or (is_yaml and found.startswith("```"))):
+                from researchclaw.pipeline.artifact_format_recovery import FormatRecoveryPending, repair, suggest
+                try:
+                    if is_yaml:
+                        if not isinstance(yaml.safe_load(found), dict):
+                            raise ValueError("expected a YAML mapping")
+                    else:
+                        json.loads(found)
+                except (ValueError, yaml.YAMLError) as exc:
+                    path = _prior_artifact_path(run_dir, input_file)
+                    if path is None:
+                        # A caller may provide its own in-memory artifact source.
+                        continue
+                    llm = _stage_llm(config)
+                    choose = (lambda d: suggest(llm, d)) if llm else None
+                    expected = list if input_file == "codebase_candidates.json" else dict
+                    try:
+                        repaired = repair(run_dir, path, found if is_yaml else exc,
+                                          choose=choose, expected=expected)
+                        message = f"Input {input_file} requires manual format review"
+                    except FormatRecoveryPending as pending:
+                        repaired = False
+                        message = f"Input {input_file} is waiting for AI format recovery; retry after {int(pending.next_check) + 1}"
+                    if repaired:
+                        # Re-enter the same reader before any stage side effects.
+                        corrected = _read_prior_artifact(run_dir, input_file)
+                        (yaml.safe_load if is_yaml else json.loads)(corrected)
+                    else:
+                        result = StageResult(stage=stage, status=StageStatus.FAILED, artifacts=(),
+                                             error=message,
+                                             decision="retry")
+                        _write_stage_meta(stage_dir, stage, run_id, result)
+                        return result
             if found is None:
                 result = StageResult(
                     stage=stage,
@@ -11333,16 +11390,8 @@ def execute_stage(
     if bridge.use_memory:
         adapters.memory.append("stages", f"{run_id}:{int(stage)}:running")
 
-    llm = None
-    try:
-        if config.llm.provider == "acp":
-            llm = create_llm_client(config)
-        else:
-            candidate = LLMClient.from_rc_config(config)
-            if candidate.config.base_url and candidate.config.api_key:
-                llm = candidate
-    except Exception:  # noqa: BLE001
-        llm = None
+    if llm is None:
+        llm = _stage_llm(config)
 
     try:
         _ = advance(stage, StageStatus.PENDING, TransitionEvent.START)

@@ -223,6 +223,32 @@ def _set_budgets(path, setup, family, steps):
                 file.write_text(json.dumps(plan,indent=2,ensure_ascii=False))
 
 
+def install_promotion_hook(path: Path, family: str):
+    dispatch = path / "dispatch.py"
+    source = dispatch.read_text()
+    bootstrap = (
+        "from pathlib import Path\nimport os, sys\n"
+        "_repo = Path(os.path.abspath(sys.argv[1])).parents[3]\n"
+        "sys.path.insert(0, os.getenv('CLAW_PLATFORM_SERVICES', str(_repo/'backend/services')))\n"
+        "from ai_experiment_promotion import may_start_long\n"
+    )
+    if source.startswith(bootstrap):
+        variable = "run" if family == OSGK else "r"
+        if f"if not may_start_long({variable}, {family!r})" not in source:
+            raise ValueError("Incomplete short-to-long review in prepared dispatch")
+        return
+    if family == OSGK:
+        marker = "                if not passed:break"
+        source = _replace(source, marker, marker + f"\n                if not may_start_long(run, {family!r}):break")
+    else:
+        # Bind the long destination to this revision; separate trials cannot reuse one another's state.
+        source = _replace(source, "long=r.parent/'run-达标接续长训'", "long=r.with_name(r.name+'-long')")
+        source = _replace(source, "    supervise(r)", "    if not (r/'long_review_request.json').exists():supervise(r)")
+        marker = "    if not passed:return"
+        source = _replace(source, marker, marker + f"\n    if not may_start_long(r, {family!r}):return")
+    _write(dispatch, bootstrap + source)
+
+
 def install(path: Path, family: str, decision: dict):
     from shutil import copyfile
 
@@ -234,6 +260,7 @@ def install(path: Path, family: str, decision: dict):
     setup_path = path / "setup.json"
     setup = json.loads(setup_path.read_text())
     _set_budgets(path,setup,family,spec["steps_per_arm"])
+    install_promotion_hook(path, family)
     if family in (B_FAMILY,OSGK):
         exp = path / "experiment"
         copyfile(probe_runtime,exp/"mechanism_probe.py")

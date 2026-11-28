@@ -94,7 +94,45 @@ def _has_measurement(value):
 
 
 def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, timeout=None,
-                   prior_training=None):
+                   prior_training=None, review_client=None, run_dir=None):
+    from researchclaw.training.method_review import SHORT_LIMIT, review, training_scope
+
+    if smoke:
+        return _run_once(workspace, output_dir, config, smoke=True, timeout=timeout)
+    try:
+        long, pilot_steps, plan = training_scope(workspace, run_dir)
+        if not long:
+            # Declarations and static guesses cannot capture dynamic training loops.
+            # A platform-owned per-rank guard prevents such a script spending the long budget.
+            prior = int((prior_training or {}).get("prior_optimizer_steps", 0))
+            limit = max(0, SHORT_LIMIT - prior)
+            bounded = _run_once(workspace, output_dir, config, timeout=timeout,
+                                prior_training=prior_training, step_limit=limit)
+            if bounded.get("failure_type") != "short_budget_exceeded":
+                return bounded
+            import shutil
+            import tempfile
+            archive = Path(tempfile.mkdtemp(prefix="bounded-launch-", dir=output_dir))
+            for item in output_dir.iterdir():
+                if item.is_file():
+                    shutil.move(str(item), archive / item.name)
+        if not config.experiment.require_training:
+            raise ValueError("Long training requires the platform's supervised PyTorch execution")
+        receipt = review(workspace, output_dir, config, review_client, pilot_steps, plan, _run_once, run_dir=run_dir)
+    except Exception as exc:
+        # The real launch must not run on an unavailable reviewer or an incomplete pilot.
+        output_dir.mkdir(parents=True, exist_ok=True)
+        failed = {"success": False, "smoke": False, "failure_type": "pretraining_blocked",
+                  "require_training": bool(config.experiment.require_training), "errors": [str(exc)],
+                  "reason": str(exc), "workspace": str(workspace)}
+        (output_dir / "execution_report.json").write_text(json.dumps(failed, indent=2), encoding="utf-8")
+        return failed
+    return _run_once(workspace, output_dir, config, timeout=timeout, prior_training=prior_training,
+                     method_review=receipt)
+
+
+def _run_once(workspace: Path, output_dir: Path, config, *, smoke=False, timeout=None,
+              prior_training=None, step_limit=None, pilot=False, method_review=None):
     """Run main.py under supervision and write output_dir/execution_report.json.
 
     ``prior_training`` summarises parameter updates observed by earlier supervised
@@ -127,11 +165,19 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
         python = str(Path(python).absolute())
     env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get("PYTHONPATH", "")
+    for key in ("RESEARCHCLAW_PILOT_UPDATES", "RESEARCHCLAW_OBSERVED_UPDATE_LIMIT"):
+        env.pop(key, None)
+    if step_limit is not None:
+        env["RESEARCHCLAW_OBSERVED_UPDATE_LIMIT"] = str(step_limit)
+    if pilot:
+        env["RESEARCHCLAW_PILOT_UPDATES"] = str(step_limit)
     if smoke:
         env["SMOKE_TEST"] = "1"
     else:
         env.pop("SMOKE_TEST", None)
     cmd = [python, "-m", "researchclaw.training.observed", str(evidence_path)] if training else [python, "main.py"]
+    if step_limit is not None and not training and not smoke:
+        cmd = [python, "-m", "researchclaw.training.observed", str(evidence_path), "--budget-only"]
     if world_size > 1:
         cmd = [python, "-m", "torch.distributed.run", "--standalone", f"--nproc_per_node={world_size}",
                "-m", "researchclaw.training.observed", str(evidence_path)]
@@ -139,6 +185,10 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
     report = {"success": False, "smoke": smoke, "require_training": training, "command": cmd,
               "workspace": str(workspace),
               "gpu_id": env.get("CUDA_VISIBLE_DEVICES", ""), "world_size": world_size, "results": {}, "errors": []}
+    if method_review is not None:
+        report["method_review"] = str(method_review)
+    if pilot:
+        report["pilot_updates"] = step_limit
     start = time.monotonic()
     started_at = time.time() - 2  # coarse filesystem mtime resolution
     process = None
@@ -169,6 +219,12 @@ def run_experiment(workspace: Path, output_dir: Path, config, *, smoke=False, ti
                     raise ValueError(f"Pretraining acceptance blocked: {blocker['reason']}; "
                                      f"checks={json.dumps(blocker['required_gate_status'], ensure_ascii=False)}. "
                                      "Revise the experiment design; mandatory gates were not changed.")
+            rank_paths = [rank_evidence_path(evidence_path, rank) for rank in range(world_size)]
+            if step_limit is not None and any(
+                    path.is_file() and json.loads(path.read_text(encoding="utf-8")).get("short_budget_exceeded")
+                    for path in rank_paths):
+                report["failure_type"] = "short_budget_exceeded"
+                raise ValueError("The script attempted to exceed its short optimizer-update budget")
             if process.returncode:
                 raise ValueError(f"Experiment process exited with {process.returncode}; see execution.log")
             if not result_path.is_file() or result_path.is_symlink():

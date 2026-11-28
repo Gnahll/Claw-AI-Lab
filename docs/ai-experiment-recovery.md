@@ -39,3 +39,17 @@ OSGK 复用同预算的四尺度评估协议。GSF 同时比较配对对照和�
 | CIRB、GSF 每组新增 | 450 | 900 | 1,350 |
 
 每轮方法组与对照使用同一预算，所有拟接长训的结果仍按 312 个场景和原验收指标判断。
+
+## 长训前的短训审核
+
+普通流水线在 S9 的 `exp_plan.yaml` 声明 `training_phase: long` 和训练预算。S14 执行和 S15 重跑使用同一监督器。已知长训先在隔离目录运行同源 PyTorch 短训；未声明预算的受监督 PyTorch 任务也有按进程实际优化步数的上限。工程冒烟测试与方法验证分别记录。生成的训练入口通过 `RESEARCHCLAW_PILOT_UPDATES` 接收每个 rank 的更新预算，并按冻结的计划完成验证。已有外部训练脚本若尚未接入该预算与产物协议，平台会报告缺少的证据。
+
+S9 可在 `short_training_review` 中设置 `pilot_steps`、`validation_samples` 与 `comparisons`。每项比较填写 `method`、`control`、`metric`、`direction` 和 `min_gain`。原生模式默认短训 150 步，动态预算的保护上限为 1350 步。每个项目使用自己的指标与单位。审批记录关联实际参数更新、检查点、预测、验证样本数和对照结果。有稳定输入指纹的同一运行可以复用实测产物，重新请求 AI 审核。
+
+独立 Co-Transformers 任务可在训练规格中声明 `training_phase: long`，可选 `pilot_steps` 和 `min_validation_f1_gain`（F1 取值 0～1）。计划总更新超过 1350 步同样触发审核。它以原初始化在训练集完成有预算的试验，对同一验证集记录训练前后 pixel F1 和 IoU；结果见任务目录 `long_review/`。通过后按原协议启动或续跑主任务，验证用的测试不消耗测试集。
+
+新生成的 OSGK、CIRB、GSF 调度脚本在短训与长训的交接点依次验证门槛、同预算四卡账本、配对样本与帧、检查点哈希、内置 AI 意见。`long_review_request.json` 和 `long_review_decision.json` 保留证据、绑定指纹及决定。项目策略里规定的最低收益仍然生效。
+
+## 输入文件格式恢复
+
+平台在受支持的阶段输入和已登记实验的运行目录内尝试恢复指定 JSON 数据（单个 UTF-8 BOM、完整 JSON 代码围栏、唯一尾逗号），以及 `search_plan.yaml`、`exp_plan.yaml` 的完整 YAML 围栏。内置 AI 确认经解析器验证的单项修改后，平台备份原始字节，核对文件未被并发修改，原子替换并重试原读取入口。已冻结计划还需匹配原摘要。`.artifact-format-recovery/` 记录原文、哈希、动作与重试。服务暂时不可用时按退避时间重试，含糊输入、检查点、权重和研究指标交给项目负责人处理。
