@@ -1047,6 +1047,35 @@ def test_export_preserves_citations_and_numbers_in_degraded_draft(
     assert not json.loads((stage_dir / "sanitization_report.json").read_text())["sanitized"]
 
 
+def test_export_fails_when_latex_compilation_fails(
+    run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from researchclaw.templates import compiler
+
+    monkeypatch.setattr(
+        compiler,
+        "compile_latex",
+        lambda *args, **kwargs: SimpleNamespace(
+            success=False, errors=["forced compile failure"]
+        ),
+    )
+    _write_prior_artifact(run_dir, 22, "paper_revised.md", "# Paper\n\nText.")
+    stage_dir = run_dir / "stage-25"
+    stage_dir.mkdir()
+
+    result = rc_executor._execute_export_publish(
+        stage_dir, run_dir, rc_config, adapters
+    )
+
+    assert result.stage == Stage.EXPORT_PUBLISH
+    assert result.status == StageStatus.FAILED
+    assert result.error == "LaTeX compilation verification failed"
+    assert "% WARNING: Compilation failed" in (
+        stage_dir / "paper.tex"
+    ).read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("archive_only", [False, True])
 def test_export_recovers_cited_bibliography_without_inventing_entries(run_dir: Path, archive_only: bool) -> None:
     from zipfile import ZipFile
@@ -1276,6 +1305,7 @@ class TestExportPublishCodePackage:
         stage_dir = run_dir / "stage-25"
         (stage_dir / "charts").mkdir(parents=True)
         (stage_dir / "charts" / "fig_stale.png").write_bytes(b"old")
+        (stage_dir / "charts" / "method_comparison.png").write_bytes(b"old nonstandard chart")
         seen: list[bool] = []
 
         def fake_compile(tex_path: Path, max_attempts: int = 2):
@@ -1293,7 +1323,176 @@ class TestExportPublishCodePackage:
         assert (charts / "fig_main_comparison.png").exists()
         assert not (charts / "fig_main_results.png").exists()
         assert not (charts / "fig_stale.png").exists()
+        assert not (charts / "method_comparison.png").exists()
         assert seen == [True]
+
+    def test_export_figure_resolution_preserves_existing_and_ambiguous_paths(self, tmp_path: Path) -> None:
+        charts = tmp_path / "charts"
+        charts.mkdir()
+        for name in ("plot.png", "plot.pdf"):
+            (charts / name).touch()
+        tex = (
+            r"\includegraphics[width=2cm]{old/plot.pdf} "
+            r"\label{old/plot.pdf} \includegraphics{old/plot.svg} "
+            r"\includegraphics{charts/plot}"
+        )
+        fixed = rc_executor._resolve_export_figure_paths(tex, tmp_path, rc_executor._TEX_GRAPHIC_RE)
+        assert fixed == tex.replace("[width=2cm]{old/plot.pdf}", "[width=2cm]{charts/plot.pdf}")
+
+        markdown = "![Plot](charts/unique)"
+        (charts / "unique.png").touch()
+        fixed_md = rc_executor._resolve_export_figure_paths(markdown, tmp_path, rc_executor._MD_IMAGE_LINE_RE)
+        assert fixed_md == "![Plot](charts/unique.png)"
+
+    def test_export_embeds_only_figures_available_in_this_export(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+
+        _write_prior_artifact(run_dir, 19, "paper_revised.md", "# Test Paper\n\n## Results\n\nMeasured results.\n")
+        for stage, name in (("stage-16", "fig_main.png"), ("stage-14", "fig_superseded.png"),
+                            ("stage-25", "fig_stale.png")):
+            chart_dir = run_dir / stage / "charts"
+            chart_dir.mkdir(parents=True, exist_ok=True)
+            (chart_dir / name).write_bytes(b"chart")
+
+        def skip_compile(*args, **kwargs):
+            raise RuntimeError("no latex required")
+
+        monkeypatch.setattr(compiler, "compile_latex", skip_compile)
+        stage = run_dir / "stage-25"
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        paper = (stage / "paper_final.md").read_text(encoding="utf-8")
+        assert "(charts/fig_main.png)" in paper
+        assert "fig_stale" not in paper
+        assert "fig_superseded" not in paper
+
+    def test_export_prefers_current_non_png_chart_over_old_png(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md",
+            "# Test Paper\n\n## Results\n\n![Current](charts/fig_current.pdf)\n",
+        )
+        for stage, name in (("stage-16", "fig_current.pdf"), ("stage-14", "fig_old.png")):
+            chart_dir = run_dir / stage / "charts"
+            chart_dir.mkdir(parents=True, exist_ok=True)
+            (chart_dir / name).write_bytes(name.encode())
+        monkeypatch.setattr(compiler, "compile_latex", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+        stage = run_dir / "stage-25"
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        assert (stage / "charts" / "fig_current.pdf").exists()
+        assert not (stage / "charts" / "fig_old.png").exists()
+
+    def test_figure_prompt_uses_unique_current_round_source(self, run_dir: Path) -> None:
+        paper = """<!-- FIGURE_PROMPT
+figure_id: method
+caption: Method overview
+-->"""
+        current = run_dir / "stage-22" / "figures"
+        current.mkdir(parents=True)
+        (current / "method.jpg").write_bytes(b"current")
+        old = run_dir / "stage-22_v1" / "figures"
+        old.mkdir(parents=True)
+        (old / "method.png").write_bytes(b"old")
+        chart_dir = run_dir / "stage-25" / "charts"
+        rendered, copied = rc_executor._figure_prompts_to_markdown(paper, run_dir, chart_dir)
+        assert copied == ["method.jpg"] and "charts/method.jpg" in rendered
+        (current / "method.pdf").write_bytes(b"ambiguous")
+        rendered, copied = rc_executor._figure_prompts_to_markdown(paper, run_dir, chart_dir)
+        assert copied == [] and "![" not in rendered
+
+    def test_figure_prompt_manifest_path_wins_over_stale_fallback(self, run_dir: Path) -> None:
+        paper = """<!-- FIGURE_PROMPT
+figure_id: method
+caption: Method overview
+-->"""
+        current = run_dir / "stage-22"
+        figures = current / "figures"
+        figures.mkdir(parents=True)
+        rendered = figures / "method.png"
+        rendered.write_bytes(b"rendered")
+        (figures / "method_fallback.png").write_bytes(b"stale")
+        (current / "figure_prompts.json").write_text(json.dumps([{
+            "figure_id": "method", "caption": "Method overview",
+            "success": True, "output_path": str(rendered),
+        }]), encoding="utf-8")
+        chart_dir = run_dir / "stage-25" / "charts"
+        result, copied = rc_executor._figure_prompts_to_markdown(paper, run_dir, chart_dir)
+        assert copied == ["method.png"] and "charts/method.png" in result
+        assert (chart_dir / "method.png").read_bytes() == b"rendered"
+
+    def test_existing_method_figure_does_not_suppress_result_chart(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md",
+            "# Test\n\n![Method](charts/method.png)\n\n## Results\n\nMeasured results.\n",
+        )
+        charts = run_dir / "stage-16" / "charts"
+        charts.mkdir(parents=True)
+        (charts / "fig_main_comparison.png").write_bytes(b"result")
+        monkeypatch.setattr(compiler, "compile_latex", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+        stage = run_dir / "stage-25"
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        paper = (stage / "paper_final.md").read_text(encoding="utf-8")
+        assert "charts/fig_main_comparison.png" in paper
+
+    @pytest.mark.parametrize("extension", ["pdf", "jpg", "jpeg", "eps"])
+    def test_export_auto_injects_supported_non_png_result_chart(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch, extension: str,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md", "# Test\n\n## Results\n\nMeasured results.\n"
+        )
+        charts = run_dir / "stage-16" / "charts"
+        charts.mkdir(parents=True)
+        (charts / f"fig_main.{extension}").write_bytes(b"result")
+        monkeypatch.setattr(compiler, "compile_latex", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+        stage = run_dir / "stage-25"
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        paper = (stage / "paper_final.md").read_text(encoding="utf-8")
+        assert f"charts/fig_main.{extension}" in paper
+
+    def test_export_compiles_with_relocated_figure_and_preserves_missing_evidence(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+        from researchclaw.templates.compiler import CompileResult
+
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md",
+            "# Test paper\n\n## Results\n\n![Measured AP](figures/fig_ap.png)\n\n"
+            "![Boundary ablation](charts/fig_boundary_ablation.png)\n",
+        )
+        charts = run_dir / "stage-16/charts"
+        charts.mkdir(parents=True, exist_ok=True)
+        (charts / "fig_ap.png").write_bytes(b"measured-chart")
+        stage = run_dir / "stage-25"
+        stage.mkdir()
+        compiled = []
+
+        def inspect_first_compile(path: Path, **kwargs):
+            compiled.append(path.read_text(encoding="utf-8"))
+            return CompileResult(success=False, errors=["fixture has a genuinely missing figure"])
+
+        monkeypatch.setattr(compiler, "compile_latex", inspect_first_compile)
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        markdown = (stage / "paper_final.md").read_text(encoding="utf-8")
+        assert "(charts/fig_ap.png)" in markdown
+        assert "(charts/fig_boundary_ablation.png)" in markdown
+        assert len(compiled) == 1
+        assert "{charts/fig_ap.png}" in compiled[0]
+        assert "{charts/fig_boundary_ablation.png}" in compiled[0]
+        assert "{charts/fig_boundary_ablation.png}" in (stage / "paper.tex").read_text(encoding="utf-8")
 
     def test_export_without_refine_packages_experiment_dir(
         self,
@@ -1339,6 +1538,27 @@ class TestExportPublishCodePackage:
         )
         assert rc_executor._current_stage_dirs(tmp_path, "stage-16")[0].name == "stage-16"
         assert rc_executor._read_figure_manifest(tmp_path) == {}
+
+    def test_latex_package_uses_current_refine_figures_and_skips_svg(
+        self, run_dir: Path, rc_config: RCConfig,
+    ) -> None:
+        stage = run_dir / "stage-22"
+        stage.mkdir()
+        current = run_dir / "stage-16_v2" / "charts"
+        old = run_dir / "stage-16_v1" / "charts"
+        current.mkdir(parents=True)
+        old.mkdir(parents=True)
+        (current / "fig_current.pdf").write_bytes(b"pdf")
+        (current / "method.svg").write_text("<svg/>", encoding="utf-8")
+        (old / "fig_old.png").write_bytes(b"old")
+        artifacts = rc_executor._generate_latex_package(
+            stage, run_dir, rc_config, "# Paper\n\n![Current](charts/fig_current.pdf)\n", llm=None
+        )
+        assert "latex_package.zip" in artifacts
+        packaged = stage / "latex_package" / "figures"
+        assert (packaged / "fig_current.pdf").exists()
+        assert not (packaged / "fig_old.png").exists()
+        assert not (packaged / "method.svg").exists()
 
     def test_copy_experiment_source_skips_large_files(self, tmp_path: Path) -> None:
         exp = tmp_path / "experiment_final"
@@ -2120,6 +2340,33 @@ class TestPaperExperimentEvidence:
         assert "sample_losses" not in evidence
         assert "per_image" not in evidence
 
+    @pytest.mark.parametrize("extension", ["png", "svg"])
+    def test_revision_reuses_only_current_stage20_figures(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch, extension: str,
+    ) -> None:
+        draft = """# Paper
+
+<!-- FIGURE_PROMPT
+figure_id: method
+caption: Method
+-->"""
+        _write_prior_artifact(run_dir, 20, "paper_draft.md", draft)
+        _write_prior_artifact(run_dir, 21, "reviews.md", "Keep the figure.")
+        current = run_dir / "stage-20" / "figures"
+        old = run_dir / "stage-20_v2" / "figures"
+        current.mkdir(parents=True, exist_ok=True)
+        old.mkdir(parents=True, exist_ok=True)
+        (current / f"method.{extension}").write_bytes(b"current")
+        (old / f"method.{extension}").write_bytes(b"old")
+        monkeypatch.setattr(rc_executor, "_generate_latex_package", lambda *args, **kwargs: [])
+        stage = run_dir / "stage-22"
+        stage.mkdir()
+        rc_executor._execute_paper_revision(
+            stage, run_dir, rc_config, adapters, llm=FakeLLMClient(draft)
+        )
+        assert (stage / "figures" / f"method.{extension}").read_bytes() == b"current"
+
     def test_revision_receives_and_saves_authoritative_evidence(
         self,
         run_dir: Path,
@@ -2200,6 +2447,128 @@ class TestPaperExperimentEvidence:
         assert report["selected_source"] == "original_draft"
         assert report["remaining_conflicts"] == []
         assert len(llm.calls) == 2
+
+
+    @pytest.mark.parametrize("claim, conflict", [
+        ("We evaluated on all 312 ScanNet v2 validation scenes.", True),
+        ("Our model was evaluated on the full ScanNet validation split.", True),
+        ("We evaluated on 2 validation scenes.", False),
+        ("We evaluated on all 2 validation scenes.", True),
+        ("AP50 was measured on the complete ScanNet validation split.", True),
+        ("The entire validation set was evaluated.", True),
+        ("Spectral was evaluated on 312 validation scenes.", True),
+        ("We evaluated on the full ScanNet validation split. A two-scene subset was visualized.", True),
+        ("We did not evaluate on the full validation split.", False),
+        ("No model was evaluated on the full validation split.", False),
+        ("Not all 312 validation scenes were evaluated.", False),
+        ("Future work will evaluate on the full validation split.", False),
+        ("It is unclear whether the full validation set was evaluated.", False),
+        ("The full validation set contains 312 scenes. We evaluated two of them.", False),
+        ("We evaluated two scenes from the full validation split.", False),
+        ("We evaluated on the full validation set for depth loss only; AP used two scenes.", False),
+        ("AP was measured on all 2 validation scenes in our subset.", False),
+        ("We measured validation loss across all 312 validation windows.", False),
+    ])
+    def test_subset_coverage_uses_recorded_scene_ids(self, run_dir, claim, conflict):
+        measured = {"data_split": {"val": {"scene_count": 312}}, "conditions": {
+            "Spectral": {"validation": {"windows": 312}, "evaluation": {"scenes": ["s1", "s2"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        findings = rc_executor._paper_evidence_conflicts(claim, run_dir)
+        assert bool(findings) is conflict
+        if conflict:
+            assert "Spectral 2/312" in findings[0]
+
+    def test_subset_coverage_with_mixed_conditions(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3, "scene_ids": ["a", "b", "c"]}}, "conditions": {
+            "Reference": {"evaluation": {"scenes": ["a", "b", "c"]}},
+            "Candidate": {"evaluation": {"scenes": ["a", "b"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        assert not rc_executor._paper_evidence_conflicts("Reference was evaluated on the full validation split.", run_dir)
+        assert not rc_executor._paper_evidence_conflicts("We evaluated the Reference model on the full validation split.", run_dir)
+        assert rc_executor._paper_evidence_conflicts("Candidate was evaluated on the full validation split.", run_dir)
+        assert rc_executor._paper_evidence_conflicts("We evaluated both models on all 3 validation scenes.", run_dir)
+        assert not rc_executor._paper_evidence_conflicts(
+            "Reference was evaluated on the full validation split, whereas Candidate was evaluated on two scenes.", run_dir)
+
+    def test_count_match_without_official_manifest_does_not_prove_full_split(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3}}, "conditions": {
+            "Method": {"evaluation": {"scenes": ["x", "y", "z"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        assert rc_executor._paper_evidence_conflicts("Our model was evaluated on the full validation split.", run_dir)
+
+    def test_full_official_coverage_still_rejects_wrong_all_count(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3, "scene_ids": ["a", "b", "c"]}}, "conditions": {
+            "Method": {"evaluation": {"scenes": ["a", "b", "c"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        assert rc_executor._paper_evidence_conflicts("We evaluated all 2 validation scenes.", run_dir)
+        assert not rc_executor._paper_evidence_conflicts("We evaluated all 3 validation scenes.", run_dir)
+
+    def test_full_scope_requires_per_condition_manifest_and_handles_common_prose(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3, "scene_ids": ["a", "b", "c"]}}, "conditions": {
+            "Reference": {"evaluation": {"scenes": ["a", "b", "c"]}},
+            "Candidate": {"evaluation": {"scenes": ["a", "b"]}},
+            "Missing": {"evaluation": {}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        claims = [
+            "We evaluated the Candidate and Reference models on the full validation split.",
+            "Results for Candidate are reported on the full validation split.",
+            "Evaluation used the full validation split.",
+            "Candidate achieved AP50=12.6 on the full validation split.",
+            "With no test-time augmentation we evaluated our model on the full validation split.",
+            "We did not use the test set for tuning and we evaluated our model on the full validation split.",
+        ]
+        assert all(rc_executor._paper_evidence_conflicts(claim, run_dir) for claim in claims)
+        assert not rc_executor._paper_evidence_conflicts(
+            "All methods except Candidate and Missing were evaluated on the full validation split.", run_dir
+        )
+        findings = rc_executor._paper_evidence_conflicts(
+            "All methods except Candidate were evaluated on the full validation split.", run_dir
+        )
+        assert findings and "Missing None/3" in findings[0]
+        edge_cases = {
+            "Candidate and Reference were evaluated on the full validation split.": True,
+            "The full validation split was used to evaluate Reference.": False,
+            "All methods but not Candidate were evaluated on the full validation split.": True,
+            "The sentence “We evaluated on the full validation split” is false.": False,
+            "Candidate achieved AP@50=50.0 on the full validation split.": True,
+            "Candidate achieved AP_{50}=50.0 on the full validation split.": True,
+            "The evaluation was conducted on the full validation split.": True,
+            "The evaluation was performed on the full validation split.": True,
+            "All experiments were conducted on the full validation split.": True,
+            "We used the full validation split to evaluate Candidate.": True,
+        }
+        for claim, conflict in edge_cases.items():
+            assert bool(rc_executor._paper_evidence_conflicts(claim, run_dir)) is conflict
+
+    def test_full_scope_ignores_reference_sections(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3}}, "conditions": {
+            "Method": {"evaluation": {"scenes": ["a", "b"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        for heading in ("# References", "## REFERENCES", "### Bibliography"):
+            paper = f"# Paper\n\nNo full-coverage claim.\n\n{heading}\nWe evaluated on the full validation split."
+            assert not rc_executor._paper_evidence_conflicts(paper, run_dir)
+
+    def test_measured_results_uses_numeric_stage_version_order(self, run_dir):
+        for version, scene in ((9, "old"), (10, "new")):
+            stage = run_dir / f"stage-15_v{version}"
+            stage.mkdir(parents=True)
+            (stage / "results.json").write_text(json.dumps({
+                "conditions": {"Method": {"evaluation": {"scenes": [scene]}}}
+            }), encoding="utf-8")
+        from researchclaw.pipeline.paper_evidence import load_measured_results
+        assert load_measured_results(run_dir)["conditions"]["Method"]["evaluation"]["scenes"] == ["new"]
+
+    def test_revision_preserves_rejection_when_all_drafts_overstate_coverage(self, run_dir, rc_config, adapters):
+        _write_prior_artifact(run_dir, 20, "paper_draft.md", "# Results\nWe evaluated on the full validation split.")
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps({
+            "data_split": {"val": {"scene_count": 312}}, "conditions": {"method": {"evaluation": {"scenes": ["a", "b"]}}}}))
+        stage = run_dir / "stage-22"
+        stage.mkdir()
+        result = rc_executor._execute_paper_revision(stage, run_dir, rc_config, adapters)
+        assert result.status == StageStatus.FAILED and not (stage / "paper_revised.md").exists()
+        evidence = json.loads((stage / "experiment_sync_report.json").read_text())
+        assert "method 2/312" in evidence["remaining_conflicts"][0]
+        assert (stage / "paper_revision_rejected.md").is_file()
 
 
 class TestRunPayloadMetrics:

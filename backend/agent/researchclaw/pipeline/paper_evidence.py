@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -121,7 +122,13 @@ def external_source_root(run_dir: Path) -> tuple[Path | None, str]:
 
 
 def load_measured_results(run_dir: Path) -> dict:
-    stages = sorted(run_dir.glob("stage-15*"), key=lambda p: (p.name == "stage-15", p.name), reverse=True)
+    def stage_key(path: Path) -> tuple[int, int]:
+        if path.name == "stage-15":
+            return (1, 0)
+        match = re.fullmatch(r"stage-15_v(\d+)", path.name)
+        return (0, int(match.group(1))) if match else (-1, 0)
+
+    stages = sorted(run_dir.glob("stage-15*"), key=stage_key, reverse=True)
     for stage in stages:
         for relative in ["results.json", "experiment_final/results.json", "experiment_final/results_v0.json"]:
             data = _read(stage / relative)
@@ -194,6 +201,222 @@ def reporting_contract(results: dict, metric_key: str = "primary_metric", direct
         result["report_metric"] = {"name": "AP[.50:.95]" if all(v == ".50:.95" for v in ranges) else "AP (IoU range not recorded)", "unit": "percent", "direction": "maximize",
                                    "values": ap_values, "objective_transform": transforms[0]}
     return result
+
+
+# Match affirmative measurement statements, so naming or discussing the full split is safe.
+# Keep the object next to the measurement verb: "a subset of the full set" has a different object.
+_SPLIT_WORDS = r"(?:[a-z0-9][\w.-]*\s+){0,4}validation\s+(?:split|set|scenes|benchmark)"
+_FULL_SPLIT = rf"(?:the\s+)?(?:full|complete|entire)\s+{_SPLIT_WORDS}"
+_NUMBERED_SPLIT = (
+    rf"(?P<all>all\s+)?(?P<count>\d+)\s+(?:{_SPLIT_WORDS}|scenes\s+(?:of|in|from)\s+(?:the\s+)?{_SPLIT_WORDS})"
+)
+_SCOPE_OBJECT = rf"(?:{_FULL_SPLIT}|{_NUMBERED_SPLIT}|all\s+{_SPLIT_WORDS})"
+_SCOPE_ACTIVE = re.compile(
+    rf"\b(?:we\s+(?:evaluate[d]?|test(?:ed)?|benchmark(?:ed)?)"
+    rf"(?P<active_subject>(?:\s+(?:(?:our|the|both|each|all)\s+)?(?:[a-z0-9_.-]+\s+)?(?:model|approach|method|variant|condition)s?)?)"
+    rf"|(?:we\s+(?:report(?:ed)?|measure[d]?|compute[d]?)\s+(?:the\s+)?(?:instance\s+)?(?:mean\s+)?ap(?:\d+|\[[^\]]+\])?)"
+    rf"|(?:ap(?:\d+|\[[^\]]+\])?)\s+(?:is|was)\s+(?:measured|evaluated|computed|reported))"
+    rf"\s+(?:(?:on|over|across|using)\s+)?{_SCOPE_OBJECT}\b", re.I,
+)
+_SCOPE_ACTIVE_NAMED = re.compile(
+    rf"\bwe\s+(?:evaluate[d]?|test(?:ed)?|benchmark(?:ed)?)\s+"
+    rf"(?P<active_subject>.{{1,160}}?)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
+)
+_SCOPE_SUBJECT = re.compile(
+    rf"\b(?P<subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+(?:\s+(?:model|approach|method|variant|condition))?)"
+    rf"\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b",
+    re.I,
+)
+_SCOPE_SUBJECT_LIST = re.compile(
+    rf"\b(?P<subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+"
+    rf"(?:\s*,\s*[a-z0-9_.-]+)*(?:\s*,?\s+(?:and|or)\s+[a-z0-9_.-]+)"
+    rf"(?:\s+(?:models?|approaches?|methods?|variants?|conditions?))?)"
+    rf"\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
+)
+_SCOPE_OBJECT_FRONT = re.compile(
+    rf"\b{_SCOPE_OBJECT}\s+(?:was|were|is|are)\s+(?:used\s+(?:to\s+evaluate|for\s+evaluation)|evaluated)\s+"
+    rf"(?P<object_subject>(?:(?:our|the)\s+)?[a-z0-9_.-]+(?:\s+(?:and|or)\s+[a-z0-9_.-]+)?"
+    rf"(?:\s+(?:model|approach|method|variant|condition))?)\b", re.I,
+)
+_SCOPE_PASSIVE = re.compile(
+    rf"\b{_SCOPE_OBJECT}\s+(?:was|were|is|are)\s+(?:used\s+(?:to\s+evaluate|for\s+evaluation)|evaluated)\b", re.I,
+)
+_SCOPE_REPORTED = re.compile(
+    rf"\b(?:results?\s+for\s+(?P<result_subject>.{{1,80}}?)\s+(?:is|are|was|were)\s+reported"
+    rf"|(?:the\s+)?evaluation\s+(?:used|uses|was\s+(?:conducted|performed))"
+    rf"|(?:(?:the\s+)?(?P<reported_subject>[a-z0-9_.-]+)\s+evaluation\s+(?:was|is|has\s+been)\s+(?:conducted|performed))"
+    rf"|(?P<reported_results_subject>[a-z0-9_.-]+)\s+(?:performance|results?)\s+(?:is|are|was|were)\s+reported"
+    rf"|we\s+report\s+(?P<reported_active_subject>[a-z0-9_.-]+)\s+results?)\s+(?:on|over|across|using)?\s*{_SCOPE_OBJECT}\b", re.I,
+)
+_SCOPE_CONDUCTED = re.compile(
+    rf"\b(?P<conducted_subject>(?:(?:all|both|each)\s+)?(?:experiments?|evaluations?|benchmarks?|tests?))"
+    rf"\s+(?:was|were|is|are|has\s+been|have\s+been)\s+(?:conducted|performed|run)"
+    rf"\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
+)
+_SCOPE_USED_TO_EVALUATE = re.compile(
+    rf"\bwe\s+(?:used|use)\s+{_SCOPE_OBJECT}\s+to\s+(?:evaluate|test|benchmark)\s+"
+    rf"(?P<used_subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+"
+    rf"(?:\s+(?:model|approach|method|variant|condition))?)\b", re.I,
+)
+_SCOPE_ACHIEVED = re.compile(
+    rf"\b(?P<achieved_subject>[a-z0-9_.-]+)\s+(?:achieve[d]?|obtain(?:ed)?|reach(?:ed)?)\s+"
+    rf"(?:an?\s+)?(?:instance\s+)?ap(?:@\d+|_\{{?\d+\}}?|\d+|\[[^\]]+\])?(?:\s*=\s*|\s+(?:of\s+)?)[-+]?\d+(?:\.\d+)?"
+    rf"\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
+)
+_CLAUSE_LIMIT = re.compile(r"(?<=[.!?;])\s+|\n\s*\n|\s+[—–]\s+")
+_QUALIFIED_SCOPE = re.compile(
+    r"\b(?:if|whether|planned|planning|would|could|will|future|wish|suppose|hypothetical|untrue|"
+    r"incorrect(?:ly)?|false|not|no|neither|never|cannot|did(?:n['’]t| not)|was(?:n['’]t| not)|"
+    r"were(?:n['’]t| not)|is(?:n['’]t| not)|are(?:n['’]t| not))\b", re.I,
+)
+
+
+def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
+    """Check asserted validation coverage against explicit per-condition scene IDs and split size."""
+    conditions = results.get("conditions")
+    split = results.get("data_split")
+    if not isinstance(conditions, dict) or not isinstance(split, dict) or not isinstance(split.get("val"), dict):
+        return []
+    declared = split["val"].get("scene_count")
+    if type(declared) is not int or declared <= 0:
+        return []
+    # A count match alone is not proof of official split membership. Only an
+    # explicit official scene manifest can establish a full-split claim.
+    official = split["val"].get("scene_ids")
+    official_ids = (
+        set(official) if isinstance(official, list) and len(official) == declared
+        and all(isinstance(scene, str) for scene in official) and len(set(official)) == declared
+        else None
+    )
+    rows = reporting_contract(results)["conditions"]
+    recorded = {}
+    for name, value in conditions.items():
+        evaluation = value.get("evaluation", {}) if isinstance(value, dict) else {}
+        scenes = evaluation.get("scenes") if isinstance(evaluation, dict) else None
+        ids = set(scenes) if isinstance(scenes, list) and all(isinstance(scene, str) for scene in scenes) else None
+        if ids is not None:
+            recorded[name] = ids
+    unsupported = {
+        name: row["scene_count"] for name, row in rows.items()
+        if name not in recorded or official_ids is None or recorded[name] != official_ids
+    }
+    conflicts = []
+    text = re.sub(r"\x60\x60\x60.*?(?:\x60\x60\x60|$)", "", paper, flags=re.S)
+    reference_heading = re.search(
+        r"(?im)^#{1,3}\s+(?:references|bibliography)\s*$", text
+    )
+    if reference_heading:
+        text = text[:reference_heading.start()]
+    names = "|".join(re.escape(name) for name in rows)
+    named_claim = re.compile(
+        rf"(?<!\w)(?:we\s+(?:evaluated?|tested)\s+(?:{names})|(?:{names})\s+(?:was|is)\s+evaluated)"
+        rf"\s+(?:on|across|over)\s+{_SCOPE_OBJECT}\b", re.I)
+
+    for raw in _CLAUSE_LIMIT.split(text):
+        clause = " ".join(raw.replace("**", "").split())
+        for pattern in (
+            _SCOPE_ACTIVE_NAMED, _SCOPE_ACTIVE, _SCOPE_SUBJECT_LIST, _SCOPE_SUBJECT,
+            _SCOPE_OBJECT_FRONT, _SCOPE_PASSIVE, _SCOPE_REPORTED,
+            _SCOPE_CONDUCTED, _SCOPE_USED_TO_EVALUATE, _SCOPE_ACHIEVED, named_claim,
+        ):
+            for match in pattern.finditer(clause):
+                if pattern is _SCOPE_PASSIVE and _SCOPE_OBJECT_FRONT.search(clause):
+                    continue
+                lead = re.split(r"[,;]|\bbut\b|\band\b", clause[:match.start()], flags=re.I)[-1]
+                # Only a qualifier immediately adjacent to the assertion can
+                # negate it. Configuration prose such as "with no test-time
+                # augmentation we evaluated ..." is still an affirmative claim.
+                collective_exclusion_prefix = re.search(
+                    r"\b(?:all|both|each)\s+(?:models?|methods?|approaches?|variants?|conditions?)\s+"
+                    r"but\s+not\s*$", clause[:match.start()], re.I,
+                )
+                if (
+                    _QUALIFIED_SCOPE.search(lead[-24:])
+                    and not re.search(r"\bwe\s*$", lead, re.I)
+                    and not collective_exclusion_prefix
+                ):
+                    continue
+                if re.search(r"\b(?:only\s+for|for\s+(?:the\s+)?)\s*(?:training\s+|validation\s+|depth\s+)?loss(?:es)?\b", clause[match.end():], re.I):
+                    continue
+                claimed = int(match["count"]) if match["count"] else declared
+                is_full_claim = (
+                    match["count"] is None
+                    or bool(match.groupdict().get("all"))
+                    or claimed == declared
+                )
+                tail = clause[match.end():]
+                if re.match(r"\s+(?:in|from|within)\s+(?:our|the|a)\s+subset\b", tail, re.I):
+                    continue
+                if re.search(r"^[\s\"'”’)]*(?:is|was|are|were)?\s*(?:false|incorrect|untrue)\b", tail, re.I):
+                    continue
+                # A plain numeric statement describes exactly the recorded subset;
+                # it is not a claim that this number is the complete split.
+                if not is_full_claim:
+                    continue
+                subject = (
+                    match.groupdict().get("subject")
+                    or match.groupdict().get("active_subject")
+                    or match.groupdict().get("result_subject")
+                    or match.groupdict().get("reported_subject")
+                    or match.groupdict().get("reported_results_subject")
+                    or match.groupdict().get("reported_active_subject")
+                    or match.groupdict().get("conducted_subject")
+                    or match.groupdict().get("used_subject")
+                    or match.groupdict().get("achieved_subject")
+                    or match.groupdict().get("object_subject")
+                )
+                if subject and _QUALIFIED_SCOPE.search(subject):
+                    continue
+                named = {
+                    name for name in rows
+                    if subject and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", subject, re.I)
+                }
+                except_tail = re.search(
+                    r"\b(?:except|excluding|but\s+not)\s+(.+?)\s+(?:was|were|is|are)\s+"
+                    r"(?:evaluated|tested|benchmarked)\b",
+                    clause, re.I,
+                )
+                if except_tail is None:
+                    except_tail = re.search(
+                        r"\b(?:all|both|each)\s+(?:models?|methods?|approaches?|variants?|conditions?)\s+"
+                        r"but\s+not\s+(.+?)\s+(?:was|were|is|are)\s+(?:evaluated|tested|benchmarked)\b",
+                        clause, re.I,
+                    )
+                collective_clause = bool(except_tail and re.search(
+                    r"\b(?:all|both|each)\s+(?:models?|methods?|approaches?|variants?|conditions?)\b",
+                    clause[:match.start()] if match.start() else clause[:except_tail.start()], re.I,
+                ))
+                excluded = {
+                    name for name in rows
+                    if (
+                        except_tail
+                        and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", except_tail.group(1), re.I)
+                    ) or re.search(
+                        rf"\b(?:except|excluding|but\s+not)\s+(?:the\s+)?{re.escape(name)}(?!\w)",
+                        clause, re.I,
+                    )
+                }
+                if not named and pattern is named_claim:
+                    named = {
+                        name for name in rows
+                        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", match.group(0), re.I)
+                    }
+                collective_subject = bool(subject and re.search(
+                    r"\b(?:all|both|each)\s+(?:models?|methods?|approaches?|variants?|conditions?)\b",
+                    subject, re.I,
+                ))
+                relevant = (
+                    set(rows) if collective_clause or collective_subject or not named else named
+                ) - excluded
+                wrong = sorted(name for name in relevant if name in unsupported)
+                if bool(match.groupdict().get("all")) and claimed != declared:
+                    wrong = sorted(set(wrong) | set(relevant))
+                if wrong:
+                    counts = ", ".join(f"{name} {rows[name]['scene_count']}/{declared}" for name in wrong)
+                    message = f"Evaluation scope: manuscript claims {claimed} validation scenes; recorded scene IDs cover {counts}."
+                    if message not in conflicts:
+                        conflicts.append(message)
+    return conflicts
 
 
 def emit_reporting_contract(run_dir: Path, destination: Path, metric_key: str = "primary_metric",

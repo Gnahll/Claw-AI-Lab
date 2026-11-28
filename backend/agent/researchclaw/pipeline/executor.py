@@ -5835,46 +5835,8 @@ def _paper_evidence_conflicts(paper: str, run_dir: Path) -> list[str]:
                 "Paper denies completed execution although the audit contains completed runs."
             )
 
-    return conflicts
-
-
-def _paper_evidence_conflicts(paper: str, run_dir: Path) -> list[str]:
-    """Detect claims that contradict the authoritative experiment summary."""
-    summary = _load_experiment_summary(run_dir) or {}
-    lowered = " ".join(paper.lower().split())
-    conflicts: list[str] = []
-
-    per_seed_results = summary.get("per_seed_results")
-    if isinstance(per_seed_results, list) and per_seed_results:
-        aggregate_only_patterns = (
-            "only aggregate means",
-            "contains aggregate means, not the full run-by-epoch",
-            "does not contain the full run-by-epoch",
-            "cannot be reconstructed from those means",
-        )
-        if any(pattern in lowered for pattern in aggregate_only_patterns):
-            conflicts.append(
-                "Paper says only aggregate means are available although per-seed results exist."
-            )
-
-    audit = summary.get("audit")
-    completed_audits = []
-    if isinstance(audit, dict):
-        completed_audits = [
-            value for value in audit.values()
-            if isinstance(value, dict) and value.get("status") == "completed"
-        ]
-    if completed_audits:
-        completion_patterns = (
-            "no new execution occurred",
-            "actual completed progress for the independent task therefore remain unverified",
-            "does not establish completion of the newly authorized server run",
-        )
-        if any(pattern in lowered for pattern in completion_patterns):
-            conflicts.append(
-                "Paper denies completed execution although the audit contains completed runs."
-            )
-
+    from researchclaw.pipeline.paper_evidence import evaluation_scope_conflicts, load_measured_results
+    conflicts.extend(evaluation_scope_conflicts(paper, load_measured_results(run_dir)))
     return conflicts
 
 
@@ -6789,11 +6751,14 @@ def _figure_prompts_to_markdown(
     import shutil
 
     meta: dict[str, dict] = {}
-    # Older stages first so the revision (S22) overrides the draft (S20).
-    for path in [
-        *reversed(_newest_stage_files(run_dir, "stage-20*/figure_prompts.json")),
-        *reversed(_newest_stage_files(run_dir, "stage-22*/figure_prompts.json")),
-    ]:
+    # Read only the current round of each stage. An older refine directory is
+    # superseded and must not supply a figure to the exported manuscript.
+    manifest_paths = [
+        stage / "figure_prompts.json"
+        for stage in _current_stage_dirs(run_dir, "stage-20", "stage-22")
+        if (stage / "figure_prompts.json").is_file()
+    ]
+    for path in manifest_paths:
         try:
             for fp in json.loads(path.read_text(encoding="utf-8")):
                 if isinstance(fp, dict) and fp.get("figure_id"):
@@ -6817,14 +6782,46 @@ def _figure_prompts_to_markdown(
             pos = cap.end()
 
         source: Path | None = None
-        candidates = [Path(fp["output_path"])] if fp.get("output_path") else []
-        for name in (f"{fid}.*", f"{fid}_fallback.*"):
-            for stage in ("stage-22*", "stage-20*"):
-                candidates += _newest_stage_files(run_dir, f"{stage}/figures/{name}")
-        for cand in candidates:
-            if cand.is_file() and cand.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf"}:
-                source = cand
-                break
+        current_stages = _current_stage_dirs(run_dir, "stage-22", "stage-20")
+        candidates: list[Path] = []
+        declared_source: Path | None = None
+        if fp.get("output_path"):
+            declared = Path(fp["output_path"])
+            try:
+                if (
+                    current_stages
+                    and declared.is_file()
+                    and declared.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".svg", ".eps"}
+                    and declared.resolve().is_relative_to(current_stages[0].resolve())
+                ):
+                    declared_source = declared
+            except OSError:
+                pass
+        # An explicit current-round manifest path is authoritative. Otherwise
+        # require exactly one matching file in the newest applicable stage.
+        if declared_source is not None:
+            candidates = [declared_source]
+        else:
+            # A current S22 revision supersedes S20. Fall back to S20 only when
+            # S22 has no file for this prompt; never combine both into a choice.
+            for stage in current_stages:
+                stage_candidates = [
+                    *stage.joinpath("figures").glob(f"{fid}.*"),
+                    *stage.joinpath("figures").glob(f"{fid}_fallback.*"),
+                ]
+                stage_candidates = [
+                    cand for cand in stage_candidates
+                    if cand.is_file() and cand.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".svg", ".eps"}
+                ]
+                if stage_candidates:
+                    candidates.extend(stage_candidates)
+                    break
+        candidates = list(dict.fromkeys(candidates))
+        if len(candidates) == 1:
+            source = candidates[0]
+        elif len(candidates) > 1:
+            logger.warning("Stage 25: Dropped ambiguous FIGURE_PROMPT %s: %s", fid, candidates)
+            continue
         target = chart_dir / f"{fid}{source.suffix.lower() if source else '.png'}"
         try:
             if source is not None:
@@ -8598,7 +8595,6 @@ def _paper_reporting_block(run_dir: Path) -> str:
 def _collect_experiment_evidence(run_dir: Path) -> str:
     """Collect actual experiment parameters and results for peer review."""
     evidence_parts: list[str] = []
-    evidence_parts.append(_paper_reporting_block(run_dir))
     exp_summary = _load_experiment_summary(run_dir)
     selected_version = str((exp_summary or {}).get("selected_version", ""))
     has_final_version = selected_version.startswith(f"stage-{int(Stage.ITERATIVE_REFINE):02d}")
@@ -8720,6 +8716,8 @@ def _collect_experiment_evidence(run_dir: Path) -> str:
 
     if not evidence_parts:
         return ""
+
+    evidence_parts.insert(0, _paper_reporting_block(run_dir))
 
     return (
         "\n\n## Actual Experiment Evidence\n"
@@ -9032,6 +9030,13 @@ def _execute_paper_revision(
             "selected_source": "original_draft_no_llm",
             "remaining_conflicts": draft_conflicts,
         }
+    scope_conflicts = [item for item in sync_report["remaining_conflicts"] if item.startswith("Evaluation scope:")]
+    if scope_conflicts:
+        (stage_dir / "paper_revision_rejected.md").write_text(revised, encoding="utf-8")
+        (stage_dir / "experiment_sync_report.json").write_text(json.dumps(sync_report, indent=2), encoding="utf-8")
+        return StageResult(stage=Stage.PAPER_REVISION, status=StageStatus.FAILED,
+                           artifacts=("paper_revision_rejected.md", "experiment_sync_report.json"),
+                           error="; ".join(scope_conflicts))
     from researchclaw.pipeline.artifact_audit import manuscript_errors
     structure_errors = manuscript_errors(revised)
     if structure_errors:
@@ -9059,7 +9064,7 @@ def _execute_paper_revision(
 
     # Reuse figures from S20 (PAPER_DRAFT) instead of regenerating
     _s20_figures_dir = None
-    for _sd in sorted(run_dir.glob("stage-20*"), reverse=True):
+    for _sd in _current_stage_dirs(run_dir, "stage-20"):
         _candidate = _sd / "figures"
         if _candidate.is_dir() and any(_candidate.iterdir()):
             _s20_figures_dir = _candidate
@@ -9075,7 +9080,7 @@ def _execute_paper_revision(
         if _s20_figures_dir:
             import shutil as _shutil_fig
             for _existing_fig in _s20_figures_dir.iterdir():
-                if _existing_fig.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps"}:
+                if _existing_fig.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps", ".svg"}:
                     _dest = _s22_figures_dir / _existing_fig.name
                     if not _dest.exists():
                         _shutil_fig.copy2(_existing_fig, _dest)
@@ -9083,7 +9088,7 @@ def _execute_paper_revision(
             for _fp in _fig_prompts:
                 _fid = _fp.get("figure_id", "")
                 # Check common naming patterns
-                for _ext in (".png", ".jpg", ".jpeg"):
+                for _ext in (".png", ".jpg", ".jpeg", ".pdf", ".eps", ".svg"):
                     _candidate_name = _s22_figures_dir / f"{_fid}{_ext}"
                     if _candidate_name.exists():
                         _fp["output_path"] = str(_candidate_name)
@@ -9146,6 +9151,67 @@ def _execute_paper_revision(
 _MD_IMAGE_LINE_RE = re.compile(r"^[ \t]*!\[[^\]]*\]\(\s*<?([^)\s>]+)>?[^)]*\)[ \t]*$", re.MULTILINE)
 _TEX_FIGURE_RE = re.compile(r"\\begin\{figure\*?\}.*?\\end\{figure\*?\}\n?", re.DOTALL)
 _TEX_GRAPHIC_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}")
+
+
+def _resolve_export_figure_paths(source: str, stage_dir: Path, references: re.Pattern[str]) -> str:
+    """Fix unambiguous local chart references before compiling the exported source."""
+    chart_dir = stage_dir / "charts"
+    extensions = {".png", ".pdf", ".jpg", ".jpeg", ".svg", ".eps"}
+    charts = (
+        sorted(f for f in chart_dir.iterdir() if f.is_file() and f.suffix.lower() in extensions)
+        if chart_dir.is_dir() else []
+    )
+
+    def resolve(match: re.Match[str]) -> str:
+        reference = match.group(1)
+        if "\\" in reference or "#" in reference or "://" in reference:
+            return match.group(0)
+        path = Path(reference)
+        if path.is_absolute() or ".." in path.parts:
+            return match.group(0)
+        target = stage_dir / path
+        if target.is_file():
+            if references is _TEX_GRAPHIC_RE and target.suffix.lower() == ".svg":
+                alternatives = [
+                    target.with_suffix(ext)
+                    for ext in (".pdf", ".png", ".jpg", ".jpeg", ".eps")
+                    if target.with_suffix(ext).is_file()
+                ]
+                if len(alternatives) == 1:
+                    replacement = alternatives[0].relative_to(stage_dir).as_posix()
+                    start = match.start(1) - match.start()
+                    end = match.end(1) - match.start()
+                    return match.group(0)[:start] + replacement + match.group(0)[end:]
+                # pdflatex cannot consume SVG.  Keep the export compilable and
+                # explicit rather than silently emitting an invalid reference.
+                return r"\fbox{\textit{Figure omitted: SVG requires conversion}}"
+            return match.group(0)
+        if not path.suffix:
+            inferred = [target.with_suffix(s) for s in extensions if target.with_suffix(s).is_file()]
+            if len(inferred) == 1:
+                # TeX resolves extensionless graphics, Markdown renderers do not.
+                if references is _TEX_GRAPHIC_RE:
+                    return match.group(0)
+                new_path = inferred[0].relative_to(stage_dir).as_posix()
+                start = match.start(1) - match.start()
+                end = match.end(1) - match.start()
+                return match.group(0)[:start] + new_path + match.group(0)[end:]
+            if len(inferred) > 1:
+                return match.group(0)
+        matches = [f for f in charts if f.name == path.name]
+        if not matches:
+            matches = [f for f in charts if f.name.casefold() == path.name.casefold()]
+        if not matches:
+            matches = [f for f in charts if f.stem.casefold() == path.stem.casefold()]
+        if len(matches) != 1:
+            logger.warning("S25: unresolved figure %s (%d matching chart files)", reference, len(matches))
+            return match.group(0)
+        new_path = matches[0].relative_to(stage_dir).as_posix()
+        start = match.start(1) - match.start()
+        end = match.end(1) - match.start()
+        return match.group(0)[:start] + new_path + match.group(0)[end:]
+
+    return references.sub(resolve, source)
 
 
 def _figure_key(path: str) -> str:
@@ -9226,11 +9292,15 @@ def _generate_latex_package(
 
     # 1. Collect available figures first (need filenames for LLM prompt)
     _fig_files: list[str] = []
-    for _fig_src in [
-        stage_dir / "figures",
-        run_dir / "stage-16" / "charts",
-        run_dir / "stage-14" / "charts",
-    ]:
+    # Prefer the current stage-16 result figures; only fall back to stage-14
+    # when no current stage-16 directory exists.  Do not package both rounds.
+    current_chart_dirs: list[Path] = []
+    for _stage_name in ("stage-16", "stage-14"):
+        _stage_dirs = _current_stage_dirs(run_dir, _stage_name)
+        if _stage_dirs:
+            current_chart_dirs = [_stage_dirs[0] / "charts"]
+            break
+    for _fig_src in [stage_dir / "figures", *current_chart_dirs]:
         if _fig_src.is_dir():
             for _fig_file in sorted(_fig_src.iterdir()):
                 if (_fig_file.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps"}
@@ -10119,17 +10189,103 @@ def _execute_export_publish(
             _san_report.get("numbers_kept", 0),
         )
 
-    # IMP-19 Layer 2: Ensure at least figures are referenced in the paper
-    import re as _re_fig
-    chart_files = []
-    for _chart_src_dir in [
-        stage_dir / "charts",
-        run_dir / "stage-16" / "charts",
-        run_dir / "stage-14" / "charts",
-    ]:
-        if _chart_src_dir.is_dir():
-            chart_files.extend(sorted(_chart_src_dir.glob("*.png")))
-    if chart_files and "![" not in final_paper:
+    # IMP-24: Detect excessive number repetition
+    _numbers_found = re.findall(r"\b\d+\.\d{2,}\b", final_paper)
+    from collections import Counter as _Counter
+    _num_counts = _Counter(_numbers_found)
+    _repeated = {n: c for n, c in _num_counts.items() if c > 3}
+    if _repeated:
+        logger.warning(
+            "IMP-24: Numbers repeated >3 times: %s",
+            _repeated,
+        )
+
+    # WS-5.4: Generate result visualizations
+    # Priority: FigureAgent charts (stage-16 RESULT_ANALYSIS) > stage-14 legacy > fallback
+    try:
+        chart_dir = stage_dir / "charts"
+        chart_dir.mkdir(parents=True, exist_ok=True)
+        # A resumed S25 reuses this dir; every chart from the earlier attempt is stale.
+        _chart_extensions = {".png", ".pdf", ".jpg", ".jpeg", ".svg", ".eps"}
+        for _stale in chart_dir.iterdir():
+            if _stale.is_file() and _stale.suffix.lower() in _chart_extensions:
+                _stale.unlink()
+        charts: list[Path] = []
+
+        # Check if FigureAgent produced charts in stage-16 or stage-14
+        _fa_charts_found = False
+        # Only the current round: an older stage-16_vN holds superseded charts.
+        for _fa_stage in _current_stage_dirs(run_dir, "stage-16", "stage-14"):
+            if _fa_charts_found:
+                break
+            for _fa_dir in [_fa_stage / "charts"]:
+                _fa_charts = sorted(
+                    path for path in _fa_dir.glob("fig_*.*")
+                    if path.is_file() and path.suffix.lower() in _chart_extensions
+                )
+                if _fa_charts:
+                    import shutil
+                    for _fa_chart in _fa_charts:
+                        dest = chart_dir / _fa_chart.name
+                        shutil.copy2(_fa_chart, dest)
+                        charts.append(dest)
+                    _fa_charts_found = True
+                    logger.info(
+                        "Stage 22: Copied %d FigureAgent charts from %s",
+                        len(_fa_charts), _fa_dir,
+                    )
+                    break
+
+        # Always generate structured charts from visualize.py (different names)
+        from researchclaw.experiment.visualize import generate_all_charts
+        _metric_dir = getattr(config.experiment, "metric_direction", "minimize")
+        _viz_charts = generate_all_charts(
+            run_dir,
+            chart_dir,
+            metric_key=config.experiment.metric_key,
+            metric_direction=_metric_dir,
+        )
+        charts.extend(_viz_charts)
+
+        if charts:
+            logger.info("Stage 22: Generated %d chart(s) total", len(charts))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Chart generation failed: %s", exc)
+
+    # Separate publication metrics from optimizer objectives even when S25 is
+    # resumed with pre-existing S16 charts from an older platform version.
+    from researchclaw.pipeline.paper_evidence import emit_reporting_contract
+    try:
+        emit_reporting_contract(run_dir, stage_dir, config.experiment.metric_key,
+                                config.experiment.metric_direction, chart=True)
+    except ImportError:
+        logger.warning("Paper metric contract saved; canonical chart dependency unavailable")
+
+    # FIGURE_PROMPT blocks are instructions for the image model; turn them
+    # into real figures (rendered or fallback) copied into charts/.
+    final_paper, _prompt_figures = _figure_prompts_to_markdown(
+        final_paper, run_dir, stage_dir / "charts"
+    )
+    if _prompt_figures:
+        logger.info(
+            "Stage 25: Converted %d FIGURE_PROMPT block(s) into figures: %s",
+            len(_prompt_figures), _prompt_figures,
+        )
+
+    # IMP-19 Layer 2: Reference every exported raster/PDF chart not already
+    # cited. SVG is retained for Markdown export but not injected into the
+    # pdflatex package, which cannot compile it without conversion support.
+    _injectable_extensions = {".png", ".pdf", ".jpg", ".jpeg", ".eps"}
+    chart_files = sorted(
+        path for path in (stage_dir / "charts").iterdir()
+        if path.is_file() and path.suffix.lower() in _injectable_extensions
+    )
+    referenced_charts = {
+        Path(match.group(1).replace("\\", "/")).name
+        for match in _MD_IMAGE_LINE_RE.finditer(final_paper)
+    }
+    chart_files = [path for path in chart_files if path.name not in referenced_charts]
+    if chart_files:
         # Distribute figures to relevant sections based on filename keywords
         _fig_placement: dict[str, list[str]] = {
             "method": [],       # architecture, method, model, pipeline diagrams
@@ -10190,84 +10346,7 @@ def _execute_export_publish(
             _total_inserted,
         )
 
-    # IMP-24: Detect excessive number repetition
-    _numbers_found = _re_fig.findall(r"\b\d+\.\d{2,}\b", final_paper)
-    from collections import Counter as _Counter
-    _num_counts = _Counter(_numbers_found)
-    _repeated = {n: c for n, c in _num_counts.items() if c > 3}
-    if _repeated:
-        logger.warning(
-            "IMP-24: Numbers repeated >3 times: %s",
-            _repeated,
-        )
-
-    # WS-5.4: Generate result visualizations
-    # Priority: FigureAgent charts (stage-16 RESULT_ANALYSIS) > stage-14 legacy > fallback
-    try:
-        chart_dir = stage_dir / "charts"
-        chart_dir.mkdir(parents=True, exist_ok=True)
-        # A resumed S25 reuses this dir; charts of the earlier attempt are stale.
-        for _stale in chart_dir.glob("fig_*.png"):
-            _stale.unlink()
-        charts: list[Path] = []
-
-        # Check if FigureAgent produced charts in stage-16 or stage-14
-        _fa_charts_found = False
-        # Only the current round: an older stage-16_vN holds superseded charts.
-        for _fa_stage in _current_stage_dirs(run_dir, "stage-16", "stage-14"):
-            if _fa_charts_found:
-                break
-            for _fa_dir in [_fa_stage / "charts"]:
-                _fa_pngs = sorted(_fa_dir.glob("fig_*.png"))
-                if _fa_pngs:
-                    import shutil
-                    for _fa_png in _fa_pngs:
-                        dest = chart_dir / _fa_png.name
-                        shutil.copy2(_fa_png, dest)
-                        charts.append(dest)
-                    _fa_charts_found = True
-                    logger.info(
-                        "Stage 22: Copied %d FigureAgent charts from %s",
-                        len(_fa_pngs), _fa_dir,
-                    )
-                    break
-
-        # Always generate structured charts from visualize.py (different names)
-        from researchclaw.experiment.visualize import generate_all_charts
-        _metric_dir = getattr(config.experiment, "metric_direction", "minimize")
-        _viz_charts = generate_all_charts(
-            run_dir,
-            chart_dir,
-            metric_key=config.experiment.metric_key,
-            metric_direction=_metric_dir,
-        )
-        charts.extend(_viz_charts)
-
-        if charts:
-            logger.info("Stage 22: Generated %d chart(s) total", len(charts))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Chart generation failed: %s", exc)
-
-    # Separate publication metrics from optimizer objectives even when S25 is
-    # resumed with pre-existing S16 charts from an older platform version.
-    from researchclaw.pipeline.paper_evidence import emit_reporting_contract
-    try:
-        emit_reporting_contract(run_dir, stage_dir, config.experiment.metric_key,
-                                config.experiment.metric_direction, chart=True)
-    except ImportError:
-        logger.warning("Paper metric contract saved; canonical chart dependency unavailable")
-
-    # FIGURE_PROMPT blocks are instructions for the image model; turn them
-    # into real figures (rendered or fallback) copied into charts/.
-    final_paper, _prompt_figures = _figure_prompts_to_markdown(
-        final_paper, run_dir, stage_dir / "charts"
-    )
-    if _prompt_figures:
-        logger.info(
-            "Stage 25: Converted %d FIGURE_PROMPT block(s) into figures: %s",
-            len(_prompt_figures), _prompt_figures,
-        )
-
+    final_paper = _resolve_export_figure_paths(final_paper, stage_dir, _MD_IMAGE_LINE_RE)
     final_paper, _dup_figures = _dedupe_markdown_figures(final_paper)
     if _dup_figures:
         logger.info("Stage 25: Removed %d repeated figure reference(s)", _dup_figures)
@@ -10278,7 +10357,10 @@ def _execute_export_publish(
     artifacts.append("paper_reporting_contract.json")
     if (stage_dir / "paper_metric_chart.json").is_file():
         artifacts.append("paper_metric_chart.json")
-    if any((stage_dir / "charts").glob("*.png")):
+    if any(
+        path.is_file() and path.suffix.lower() in {".png", ".pdf", ".jpg", ".jpeg", ".svg", ".eps"}
+        for path in (stage_dir / "charts").iterdir()
+    ):
         artifacts.append("charts/")
     # F2.7: Post-process citations — [cite_key] → \cite{cite_key}
     # and copy final references.bib to export stage
@@ -10494,6 +10576,7 @@ def _execute_export_publish(
             bib_file=config.export.bib_file,
             bib_entries=_ay_map or None,
         )
+        tex_content = _resolve_export_figure_paths(tex_content, stage_dir, _TEX_GRAPHIC_RE)
         (stage_dir / "paper.tex").write_text(tex_content, encoding="utf-8")
         artifacts.append("paper.tex")
         logger.info(
@@ -10573,7 +10656,8 @@ def _execute_export_publish(
                     logger.debug("Stage 22: Quality checks skipped: %s", _qc_exc)
             else:
                 logger.warning("Stage 22: LaTeX compilation verification FAILED: %s", _compile_result.errors[:3])
-                # Add compilation failure comment to .tex
+                # A failed compiler means this export is not deliverable.
+                # Preserve the diagnostic in the artifact, but fail the stage.
                 _tex_path = stage_dir / "paper.tex"
                 if _tex_path.exists():
                     _tex_content = _tex_path.read_text(encoding="utf-8")
@@ -10584,88 +10668,17 @@ def _execute_export_publish(
                             + _tex_content
                         )
                         _tex_path.write_text(_tex_content, encoding="utf-8")
+                return StageResult(
+                    stage=Stage.EXPORT_PUBLISH,
+                    status=StageStatus.FAILED,
+                    artifacts=tuple(artifacts),
+                    evidence_refs=tuple(f"stage-22/{a}" for a in artifacts),
+                    error="LaTeX compilation verification failed",
+                )
         except Exception as _compile_exc:  # noqa: BLE001
             logger.debug("Stage 22: Compile verification skipped: %s", _compile_exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("LaTeX generation skipped: %s", exc)
-
-    # BUG-99: Validate that \includegraphics paths in .tex match actual files.
-    # The LLM may write paper referencing a chart name that differs from the
-    # actual generated filename (e.g. "performance_comparison.png" vs
-    # "experiment_comparison.png").
-    try:
-        tex_path = stage_dir / "paper.tex"
-        if tex_path.exists():
-            tex_text = tex_path.read_text(encoding="utf-8")
-            # Extract all \includegraphics{path} references
-            _fig_refs = re.findall(
-                r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", tex_text
-            )
-            if _fig_refs:
-                # Collect all actual chart files in stage_dir/charts/
-                _chart_dir = stage_dir / "charts"
-                _actual_files: dict[str, str] = {}  # lowercase stem → relative path
-                if _chart_dir.is_dir():
-                    for _af in _chart_dir.iterdir():
-                        if _af.is_file() and _af.suffix.lower() in (
-                            ".png", ".jpg", ".jpeg", ".pdf", ".svg",
-                        ):
-                            _actual_files[_af.stem.lower()] = f"charts/{_af.name}"
-                            _actual_files[_af.name.lower()] = f"charts/{_af.name}"
-
-                _fixes: dict[str, str] = {}
-                for _ref in _fig_refs:
-                    _ref_path = stage_dir / _ref
-                    if _ref_path.exists():
-                        continue  # File exists, no fix needed
-                    # Try fuzzy matching against actual chart files
-                    _ref_stem = Path(_ref).stem.lower()
-                    _ref_name = Path(_ref).name.lower()
-                    # Exact stem match (different extension or directory)
-                    if _ref_stem in _actual_files:
-                        _fixes[_ref] = _actual_files[_ref_stem]
-                        continue
-                    if _ref_name in _actual_files:
-                        _fixes[_ref] = _actual_files[_ref_name]
-                        continue
-                    # Fuzzy match: find best match by keyword overlap
-                    if _actual_files:
-                        _ref_words = set(_ref_stem.replace("-", "_").split("_"))
-                        _best_match, _best_overlap = "", 0
-                        for _stem, _apath in _actual_files.items():
-                            _a_words = set(
-                                _stem.replace("-", "_").split("_")
-                            )
-                            _overlap = len(_ref_words & _a_words)
-                            if _overlap > _best_overlap:
-                                _best_overlap = _overlap
-                                _best_match = _apath
-                        if _best_overlap >= 1 and _best_match:
-                            _fixes[_ref] = _best_match
-
-                if _fixes:
-                    for _old_path, _new_path in _fixes.items():
-                        tex_text = tex_text.replace(
-                            f"{{{_old_path}}}", f"{{{_new_path}}}"
-                        )
-                    tex_path.write_text(tex_text, encoding="utf-8")
-                    logger.warning(
-                        "BUG-99: Fixed %d figure path mismatch(es) in paper.tex: %s",
-                        len(_fixes),
-                        ", ".join(f"{k} → {v}" for k, v in _fixes.items()),
-                    )
-                # Warn about any remaining unresolved references
-                _still_missing = [
-                    r for r in _fig_refs
-                    if r not in _fixes and not (stage_dir / r).exists()
-                ]
-                if _still_missing:
-                    logger.warning(
-                        "Stage 22: %d figure reference(s) have no matching file: %s",
-                        len(_still_missing), _still_missing[:5],
-                    )
-    except Exception as _fig_exc:  # noqa: BLE001
-        logger.debug("Stage 22: Figure path validation skipped: %s", _fig_exc)
 
     # --- Code packaging: multi-file directory or single file ---
     # Without ITERATIVE_REFINE output (skipped or stopped S15), package the
