@@ -1295,6 +1295,76 @@ class TestExportPublishCodePackage:
         assert not (charts / "fig_stale.png").exists()
         assert seen == [True]
 
+    def test_export_figure_resolution_preserves_existing_and_ambiguous_paths(self, tmp_path: Path) -> None:
+        charts = tmp_path / "charts"
+        charts.mkdir()
+        for name in ("plot.png", "plot.pdf"):
+            (charts / name).touch()
+        tex = (
+            r"\includegraphics[width=2cm]{old/plot.pdf} "
+            r"\label{old/plot.pdf} \includegraphics{old/plot.svg} "
+            r"\includegraphics{charts/plot}"
+        )
+        fixed = rc_executor._resolve_export_figure_paths(tex, tmp_path, rc_executor._TEX_GRAPHIC_RE)
+        assert fixed == tex.replace("[width=2cm]{old/plot.pdf}", "[width=2cm]{charts/plot.pdf}")
+
+    def test_export_embeds_only_figures_available_in_this_export(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+
+        _write_prior_artifact(run_dir, 19, "paper_revised.md", "# Test Paper\n\n## Results\n\nMeasured results.\n")
+        for stage, name in (("stage-16", "fig_main.png"), ("stage-14", "fig_superseded.png"),
+                            ("stage-25", "fig_stale.png")):
+            chart_dir = run_dir / stage / "charts"
+            chart_dir.mkdir(parents=True, exist_ok=True)
+            (chart_dir / name).write_bytes(b"chart")
+
+        def skip_compile(*args, **kwargs):
+            raise RuntimeError("no latex required")
+
+        monkeypatch.setattr(compiler, "compile_latex", skip_compile)
+        stage = run_dir / "stage-25"
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        paper = (stage / "paper_final.md").read_text(encoding="utf-8")
+        assert "(charts/fig_main.png)" in paper
+        assert "fig_stale" not in paper
+        assert "fig_superseded" not in paper
+
+    def test_export_compiles_with_relocated_figure_and_preserves_missing_evidence(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+        from researchclaw.templates.compiler import CompileResult
+
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md",
+            "# Test paper\n\n## Results\n\n![Measured AP](figures/fig_ap.png)\n\n"
+            "![Boundary ablation](charts/fig_boundary_ablation.png)\n",
+        )
+        charts = run_dir / "stage-16/charts"
+        charts.mkdir(parents=True, exist_ok=True)
+        (charts / "fig_ap.png").write_bytes(b"measured-chart")
+        stage = run_dir / "stage-25"
+        stage.mkdir()
+        compiled = []
+
+        def inspect_first_compile(path: Path, **kwargs):
+            compiled.append(path.read_text(encoding="utf-8"))
+            return CompileResult(success=False, errors=["fixture has a genuinely missing figure"])
+
+        monkeypatch.setattr(compiler, "compile_latex", inspect_first_compile)
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        markdown = (stage / "paper_final.md").read_text(encoding="utf-8")
+        assert "(charts/fig_ap.png)" in markdown
+        assert "(charts/fig_boundary_ablation.png)" in markdown
+        assert len(compiled) == 1
+        assert "{charts/fig_ap.png}" in compiled[0]
+        assert "{charts/fig_boundary_ablation.png}" in compiled[0]
+        assert "{charts/fig_boundary_ablation.png}" in (stage / "paper.tex").read_text(encoding="utf-8")
+
     def test_export_without_refine_packages_experiment_dir(
         self,
         tmp_path: Path,

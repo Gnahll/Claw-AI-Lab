@@ -9117,6 +9117,41 @@ _TEX_FIGURE_RE = re.compile(r"\\begin\{figure\*?\}.*?\\end\{figure\*?\}\n?", re.
 _TEX_GRAPHIC_RE = re.compile(r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}")
 
 
+def _resolve_export_figure_paths(source: str, stage_dir: Path, references: re.Pattern[str]) -> str:
+    """Fix unambiguous local chart references before compiling the exported source."""
+    chart_dir = stage_dir / "charts"
+    extensions = {".png", ".pdf", ".jpg", ".jpeg", ".svg", ".eps"}
+    charts = (
+        sorted(f for f in chart_dir.iterdir() if f.is_file() and f.suffix.lower() in extensions)
+        if chart_dir.is_dir() else []
+    )
+
+    def resolve(match: re.Match[str]) -> str:
+        reference = match.group(1)
+        if "\\" in reference or "#" in reference or "://" in reference:
+            return match.group(0)
+        path = Path(reference)
+        if path.is_absolute() or ".." in path.parts:
+            return match.group(0)
+        target = stage_dir / path
+        if target.is_file() or (not path.suffix and any(target.with_suffix(s).is_file() for s in extensions)):
+            return match.group(0)
+        matches = [f for f in charts if f.name == path.name]
+        if not matches:
+            matches = [f for f in charts if f.name.casefold() == path.name.casefold()]
+        if not matches:
+            matches = [f for f in charts if f.stem.casefold() == path.stem.casefold()]
+        if len(matches) != 1:
+            logger.warning("S25: unresolved figure %s (%d matching chart files)", reference, len(matches))
+            return match.group(0)
+        new_path = matches[0].relative_to(stage_dir).as_posix()
+        start = match.start(1) - match.start()
+        end = match.end(1) - match.start()
+        return match.group(0)[:start] + new_path + match.group(0)[end:]
+
+    return references.sub(resolve, source)
+
+
 def _figure_key(path: str) -> str:
     return Path(path.strip().replace("\\", "/")).name.lower()
 
@@ -10088,79 +10123,8 @@ def _execute_export_publish(
             _san_report.get("numbers_kept", 0),
         )
 
-    # IMP-19 Layer 2: Ensure at least figures are referenced in the paper
-    import re as _re_fig
-    chart_files = []
-    for _chart_src_dir in [
-        stage_dir / "charts",
-        run_dir / "stage-16" / "charts",
-        run_dir / "stage-14" / "charts",
-    ]:
-        if _chart_src_dir.is_dir():
-            chart_files.extend(sorted(_chart_src_dir.glob("*.png")))
-    if chart_files and "![" not in final_paper:
-        # Distribute figures to relevant sections based on filename keywords
-        _fig_placement: dict[str, list[str]] = {
-            "method": [],       # architecture, method, model, pipeline diagrams
-            "result": [],       # experiment, comparison, ablation charts
-            "intro": [],        # concept, overview, illustration
-        }
-        _fig_counter = 0
-        for cf in chart_files[:6]:
-            _fig_counter += 1
-            stem_lower = cf.stem.lower()
-            label = cf.stem.replace("_", " ").title()
-            fig_md = f"![Figure {_fig_counter}: {label}](charts/{cf.name})"
-            if any(k in stem_lower for k in ("architecture", "model", "pipeline", "method", "flowchart")):
-                _fig_placement["method"].append(fig_md)
-            elif any(k in stem_lower for k in ("experiment", "comparison", "ablation", "result", "metric")):
-                _fig_placement["result"].append(fig_md)
-            elif any(k in stem_lower for k in ("concept", "overview", "illustration", "threat", "attack")):
-                _fig_placement["intro"].append(fig_md)
-            else:
-                _fig_placement["result"].append(fig_md)  # default to results
-
-        # Insert figures at relevant section boundaries
-        _section_markers = {
-            "method": ["## Method", "## Methodology", "## Approach", "## Framework",
-                        "## 3. Method", "## 3 Method"],
-            "result": ["## Results", "## Experiments", "## Evaluation",
-                        "## 5. Results", "## 4. Experiments", "## 5 Results"],
-            "intro": ["## Related Work", "## Background", "## 2. Related",
-                       "## 2 Related Work"],
-        }
-        _total_inserted = 0
-        for category, figs in _fig_placement.items():
-            if not figs:
-                continue
-            fig_block = "\n\n" + "\n\n".join(figs) + "\n\n"
-            inserted = False
-            for marker in _section_markers.get(category, []):
-                if marker in final_paper:
-                    # Insert BEFORE the marker section (so figure appears at end of previous section)
-                    final_paper = final_paper.replace(marker, fig_block + marker, 1)
-                    inserted = True
-                    _total_inserted += len(figs)
-                    break
-            if not inserted:
-                # Fallback: insert before Conclusion/Limitations/Discussion
-                for fallback in ["## Conclusion", "## Limitations", "## Discussion"]:
-                    if fallback in final_paper:
-                        final_paper = final_paper.replace(fallback, fig_block + fallback, 1)
-                        inserted = True
-                        _total_inserted += len(figs)
-                        break
-            if not inserted:
-                final_paper += fig_block
-                _total_inserted += len(figs)
-
-        logger.info(
-            "IMP-19: Injected %d figure references into paper_final.md (distributed across sections)",
-            _total_inserted,
-        )
-
     # IMP-24: Detect excessive number repetition
-    _numbers_found = _re_fig.findall(r"\b\d+\.\d{2,}\b", final_paper)
+    _numbers_found = re.findall(r"\b\d+\.\d{2,}\b", final_paper)
     from collections import Counter as _Counter
     _num_counts = _Counter(_numbers_found)
     _repeated = {n: c for n, c in _num_counts.items() if c > 3}
@@ -10237,6 +10201,70 @@ def _execute_export_publish(
             len(_prompt_figures), _prompt_figures,
         )
 
+    # IMP-19 Layer 2: Ensure at least figures are referenced in the paper
+    chart_files = sorted((stage_dir / "charts").glob("*.png"))
+    if chart_files and "![" not in final_paper:
+        # Distribute figures to relevant sections based on filename keywords
+        _fig_placement: dict[str, list[str]] = {
+            "method": [],       # architecture, method, model, pipeline diagrams
+            "result": [],       # experiment, comparison, ablation charts
+            "intro": [],        # concept, overview, illustration
+        }
+        _fig_counter = 0
+        for cf in chart_files[:6]:
+            _fig_counter += 1
+            stem_lower = cf.stem.lower()
+            label = cf.stem.replace("_", " ").title()
+            fig_md = f"![Figure {_fig_counter}: {label}](charts/{cf.name})"
+            if any(k in stem_lower for k in ("architecture", "model", "pipeline", "method", "flowchart")):
+                _fig_placement["method"].append(fig_md)
+            elif any(k in stem_lower for k in ("experiment", "comparison", "ablation", "result", "metric")):
+                _fig_placement["result"].append(fig_md)
+            elif any(k in stem_lower for k in ("concept", "overview", "illustration", "threat", "attack")):
+                _fig_placement["intro"].append(fig_md)
+            else:
+                _fig_placement["result"].append(fig_md)  # default to results
+
+        # Insert figures at relevant section boundaries
+        _section_markers = {
+            "method": ["## Method", "## Methodology", "## Approach", "## Framework",
+                        "## 3. Method", "## 3 Method"],
+            "result": ["## Results", "## Experiments", "## Evaluation",
+                        "## 5. Results", "## 4. Experiments", "## 5 Results"],
+            "intro": ["## Related Work", "## Background", "## 2. Related",
+                       "## 2 Related Work"],
+        }
+        _total_inserted = 0
+        for category, figs in _fig_placement.items():
+            if not figs:
+                continue
+            fig_block = "\n\n" + "\n\n".join(figs) + "\n\n"
+            inserted = False
+            for marker in _section_markers.get(category, []):
+                if marker in final_paper:
+                    # Insert BEFORE the marker section (so figure appears at end of previous section)
+                    final_paper = final_paper.replace(marker, fig_block + marker, 1)
+                    inserted = True
+                    _total_inserted += len(figs)
+                    break
+            if not inserted:
+                # Fallback: insert before Conclusion/Limitations/Discussion
+                for fallback in ["## Conclusion", "## Limitations", "## Discussion"]:
+                    if fallback in final_paper:
+                        final_paper = final_paper.replace(fallback, fig_block + fallback, 1)
+                        inserted = True
+                        _total_inserted += len(figs)
+                        break
+            if not inserted:
+                final_paper += fig_block
+                _total_inserted += len(figs)
+
+        logger.info(
+            "IMP-19: Injected %d figure references into paper_final.md (distributed across sections)",
+            _total_inserted,
+        )
+
+    final_paper = _resolve_export_figure_paths(final_paper, stage_dir, _MD_IMAGE_LINE_RE)
     final_paper, _dup_figures = _dedupe_markdown_figures(final_paper)
     if _dup_figures:
         logger.info("Stage 25: Removed %d repeated figure reference(s)", _dup_figures)
@@ -10463,6 +10491,7 @@ def _execute_export_publish(
             bib_file=config.export.bib_file,
             bib_entries=_ay_map or None,
         )
+        tex_content = _resolve_export_figure_paths(tex_content, stage_dir, _TEX_GRAPHIC_RE)
         (stage_dir / "paper.tex").write_text(tex_content, encoding="utf-8")
         artifacts.append("paper.tex")
         logger.info(
@@ -10557,84 +10586,6 @@ def _execute_export_publish(
             logger.debug("Stage 22: Compile verification skipped: %s", _compile_exc)
     except Exception as exc:  # noqa: BLE001
         logger.warning("LaTeX generation skipped: %s", exc)
-
-    # BUG-99: Validate that \includegraphics paths in .tex match actual files.
-    # The LLM may write paper referencing a chart name that differs from the
-    # actual generated filename (e.g. "performance_comparison.png" vs
-    # "experiment_comparison.png").
-    try:
-        tex_path = stage_dir / "paper.tex"
-        if tex_path.exists():
-            tex_text = tex_path.read_text(encoding="utf-8")
-            # Extract all \includegraphics{path} references
-            _fig_refs = re.findall(
-                r"\\includegraphics(?:\[[^\]]*\])?\{([^}]+)\}", tex_text
-            )
-            if _fig_refs:
-                # Collect all actual chart files in stage_dir/charts/
-                _chart_dir = stage_dir / "charts"
-                _actual_files: dict[str, str] = {}  # lowercase stem → relative path
-                if _chart_dir.is_dir():
-                    for _af in _chart_dir.iterdir():
-                        if _af.is_file() and _af.suffix.lower() in (
-                            ".png", ".jpg", ".jpeg", ".pdf", ".svg",
-                        ):
-                            _actual_files[_af.stem.lower()] = f"charts/{_af.name}"
-                            _actual_files[_af.name.lower()] = f"charts/{_af.name}"
-
-                _fixes: dict[str, str] = {}
-                for _ref in _fig_refs:
-                    _ref_path = stage_dir / _ref
-                    if _ref_path.exists():
-                        continue  # File exists, no fix needed
-                    # Try fuzzy matching against actual chart files
-                    _ref_stem = Path(_ref).stem.lower()
-                    _ref_name = Path(_ref).name.lower()
-                    # Exact stem match (different extension or directory)
-                    if _ref_stem in _actual_files:
-                        _fixes[_ref] = _actual_files[_ref_stem]
-                        continue
-                    if _ref_name in _actual_files:
-                        _fixes[_ref] = _actual_files[_ref_name]
-                        continue
-                    # Fuzzy match: find best match by keyword overlap
-                    if _actual_files:
-                        _ref_words = set(_ref_stem.replace("-", "_").split("_"))
-                        _best_match, _best_overlap = "", 0
-                        for _stem, _apath in _actual_files.items():
-                            _a_words = set(
-                                _stem.replace("-", "_").split("_")
-                            )
-                            _overlap = len(_ref_words & _a_words)
-                            if _overlap > _best_overlap:
-                                _best_overlap = _overlap
-                                _best_match = _apath
-                        if _best_overlap >= 1 and _best_match:
-                            _fixes[_ref] = _best_match
-
-                if _fixes:
-                    for _old_path, _new_path in _fixes.items():
-                        tex_text = tex_text.replace(
-                            f"{{{_old_path}}}", f"{{{_new_path}}}"
-                        )
-                    tex_path.write_text(tex_text, encoding="utf-8")
-                    logger.warning(
-                        "BUG-99: Fixed %d figure path mismatch(es) in paper.tex: %s",
-                        len(_fixes),
-                        ", ".join(f"{k} → {v}" for k, v in _fixes.items()),
-                    )
-                # Warn about any remaining unresolved references
-                _still_missing = [
-                    r for r in _fig_refs
-                    if r not in _fixes and not (stage_dir / r).exists()
-                ]
-                if _still_missing:
-                    logger.warning(
-                        "Stage 22: %d figure reference(s) have no matching file: %s",
-                        len(_still_missing), _still_missing[:5],
-                    )
-    except Exception as _fig_exc:  # noqa: BLE001
-        logger.debug("Stage 22: Figure path validation skipped: %s", _fig_exc)
 
     # --- Code packaging: multi-file directory or single file ---
     # Without ITERATIVE_REFINE output (skipped or stopped S15), package the
