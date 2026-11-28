@@ -227,16 +227,24 @@ _SCOPE_SUBJECT = re.compile(
     rf"\s+(?:was|were|is|are)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b",
     re.I,
 )
+_SCOPE_SUBJECT_LIST = re.compile(
+    rf"\b(?P<subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+(?:\s+(?:and|or)\s+[a-z0-9_.-]+)+(?:\s+(?:models?|approaches?|methods?|variants?|conditions?))?)"
+    rf"\s+(?:was|were|is|are)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
+)
+_SCOPE_OBJECT_FRONT = re.compile(
+    rf"\b{_SCOPE_OBJECT}\s+(?:was|were|is|are)\s+(?:used\s+(?:to\s+evaluate|for\s+evaluation)|evaluated)\s+"
+    rf"(?P<object_subject>[a-z0-9_.-]+(?:\s+(?:and|or)\s+[a-z0-9_.-]+)?)\b", re.I,
+)
 _SCOPE_PASSIVE = re.compile(
     rf"\b{_SCOPE_OBJECT}\s+(?:was|were|is|are)\s+(?:used\s+(?:to\s+evaluate|for\s+evaluation)|evaluated)\b", re.I,
 )
 _SCOPE_REPORTED = re.compile(
     rf"\b(?:results?\s+for\s+(?P<result_subject>.{{1,80}}?)\s+(?:is|are|was|were)\s+reported"
-    rf"|evaluation\s+(?:used|uses))\s+(?:on|over|across|using)?\s*{_SCOPE_OBJECT}\b", re.I,
+    rf"|(?:the\s+)?evaluation\s+(?:used|uses|was\s+(?:conducted|performed)))\s+(?:on|over|across|using)?\s*{_SCOPE_OBJECT}\b", re.I,
 )
 _SCOPE_ACHIEVED = re.compile(
     rf"\b(?P<achieved_subject>[a-z0-9_.-]+)\s+(?:achieve[d]?|obtain(?:ed)?|reach(?:ed)?)\s+"
-    rf"(?:an?\s+)?(?:instance\s+)?ap(?:\d+|\[[^\]]+\])?(?:\s*=\s*|\s+(?:of\s+)?)[-+]?\d+(?:\.\d+)?"
+    rf"(?:an?\s+)?(?:instance\s+)?ap(?:@\d+|_\{{?\d+\}}?|\d+|\[[^\]]+\])?(?:\s*=\s*|\s+(?:of\s+)?)[-+]?\d+(?:\.\d+)?"
     rf"\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b", re.I,
 )
 _CLAUSE_LIMIT = re.compile(r"(?<=[.!?;])\s+|\n\s*\n|\s+[—–]\s+")
@@ -291,15 +299,25 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
     for raw in _CLAUSE_LIMIT.split(text):
         clause = " ".join(raw.replace("**", "").split())
         for pattern in (
-            _SCOPE_ACTIVE_NAMED, _SCOPE_ACTIVE, _SCOPE_SUBJECT, _SCOPE_PASSIVE,
-            _SCOPE_REPORTED, _SCOPE_ACHIEVED, named_claim,
+            _SCOPE_ACTIVE_NAMED, _SCOPE_ACTIVE, _SCOPE_SUBJECT_LIST, _SCOPE_SUBJECT,
+            _SCOPE_OBJECT_FRONT, _SCOPE_PASSIVE, _SCOPE_REPORTED, _SCOPE_ACHIEVED, named_claim,
         ):
             for match in pattern.finditer(clause):
+                if pattern is _SCOPE_PASSIVE and _SCOPE_OBJECT_FRONT.search(clause):
+                    continue
                 lead = re.split(r"[,;]|\bbut\b|\band\b", clause[:match.start()], flags=re.I)[-1]
                 # Only a qualifier immediately adjacent to the assertion can
                 # negate it. Configuration prose such as "with no test-time
                 # augmentation we evaluated ..." is still an affirmative claim.
-                if _QUALIFIED_SCOPE.search(lead[-24:]) and not re.search(r"\bwe\s*$", lead, re.I):
+                collective_exclusion_prefix = re.search(
+                    r"\b(?:all|both|each)\s+(?:models?|methods?|approaches?|variants?|conditions?)\s+"
+                    r"but\s+not\s*$", clause[:match.start()], re.I,
+                )
+                if (
+                    _QUALIFIED_SCOPE.search(lead[-24:])
+                    and not re.search(r"\bwe\s*$", lead, re.I)
+                    and not collective_exclusion_prefix
+                ):
                     continue
                 if re.search(r"\b(?:only\s+for|for\s+(?:the\s+)?)\s*(?:training\s+|validation\s+|depth\s+)?loss(?:es)?\b", clause[match.end():], re.I):
                     continue
@@ -312,6 +330,8 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                 tail = clause[match.end():]
                 if re.match(r"\s+(?:in|from|within)\s+(?:our|the|a)\s+subset\b", tail, re.I):
                     continue
+                if re.search(r"^[\s\"'”’)]*(?:is|was|are|were)?\s*(?:false|incorrect|untrue)\b", tail, re.I):
+                    continue
                 # A plain numeric statement describes exactly the recorded subset;
                 # it is not a claim that this number is the complete split.
                 if not is_full_claim:
@@ -321,6 +341,7 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                     or match.groupdict().get("active_subject")
                     or match.groupdict().get("result_subject")
                     or match.groupdict().get("achieved_subject")
+                    or match.groupdict().get("object_subject")
                 )
                 if subject and _QUALIFIED_SCOPE.search(subject):
                     continue
@@ -333,9 +354,15 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                     r"(?:evaluated|tested|benchmarked)\b",
                     clause, re.I,
                 )
+                if except_tail is None:
+                    except_tail = re.search(
+                        r"\b(?:all|both|each)\s+(?:models?|methods?|approaches?|variants?|conditions?)\s+"
+                        r"but\s+not\s+(.+?)\s+(?:was|were|is|are)\s+(?:evaluated|tested|benchmarked)\b",
+                        clause, re.I,
+                    )
                 collective_clause = bool(except_tail and re.search(
                     r"\b(?:all|both|each)\s+(?:models?|methods?|approaches?|variants?|conditions?)\b",
-                    clause[:except_tail.start()], re.I,
+                    clause[:match.start()] if match.start() else clause[:except_tail.start()], re.I,
                 ))
                 excluded = {
                     name for name in rows

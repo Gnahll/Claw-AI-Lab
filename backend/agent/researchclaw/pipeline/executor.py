@@ -9079,7 +9079,7 @@ def _execute_paper_revision(
         if _s20_figures_dir:
             import shutil as _shutil_fig
             for _existing_fig in _s20_figures_dir.iterdir():
-                if _existing_fig.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps"}:
+                if _existing_fig.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps", ".svg"}:
                     _dest = _s22_figures_dir / _existing_fig.name
                     if not _dest.exists():
                         _shutil_fig.copy2(_existing_fig, _dest)
@@ -9087,7 +9087,7 @@ def _execute_paper_revision(
             for _fp in _fig_prompts:
                 _fid = _fp.get("figure_id", "")
                 # Check common naming patterns
-                for _ext in (".png", ".jpg", ".jpeg"):
+                for _ext in (".png", ".jpg", ".jpeg", ".pdf", ".eps", ".svg"):
                     _candidate_name = _s22_figures_dir / f"{_fid}{_ext}"
                     if _candidate_name.exists():
                         _fp["output_path"] = str(_candidate_name)
@@ -9277,14 +9277,11 @@ def _generate_latex_package(
 
     # 1. Collect available figures first (need filenames for LLM prompt)
     _fig_files: list[str] = []
-    for _fig_src in [
-        stage_dir / "figures",
-        run_dir / "stage-16" / "charts",
-        run_dir / "stage-14" / "charts",
-    ]:
+    current_chart_dirs = [stage / "charts" for stage in _current_stage_dirs(run_dir, "stage-16", "stage-14")]
+    for _fig_src in [stage_dir / "figures", *current_chart_dirs]:
         if _fig_src.is_dir():
             for _fig_file in sorted(_fig_src.iterdir()):
-                if (_fig_file.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps", ".svg"}
+                if (_fig_file.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".eps"}
                         and _fig_file.name not in _fig_files):
                     _shutil_lp.copy2(_fig_file, fig_dir / _fig_file.name)
                     _fig_files.append(_fig_file.name)
@@ -10253,9 +10250,14 @@ def _execute_export_publish(
             len(_prompt_figures), _prompt_figures,
         )
 
-    # IMP-19 Layer 2: Reference every exported PNG not already cited. Existing
-    # method illustrations must not suppress injection of measured-result charts.
-    chart_files = sorted((stage_dir / "charts").glob("*.png"))
+    # IMP-19 Layer 2: Reference every exported raster/PDF chart not already
+    # cited. SVG is retained for Markdown export but not injected into the
+    # pdflatex package, which cannot compile it without conversion support.
+    _injectable_extensions = {".png", ".pdf", ".jpg", ".jpeg", ".eps"}
+    chart_files = sorted(
+        path for path in (stage_dir / "charts").iterdir()
+        if path.is_file() and path.suffix.lower() in _injectable_extensions
+    )
     referenced_charts = {
         Path(match.group(1).replace("\\", "/")).name
         for match in _MD_IMAGE_LINE_RE.finditer(final_paper)

@@ -1414,6 +1414,24 @@ caption: Method overview
         paper = (stage / "paper_final.md").read_text(encoding="utf-8")
         assert "charts/fig_main_comparison.png" in paper
 
+    @pytest.mark.parametrize("extension", ["pdf", "jpg", "jpeg", "eps"])
+    def test_export_auto_injects_supported_non_png_result_chart(
+        self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
+        monkeypatch: pytest.MonkeyPatch, extension: str,
+    ) -> None:
+        import researchclaw.templates.compiler as compiler
+        _write_prior_artifact(
+            run_dir, 19, "paper_revised.md", "# Test\n\n## Results\n\nMeasured results.\n"
+        )
+        charts = run_dir / "stage-16" / "charts"
+        charts.mkdir(parents=True)
+        (charts / f"fig_main.{extension}").write_bytes(b"result")
+        monkeypatch.setattr(compiler, "compile_latex", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("skip")))
+        stage = run_dir / "stage-25"
+        rc_executor._execute_export_publish(stage, run_dir, rc_config, adapters, llm=None)
+        paper = (stage / "paper_final.md").read_text(encoding="utf-8")
+        assert f"charts/fig_main.{extension}" in paper
+
     def test_export_compiles_with_relocated_figure_and_preserves_missing_evidence(
         self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
         monkeypatch: pytest.MonkeyPatch,
@@ -1492,18 +1510,26 @@ caption: Method overview
         assert rc_executor._current_stage_dirs(tmp_path, "stage-16")[0].name == "stage-16"
         assert rc_executor._read_figure_manifest(tmp_path) == {}
 
-    def test_latex_package_includes_svg_figures(
+    def test_latex_package_uses_current_refine_figures_and_skips_svg(
         self, run_dir: Path, rc_config: RCConfig,
     ) -> None:
         stage = run_dir / "stage-22"
-        figures = stage / "figures"
-        figures.mkdir(parents=True)
-        (figures / "method.svg").write_text("<svg/>", encoding="utf-8")
+        stage.mkdir()
+        current = run_dir / "stage-16_v2" / "charts"
+        old = run_dir / "stage-16_v1" / "charts"
+        current.mkdir(parents=True)
+        old.mkdir(parents=True)
+        (current / "fig_current.pdf").write_bytes(b"pdf")
+        (current / "method.svg").write_text("<svg/>", encoding="utf-8")
+        (old / "fig_old.png").write_bytes(b"old")
         artifacts = rc_executor._generate_latex_package(
-            stage, run_dir, rc_config, "# Paper\n\n![Method](figures/method.svg)\n", llm=None
+            stage, run_dir, rc_config, "# Paper\n\n![Current](charts/fig_current.pdf)\n", llm=None
         )
         assert "latex_package.zip" in artifacts
-        assert (stage / "latex_package" / "figures" / "method.svg").exists()
+        packaged = stage / "latex_package" / "figures"
+        assert (packaged / "fig_current.pdf").exists()
+        assert not (packaged / "fig_old.png").exists()
+        assert not (packaged / "method.svg").exists()
 
     def test_copy_experiment_source_skips_large_files(self, tmp_path: Path) -> None:
         exp = tmp_path / "experiment_final"
@@ -2285,9 +2311,10 @@ class TestPaperExperimentEvidence:
         assert "sample_losses" not in evidence
         assert "per_image" not in evidence
 
+    @pytest.mark.parametrize("extension", ["png", "svg"])
     def test_revision_reuses_only_current_stage20_figures(
         self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
-        monkeypatch: pytest.MonkeyPatch,
+        monkeypatch: pytest.MonkeyPatch, extension: str,
     ) -> None:
         draft = """# Paper
 
@@ -2301,15 +2328,15 @@ caption: Method
         old = run_dir / "stage-20_v2" / "figures"
         current.mkdir(parents=True, exist_ok=True)
         old.mkdir(parents=True, exist_ok=True)
-        (current / "method.png").write_bytes(b"current")
-        (old / "method.png").write_bytes(b"old")
+        (current / f"method.{extension}").write_bytes(b"current")
+        (old / f"method.{extension}").write_bytes(b"old")
         monkeypatch.setattr(rc_executor, "_generate_latex_package", lambda *args, **kwargs: [])
         stage = run_dir / "stage-22"
         stage.mkdir()
         rc_executor._execute_paper_revision(
             stage, run_dir, rc_config, adapters, llm=FakeLLMClient(draft)
         )
-        assert (stage / "figures" / "method.png").read_bytes() == b"current"
+        assert (stage / "figures" / f"method.{extension}").read_bytes() == b"current"
 
     def test_revision_receives_and_saves_authoritative_evidence(
         self,
@@ -2469,6 +2496,18 @@ caption: Method
             "All methods except Candidate were evaluated on the full validation split.", run_dir
         )
         assert findings and "Missing None/3" in findings[0]
+        edge_cases = {
+            "Candidate and Reference were evaluated on the full validation split.": True,
+            "The full validation split was used to evaluate Reference.": False,
+            "All methods but not Candidate were evaluated on the full validation split.": True,
+            "The sentence “We evaluated on the full validation split” is false.": False,
+            "Candidate achieved AP@50=50.0 on the full validation split.": True,
+            "Candidate achieved AP_{50}=50.0 on the full validation split.": True,
+            "The evaluation was conducted on the full validation split.": True,
+            "The evaluation was performed on the full validation split.": True,
+        }
+        for claim, conflict in edge_cases.items():
+            assert bool(rc_executor._paper_evidence_conflicts(claim, run_dir)) is conflict
 
     def test_full_scope_ignores_reference_sections(self, run_dir):
         measured = {"data_split": {"val": {"scene_count": 3}}, "conditions": {
