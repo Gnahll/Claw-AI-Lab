@@ -2,6 +2,14 @@
 
 FIRST_RUN_CONTRACT = """
 First-run readiness and frozen protocol:
+- Declare a long run's training_phase and planned optimizer steps in stage-09/exp_plan.yaml.
+  Implement RESEARCHCLAW_PILOT_UPDATES for the native supervised path. When set, use exactly
+  that many genuine total optimizer updates per rank across the planned short comparisons.
+  Stop training at the cap and finish evaluation on the planned held-out validation split.
+  Save outputs/model.pt, nondegenerate validation predictions, and results.json.pilot_validation
+  with split="validation", samples (evaluated count), metrics={condition: {metric_name: value}}.
+  Keep the original protocol, data, initialization, supervision, and normal training path.
+  Never use held-out test scores to select a method. Ignore this variable when it is unset.
 - Inspect the configured repository's actual model, loader and evaluation entrypoints.
   Resolve required local checkpoint paths and symlinks and read real image/label pairs
   before allocating the full training budget. Missing resources are explicit blockers;

@@ -171,7 +171,8 @@ class IterativeRefineRuntime:
         session.log("EXECUTE", "Starting iterative refinement turn loop...")
         turn_result = loop.run_turn(user_message)
 
-        verified_run = run_experiment(workspace, stage_dir / "verified_execution", config)
+        verified_run = run_experiment(workspace, stage_dir / "verified_execution", config,
+                                      review_client=llm, run_dir=run_dir)
         if not verified_run["success"]:
             return StageResult(
                 stage=Stage.ITERATIVE_REFINE, status=StageStatus.FAILED,

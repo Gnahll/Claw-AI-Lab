@@ -200,7 +200,14 @@ def main():
                 evidence["losses"].append(loss)
         return original_backward(tensor, *args, **kwargs)
 
+    limit = os.environ.get("RESEARCHCLAW_OBSERVED_UPDATE_LIMIT")
+    limit = int(limit) if limit is not None else None
+
     def before_step(optimizer, args, kwargs):
+        if limit is not None and evidence["optimizer_steps"] >= limit:
+            evidence["short_budget_exceeded"] = True
+            evidence_path.write_text(json.dumps(evidence), encoding="utf-8")
+            raise RuntimeError("Reached the supervised short-training limit before the next optimizer step")
         optimizers[id(optimizer)] = optimizer
         if not evidence["parameter_update_observed"] or (evidence["cuda_visible_devices"] and not evidence["cuda_update_observed"]):
             snapshots[id(optimizer)] = [
@@ -283,5 +290,33 @@ def main():
     return exit_code
 
 
+def budget_only(path):
+    """Allow inference/non-PyTorch runs, but a mislabelled PyTorch run still has the short cap."""
+    import importlib.util
+    sys.argv = ["main.py"]
+    sys.path.insert(0, str(Path.cwd()))
+    limit = int(os.environ["RESEARCHCLAW_OBSERVED_UPDATE_LIMIT"])
+    count = 0
+    def before(*_):
+        nonlocal count
+        if count >= limit:
+            path.write_text(json.dumps({"short_budget_exceeded": True, "optimizer_steps": count}), encoding="utf-8")
+            raise RuntimeError("Long PyTorch training requires supervised execution and a reviewed short pilot")
+        count += 1
+
+    handle = None
+    if importlib.util.find_spec("torch") is not None:
+        from torch.optim.optimizer import register_optimizer_step_pre_hook
+        handle = register_optimizer_step_pre_hook(before)
+    try:
+        runpy.run_path("main.py", run_name="__main__")
+    finally:
+        if handle:
+            handle.remove()
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    if sys.argv[2:] == ["--budget-only"]:
+        budget_only(Path(sys.argv[1]).resolve())
+    else:
+        raise SystemExit(main())

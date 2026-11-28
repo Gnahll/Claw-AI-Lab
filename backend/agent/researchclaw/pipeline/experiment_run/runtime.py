@@ -183,6 +183,7 @@ class ExperimentRunRuntime:
         verified_run, turn_result = self._supervised_run(
             workspace, stage_dir, config, loop, user_message, session, resumed=carried.is_file(),
             prior_training=prior_training, plan_path=plan if plan.is_file() else None, run_dir=run_dir,
+            review_client=llm,
         )
 
         # Copy results back
@@ -272,6 +273,7 @@ class ExperimentRunRuntime:
         prior_training: dict[str, Any] | None = None,
         plan_path: Path | None = None,
         run_dir: Path | None = None,
+        review_client: Any | None = None,
     ) -> tuple[dict[str, Any], TurnResult]:
         """Run main.py; on failure let the agent repair it once and rerun.
 
@@ -282,7 +284,9 @@ class ExperimentRunRuntime:
         """
         runs = stage_dir / "runs"
         ExperimentRunRuntime._archive_previous_launch(runs)
-        first = run_experiment(workspace, runs / "attempt-1", config, prior_training=prior_training)
+        review_options = {"run_dir": run_dir, "review_client": review_client} if review_client is not None else {}
+        first = run_experiment(workspace, runs / "attempt-1", config,
+                               prior_training=prior_training, **review_options)
         if first["success"]:
             return first, TurnResult()
         if plan_path is not None and run_dir is not None:
@@ -308,7 +312,8 @@ class ExperimentRunRuntime:
         if turn_result.errors:
             session.log("EXECUTE", "Repair turn failed; not rerunning: " + "; ".join(turn_result.errors))
             return {**first, "errors": [*first["errors"], *(f"Repair aborted: {e}" for e in turn_result.errors)]}, turn_result
-        second = run_experiment(workspace, runs / "attempt-2", config, prior_training=prior_training)
+        second = run_experiment(workspace, runs / "attempt-2", config,
+                                prior_training=prior_training, **review_options)
         if plan_path is not None and run_dir is not None:
             from researchclaw.pipeline.acceptance import release_gpu_identity, release_record_only
             release_gpu_identity(second, config)
