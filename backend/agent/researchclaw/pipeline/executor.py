@@ -9134,8 +9134,20 @@ def _resolve_export_figure_paths(source: str, stage_dir: Path, references: re.Pa
         if path.is_absolute() or ".." in path.parts:
             return match.group(0)
         target = stage_dir / path
-        if target.is_file() or (not path.suffix and any(target.with_suffix(s).is_file() for s in extensions)):
+        if target.is_file():
             return match.group(0)
+        if not path.suffix:
+            inferred = [target.with_suffix(s) for s in extensions if target.with_suffix(s).is_file()]
+            if len(inferred) == 1:
+                # TeX resolves extensionless graphics, Markdown renderers do not.
+                if references is _TEX_GRAPHIC_RE:
+                    return match.group(0)
+                new_path = inferred[0].relative_to(stage_dir).as_posix()
+                start = match.start(1) - match.start()
+                end = match.end(1) - match.start()
+                return match.group(0)[:start] + new_path + match.group(0)[end:]
+            if len(inferred) > 1:
+                return match.group(0)
         matches = [f for f in charts if f.name == path.name]
         if not matches:
             matches = [f for f in charts if f.name.casefold() == path.name.casefold()]
@@ -10139,9 +10151,11 @@ def _execute_export_publish(
     try:
         chart_dir = stage_dir / "charts"
         chart_dir.mkdir(parents=True, exist_ok=True)
-        # A resumed S25 reuses this dir; charts of the earlier attempt are stale.
-        for _stale in chart_dir.glob("fig_*.png"):
-            _stale.unlink()
+        # A resumed S25 reuses this dir; every chart from the earlier attempt is stale.
+        _chart_extensions = {".png", ".pdf", ".jpg", ".jpeg", ".svg", ".eps"}
+        for _stale in chart_dir.iterdir():
+            if _stale.is_file() and _stale.suffix.lower() in _chart_extensions:
+                _stale.unlink()
         charts: list[Path] = []
 
         # Check if FigureAgent produced charts in stage-16 or stage-14
@@ -10275,7 +10289,10 @@ def _execute_export_publish(
     artifacts.append("paper_reporting_contract.json")
     if (stage_dir / "paper_metric_chart.json").is_file():
         artifacts.append("paper_metric_chart.json")
-    if any((stage_dir / "charts").glob("*.png")):
+    if any(
+        path.is_file() and path.suffix.lower() in {".png", ".pdf", ".jpg", ".jpeg", ".svg", ".eps"}
+        for path in (stage_dir / "charts").iterdir()
+    ):
         artifacts.append("charts/")
     # F2.7: Post-process citations — [cite_key] → \cite{cite_key}
     # and copy final references.bib to export stage

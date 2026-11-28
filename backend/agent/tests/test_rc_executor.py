@@ -1276,6 +1276,7 @@ class TestExportPublishCodePackage:
         stage_dir = run_dir / "stage-25"
         (stage_dir / "charts").mkdir(parents=True)
         (stage_dir / "charts" / "fig_stale.png").write_bytes(b"old")
+        (stage_dir / "charts" / "method_comparison.png").write_bytes(b"old nonstandard chart")
         seen: list[bool] = []
 
         def fake_compile(tex_path: Path, max_attempts: int = 2):
@@ -1293,6 +1294,7 @@ class TestExportPublishCodePackage:
         assert (charts / "fig_main_comparison.png").exists()
         assert not (charts / "fig_main_results.png").exists()
         assert not (charts / "fig_stale.png").exists()
+        assert not (charts / "method_comparison.png").exists()
         assert seen == [True]
 
     def test_export_figure_resolution_preserves_existing_and_ambiguous_paths(self, tmp_path: Path) -> None:
@@ -1307,6 +1309,11 @@ class TestExportPublishCodePackage:
         )
         fixed = rc_executor._resolve_export_figure_paths(tex, tmp_path, rc_executor._TEX_GRAPHIC_RE)
         assert fixed == tex.replace("[width=2cm]{old/plot.pdf}", "[width=2cm]{charts/plot.pdf}")
+
+        markdown = "![Plot](charts/unique)"
+        (charts / "unique.png").touch()
+        fixed_md = rc_executor._resolve_export_figure_paths(markdown, tmp_path, rc_executor._MD_IMAGE_LINE_RE)
+        assert fixed_md == "![Plot](charts/unique.png)"
 
     def test_export_embeds_only_figures_available_in_this_export(
         self, run_dir: Path, rc_config: RCConfig, adapters: AdapterBundle,
@@ -2274,6 +2281,8 @@ class TestPaperExperimentEvidence:
 
     @pytest.mark.parametrize("claim, conflict", [
         ("We evaluated on all 312 ScanNet v2 validation scenes.", True),
+        ("Our model was evaluated on the full ScanNet validation split.", True),
+        ("We evaluated on all 2 validation scenes.", True),
         ("AP50 was measured on the complete ScanNet validation split.", True),
         ("The entire validation set was evaluated.", True),
         ("Spectral was evaluated on 312 validation scenes.", True),
@@ -2297,12 +2306,31 @@ class TestPaperExperimentEvidence:
             assert "Spectral 2/312" in findings[0]
 
     def test_subset_coverage_with_mixed_conditions(self, run_dir):
-        measured = {"data_split": {"val": {"scene_count": 3}}, "conditions": {
+        measured = {"data_split": {"val": {"scene_count": 3, "scene_ids": ["a", "b", "c"]}}, "conditions": {
             "Reference": {"evaluation": {"scenes": ["a", "b", "c"]}},
             "Candidate": {"evaluation": {"scenes": ["a", "b"]}}}}
         _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
         assert not rc_executor._paper_evidence_conflicts("Reference was evaluated on the full validation split.", run_dir)
         assert rc_executor._paper_evidence_conflicts("Candidate was evaluated on the full validation split.", run_dir)
+        assert rc_executor._paper_evidence_conflicts("We evaluated both models on all 3 validation scenes.", run_dir)
+        assert not rc_executor._paper_evidence_conflicts(
+            "Reference was evaluated on the full validation split, whereas Candidate was evaluated on two scenes.", run_dir)
+
+    def test_count_match_without_official_manifest_does_not_prove_full_split(self, run_dir):
+        measured = {"data_split": {"val": {"scene_count": 3}}, "conditions": {
+            "Method": {"evaluation": {"scenes": ["x", "y", "z"]}}}}
+        _write_prior_artifact(run_dir, 15, "results.json", json.dumps(measured))
+        assert rc_executor._paper_evidence_conflicts("Our model was evaluated on the full validation split.", run_dir)
+
+    def test_measured_results_uses_numeric_stage_version_order(self, run_dir):
+        for version, scene in ((9, "old"), (10, "new")):
+            stage = run_dir / f"stage-15_v{version}"
+            stage.mkdir(parents=True)
+            (stage / "results.json").write_text(json.dumps({
+                "conditions": {"Method": {"evaluation": {"scenes": [scene]}}}
+            }), encoding="utf-8")
+        from researchclaw.pipeline.paper_evidence import load_measured_results
+        assert load_measured_results(run_dir)["conditions"]["Method"]["evaluation"]["scenes"] == ["new"]
 
     def test_revision_preserves_rejection_when_all_drafts_overstate_coverage(self, run_dir, rc_config, adapters):
         _write_prior_artifact(run_dir, 20, "paper_draft.md", "# Results\nWe evaluated on the full validation split.")

@@ -122,7 +122,13 @@ def external_source_root(run_dir: Path) -> tuple[Path | None, str]:
 
 
 def load_measured_results(run_dir: Path) -> dict:
-    stages = sorted(run_dir.glob("stage-15*"), key=lambda p: (p.name == "stage-15", p.name), reverse=True)
+    def stage_key(path: Path) -> tuple[int, int]:
+        if path.name == "stage-15":
+            return (1, 0)
+        match = re.fullmatch(r"stage-15_v(\d+)", path.name)
+        return (0, int(match.group(1))) if match else (-1, 0)
+
+    stages = sorted(run_dir.glob("stage-15*"), key=stage_key, reverse=True)
     for stage in stages:
         for relative in ["results.json", "experiment_final/results.json", "experiment_final/results_v0.json"]:
             data = _read(stage / relative)
@@ -212,6 +218,11 @@ _SCOPE_ACTIVE = re.compile(
     rf"|(?:ap(?:\d+|\[[^\]]+\])?)\s+(?:is|was)\s+(?:measured|evaluated|computed|reported))"
     rf"\s+(?:(?:on|over|across|using)\s+)?{_SCOPE_OBJECT}\b", re.I,
 )
+_SCOPE_SUBJECT = re.compile(
+    rf"\b(?P<subject>(?:(?:our|the|both|each|all)\s+)?[a-z0-9_.-]+(?:\s+(?:model|approach|method|variant|condition))?)"
+    rf"\s+(?:was|were|is|are)\s+(?:evaluated|tested|benchmarked)\s+(?:on|over|across|using)\s+{_SCOPE_OBJECT}\b",
+    re.I,
+)
 _SCOPE_PASSIVE = re.compile(
     rf"\b{_SCOPE_OBJECT}\s+(?:was|were|is|are)\s+(?:used\s+(?:to\s+evaluate|for\s+evaluation)|evaluated)\b", re.I,
 )
@@ -231,10 +242,27 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
     declared = split["val"].get("scene_count")
     if type(declared) is not int or declared <= 0:
         return []
-    # reporting_contract owns scene-ID deduplication, split scope and the distinction from loss windows.
+    # A count match alone is not proof of official split membership. Only an
+    # explicit official scene manifest can establish a full-split claim.
+    official = split["val"].get("scene_ids")
+    official_ids = (
+        set(official) if isinstance(official, list) and len(official) == declared
+        and all(isinstance(scene, str) for scene in official) and len(set(official)) == declared
+        else None
+    )
     rows = reporting_contract(results)["conditions"]
-    subsets = {name: row["scene_count"] for name, row in rows.items() if row["evaluation_scope"] == "subset"}
-    if not subsets:
+    recorded = {}
+    for name, value in conditions.items():
+        evaluation = value.get("evaluation", {}) if isinstance(value, dict) else {}
+        scenes = evaluation.get("scenes") if isinstance(evaluation, dict) else None
+        ids = set(scenes) if isinstance(scenes, list) and all(isinstance(scene, str) for scene in scenes) else None
+        if ids is not None:
+            recorded[name] = ids
+    unsupported = {
+        name: row["scene_count"] for name, row in rows.items()
+        if name in recorded and (official_ids is None or recorded[name] != official_ids)
+    }
+    if not unsupported:
         return []
     conflicts = []
     text = re.sub(r"\x60\x60\x60.*?(?:\x60\x60\x60|$)", "", paper, flags=re.S)
@@ -245,7 +273,7 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
 
     for raw in _CLAUSE_LIMIT.split(text.partition("\n## References")[0]):
         clause = " ".join(raw.replace("**", "").split())
-        for pattern in (_SCOPE_ACTIVE, _SCOPE_PASSIVE, named_claim):
+        for pattern in (_SCOPE_ACTIVE, _SCOPE_SUBJECT, _SCOPE_PASSIVE, named_claim):
             for match in pattern.finditer(clause):
                 lead = re.split(r"[,;]|\bbut\b", clause[:match.start()], flags=re.I)[-1]
                 if _QUALIFIED_SCOPE.search(lead):
@@ -253,11 +281,25 @@ def evaluation_scope_conflicts(paper: str, results: dict) -> list[str]:
                 if re.search(r"\b(?:only\s+for|for\s+(?:the\s+)?)\s*(?:training\s+|validation\s+|depth\s+)?loss(?:es)?\b", clause[match.end():], re.I):
                     continue
                 claimed = int(match["count"]) if match["count"] else declared
-                named = {name for name in rows if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", clause, re.I)}
-                relevant = named or (set(rows) if len(subsets) == len(rows) == len(conditions) else set())
-                wrong = sorted(name for name in relevant if name in subsets and claimed > subsets[name])
+                tail = clause[match.end():]
+                if re.match(r"\s+(?:in|from|within)\s+(?:our|the|a)\s+subset\b", tail, re.I):
+                    continue
+                subject = match.groupdict().get("subject")
+                named = {
+                    name for name in rows
+                    if subject and re.search(rf"(?<!\w){re.escape(name)}(?!\w)", subject, re.I)
+                }
+                if not named and pattern is named_claim:
+                    named = {
+                        name for name in rows
+                        if re.search(rf"(?<!\w){re.escape(name)}(?!\w)", match.group(0), re.I)
+                    }
+                relevant = named or set(rows)
+                wrong = sorted(name for name in relevant if name in unsupported)
+                if match.group(0).lower().find("all") >= 0 and claimed != declared:
+                    wrong = sorted(set(wrong) | set(relevant))
                 if wrong:
-                    counts = ", ".join(f"{name} {subsets[name]}/{declared}" for name in wrong)
+                    counts = ", ".join(f"{name} {rows[name]['scene_count']}/{declared}" for name in wrong)
                     message = f"Evaluation scope: manuscript claims {claimed} validation scenes; recorded scene IDs cover {counts}."
                     if message not in conflicts:
                         conflicts.append(message)
